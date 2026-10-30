@@ -340,4 +340,19 @@
     border-top: 1px solid var(--border);
     margin: 1.2em 0;
   }
+  .markdown :global(.katex) {
+    font-size: 1.06em;
+  }
+  /* Wide display math scrolls inside itself instead of widening the page (same fix as tables). */
+  .markdown :global(.katex-block) {
+    overflow-x: auto;
+    overflow-y: hidden;
+    margin: 0.6em 0 1em;
+    padding: 4px 0;
+  }
+  .markdown :global(.katex-error) {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+    color: var(--danger, #c0392b);
+  }
 </style>
