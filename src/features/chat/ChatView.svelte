@@ -301,4 +301,10 @@
     box-shadow: var(--shadow-2);
     z-index: 2;
   }
+  /* Keep the pill opaque on hover: btn-outline's hover swaps in the translucent --bg-hover
+     wash, which lets dense content underneath (KaTeX math, code) bleed through. */
+  .jump.btn-outline:not(:disabled):hover {
+    background: var(--bg-elevated);
+    border-color: var(--accent);
+  }
 </style>
