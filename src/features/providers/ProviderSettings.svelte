@@ -1,6 +1,6 @@
 <script lang="ts">
   import { providerStore } from "./provider-store.svelte";
-  import { describeError, type ProviderConfig, type ProviderInput, type ProviderTestResult } from "$lib/ipc/commands";
+  import { describeError, type ProviderConfig, type ProviderInput, type ProviderTestResult, type TlsMode } from "$lib/ipc/commands";
 
   let { onclose }: { onclose: () => void } = $props();
 
@@ -13,6 +13,9 @@
     key_touched: boolean;
     include_usage: boolean;
     context_window: string;
+    tls_mode: TlsMode;
+    tls_ca_pem: string;
+    ca_touched: boolean;
   };
 
   const presets = [
@@ -29,7 +32,7 @@
   let dialog = $state<HTMLElement | null>(null);
 
   function blankForm(): Form {
-    return { id: null, name: "", base_url: "", default_model: "", api_key: "", key_touched: false, include_usage: true, context_window: "" };
+    return { id: null, name: "", base_url: "", default_model: "", api_key: "", key_touched: false, include_usage: true, context_window: "", tls_mode: "system", tls_ca_pem: "", ca_touched: false };
   }
 
   function startNew() {
@@ -48,6 +51,9 @@
       key_touched: false,
       include_usage: p.include_usage,
       context_window: p.context_window?.toString() ?? "",
+      tls_mode: p.tls_mode,
+      tls_ca_pem: p.tls_ca_pem ?? "",
+      ca_touched: false,
     };
     notice = null;
     testResult = null;
@@ -72,6 +78,9 @@
       api_key: f.key_touched ? f.api_key : null,
       include_usage: f.include_usage,
       context_window: Number.isFinite(ctx) && ctx !== null && ctx > 0 ? ctx : null,
+      tls_mode: f.tls_mode,
+      // Rust semantics: null = keep existing PEM, "" = clear, value = replace.
+      tls_ca_pem: f.ca_touched || !f.id ? f.tls_ca_pem : null,
     };
   }
 
@@ -207,6 +216,31 @@
               <span>Request token usage</span>
             </label>
           </div>
+          {#if editing.base_url.trim().startsWith("https://")}
+            <label>
+              <span>TLS certificate</span>
+              <select bind:value={editing.tls_mode}>
+                <option value="system">Verify with the OS trust store (recommended)</option>
+                <option value="custom_ca">Trust a specific certificate (self-signed)</option>
+                <option value="skip_verification">Skip verification — insecure, like curl -k</option>
+              </select>
+            </label>
+            {#if editing.tls_mode === "custom_ca"}
+              <label>
+                <span>Server certificate <small>(PEM — openssl s_client -connect host:port | openssl x509)</small></span>
+                <textarea
+                  rows="5"
+                  spellcheck="false"
+                  bind:value={editing.tls_ca_pem}
+                  oninput={() => editing && (editing.ca_touched = true)}
+                  placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"
+                ></textarea>
+              </label>
+            {/if}
+            {#if editing.tls_mode === "skip_verification"}
+              <p class="tls-warning">Connection stays encrypted but the server is not authenticated. Only use on a network you trust.</p>
+            {/if}
+          {/if}
 
           {#if testResult}
             <p class="result" class:ok={testResult.ok} class:bad={!testResult.ok} role="status">{testResult.message}</p>
@@ -389,5 +423,18 @@
   .muted {
     color: var(--fg-faint);
     font-size: 13px;
+  }
+  .tls-warning {
+    margin: 0;
+    padding: 8px 10px;
+    border-radius: var(--radius-md);
+    background: var(--danger-soft);
+    color: var(--danger);
+    font-size: 12.5px;
+  }
+  textarea {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    resize: vertical;
   }
 </style>

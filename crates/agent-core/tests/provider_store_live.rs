@@ -7,7 +7,7 @@ use std::sync::Arc;
 use agent_core::agent::{context, RunCoordinator, RunRequest};
 use agent_core::config::resolve_data_root;
 use agent_core::domain::{Message, Role, RunEventPayload};
-use agent_core::providers::registry::{ProviderInput, ProviderKind, ProviderStore};
+use agent_core::providers::registry::{ProviderInput, ProviderKind, ProviderStore, TlsMode};
 use agent_core::secrets::MemorySecretStore;
 use tokio::sync::mpsc;
 
@@ -36,6 +36,8 @@ async fn store_builds_provider_and_run_completes() {
             api_key: std::env::var("OPENGENT_TEST_OPENAI_KEY").ok(),
             include_usage: true,
             context_window: None,
+            tls_mode: TlsMode::System,
+            tls_ca_pem: None,
         })
         .unwrap();
 

@@ -30,6 +30,22 @@ pub enum ProviderKind {
     Simulated,
 }
 
+/// How strictly to verify the provider's TLS certificate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum TlsMode {
+    /// OS verifier + trust store (macOS Keychain / Windows store), the safe default.
+    #[default]
+    System,
+    /// Trust a specific PEM-encoded server certificate or private CA in `tls_ca_pem`.
+    /// This is the recommended option for self-signed LAN servers (pins to that cert).
+    CustomCa,
+    /// Skip verification entirely (`curl -k`). Encrypted but unauthenticated —
+    /// only acceptable on a trusted network.
+    SkipVerification,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ProviderConfig {
@@ -45,6 +61,11 @@ pub struct ProviderConfig {
     #[serde(default = "default_true")]
     pub include_usage: bool,
     pub context_window: Option<u32>,
+    #[serde(default)]
+    pub tls_mode: TlsMode,
+    /// PEM certificate to trust when `tls_mode` is `custom_ca`. Not a secret.
+    #[serde(default)]
+    pub tls_ca_pem: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -65,6 +86,10 @@ pub struct ProviderInput {
     #[serde(default = "default_true")]
     pub include_usage: bool,
     pub context_window: Option<u32>,
+    #[serde(default)]
+    pub tls_mode: TlsMode,
+    /// `Some("")` clears a stored PEM; `None` leaves it unchanged.
+    pub tls_ca_pem: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -105,6 +130,8 @@ fn simulated_config() -> ProviderConfig {
         has_api_key: false,
         include_usage: true,
         context_window: Some(8192),
+        tls_mode: TlsMode::System,
+        tls_ca_pem: None,
     }
 }
 
@@ -197,6 +224,17 @@ impl ProviderStore {
         }
         let base_url = normalize_base_url(&input.base_url)?;
         let id = input.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        if input.tls_mode == TlsMode::CustomCa
+            && input
+                .tls_ca_pem
+                .as_deref()
+                .is_some_and(|p| !p.trim().is_empty())
+        {
+            // Validate eagerly so a bad PEM fails at save time, not mid-run.
+            reqwest::tls::Certificate::from_pem(input.tls_ca_pem.as_deref().unwrap().as_bytes())
+                .map_err(|e| Error::InvalidInput(format!("certificate is not valid PEM: {e}")))?;
+        }
         let key_ref = api_key_ref(&id)?;
 
         let mut state = self.state.lock().unwrap();
@@ -223,10 +261,19 @@ impl ProviderStore {
                 .default_model
                 .map(|m| m.trim().to_owned())
                 .filter(|m| !m.is_empty()),
-            models: existing.map(|p| p.models).unwrap_or_default(),
+            models: existing
+                .as_ref()
+                .map(|p| p.models.clone())
+                .unwrap_or_default(),
             has_api_key,
             include_usage: input.include_usage,
             context_window: input.context_window,
+            tls_mode: input.tls_mode,
+            tls_ca_pem: match input.tls_ca_pem.as_deref() {
+                Some("") => None,
+                Some(pem) => Some(pem.trim().to_owned()),
+                None => existing.and_then(|p| p.tls_ca_pem),
+            },
         };
         match state.providers.iter_mut().find(|p| p.id == id) {
             Some(slot) => *slot = config.clone(),
@@ -282,7 +329,19 @@ impl ProviderStore {
         if config.has_api_key {
             c.api_key = self.secrets.get(&api_key_ref(&config.id)?)?;
         }
-        Ok(OpenAiCompatProvider::new(c, self.http.clone()))
+        let http = match config.tls_mode {
+            TlsMode::System => self.http.clone(),
+            TlsMode::SkipVerification => crate::http::client_insecure()?,
+            TlsMode::CustomCa => crate::http::client_with_extra_ca(
+                config.tls_ca_pem.as_deref().ok_or_else(|| {
+                    Error::InvalidInput(
+                        "TLS mode requires a certificate — paste the server's PEM certificate"
+                            .into(),
+                    )
+                })?,
+            )?,
+        };
+        Ok(OpenAiCompatProvider::new(c, http))
     }
 
     /// Discovers models where the protocol supports it and caches them on the config.
@@ -335,6 +394,8 @@ mod tests {
             api_key: Some("sk-test".into()),
             include_usage: true,
             context_window: None,
+            tls_mode: TlsMode::System,
+            tls_ca_pem: None,
         }
     }
 

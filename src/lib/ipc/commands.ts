@@ -16,6 +16,7 @@ import type { RunId } from "$lib/generated/bindings/RunId";
 import type { RunStarted } from "$lib/generated/bindings/RunStarted";
 import type { StoredMessage } from "$lib/generated/bindings/StoredMessage";
 import type { SecretProbe } from "$lib/generated/bindings/SecretProbe";
+import type { TlsMode } from "$lib/generated/bindings/TlsMode";
 
 export type {
   ActiveSelection,
@@ -33,6 +34,7 @@ export type {
   RunStarted,
   SecretProbe,
   StoredMessage,
+  TlsMode,
 };
 
 export function isCoreError(value: unknown): value is CoreError {

@@ -313,8 +313,35 @@ async fn run_stream(
     }
 }
 
+/// Walks the error source chain looking for a TLS certificate failure. These surface as
+/// connect-phase errors in reqwest, so they must be distinguished from "server unreachable".
+fn tls_cert_error(e: &reqwest::Error) -> bool {
+    let mut src = std::error::Error::source(&e);
+    while let Some(s) = src {
+        if s.downcast_ref::<rustls::Error>().is_some() {
+            return true;
+        }
+        // The platform verifier may wrap OS-specific errors (e.g. Security.framework codes)
+        // rather than rustls::Error; fall back to the message.
+        let msg = s.to_string().to_lowercase();
+        if msg.contains("certificate") || msg.contains("self signed") || msg.contains("self-signed")
+        {
+            return true;
+        }
+        src = s.source();
+    }
+    false
+}
+
 fn map_transport(config: &OpenAiCompatConfig, e: reqwest::Error) -> Error {
-    if e.is_connect() {
+    if tls_cert_error(&e) {
+        Error::Provider(format!(
+            "TLS certificate verification failed for {} — the server presents a self-signed or \
+             untrusted certificate. Trust its certificate in the OS, paste it as a custom CA in \
+             provider settings, or set TLS verification to 'skip verification'.",
+            config.base_url
+        ))
+    } else if e.is_connect() {
         Error::Provider(format!(
             "could not connect to {} — is the server running?",
             config.base_url
