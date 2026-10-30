@@ -2,6 +2,7 @@
 //! streaming, coalescing, cancellation and per-chat exclusivity; tool calls, approvals and
 //! context compilation are layered on in later phases.
 
+pub mod context;
 mod coordinator;
 mod emitter;
 

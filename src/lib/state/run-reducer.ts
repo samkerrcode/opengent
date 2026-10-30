@@ -12,13 +12,14 @@ export interface AssistantTurn {
   text: string;
   usage: Usage | null;
   error: string | null;
+  notices: string[];
   lastSeq: number;
   /** Set when a sequence gap was observed; the UI should request a snapshot (Phase 1+). */
   desynced: boolean;
 }
 
 export function emptyTurn(): AssistantTurn {
-  return { runId: null, phase: "queued", text: "", usage: null, error: null, lastSeq: -1, desynced: false };
+  return { runId: null, phase: "queued", text: "", usage: null, error: null, notices: [], lastSeq: -1, desynced: false };
 }
 
 export function isTerminal(phase: RunPhase): boolean {
@@ -43,6 +44,9 @@ export function applyRunEvent(turn: AssistantTurn, event: RunEvent): AssistantTu
       break;
     case "usage":
       next.usage = p.usage;
+      break;
+    case "notice":
+      next.notices = [...turn.notices, p.message];
       break;
     case "completed":
       next.phase = "completed";

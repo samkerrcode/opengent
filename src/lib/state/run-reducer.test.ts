@@ -36,3 +36,12 @@ describe("applyRunEvent", () => {
     expect(t.error).toBe("boom");
   });
 });
+
+describe("notices", () => {
+  it("accumulates notices without touching text", () => {
+    let t = applyRunEvent(emptyTurn(), ev(0, { type: "notice", message: "trimmed" }));
+    t = applyRunEvent(t, ev(1, { type: "text_delta", text: "hi" }));
+    expect(t.notices).toEqual(["trimmed"]);
+    expect(t.text).toBe("hi");
+  });
+});

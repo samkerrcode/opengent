@@ -1,9 +1,9 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use agent_core::agent::RunCoordinator;
-use agent_core::config::{resolve_data_root, DataRoot};
-use agent_core::providers::fake::FakeProvider;
-use agent_core::providers::ModelProvider;
+use agent_core::config::{product, resolve_data_root, DataRoot};
+use agent_core::providers::registry::ProviderStore;
 use agent_core::secrets::{MemorySecretStore, SecretStore};
 
 /// Upper bound on simultaneously generating chats.
@@ -13,8 +13,7 @@ pub struct AppState {
     pub data_root: DataRoot,
     pub coordinator: Arc<RunCoordinator>,
     pub secrets: Arc<dyn SecretStore>,
-    /// Phase 0 ships only the in-process fake provider; the registry replaces this in Phase 2.
-    pub provider: Arc<dyn ModelProvider>,
+    pub providers: ProviderStore,
 }
 
 impl AppState {
@@ -27,6 +26,13 @@ impl AppState {
                 Arc::new(MemorySecretStore::default())
             }
         };
+        // One pooled client for all providers. Per-request timeouts are set by the adapters.
+        let http = reqwest::Client::builder()
+            .user_agent(format!("{}/{}", product().slug, product().version))
+            .connect_timeout(Duration::from_secs(15))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .build()?;
+        let providers = ProviderStore::load(&data_root, secrets.clone(), http)?;
         Ok(Self {
             data_root,
             coordinator: RunCoordinator::new(
@@ -34,7 +40,7 @@ impl AppState {
                 tauri::async_runtime::handle().inner().clone(),
             ),
             secrets,
-            provider: Arc::new(FakeProvider::default()),
+            providers,
         })
     }
 }

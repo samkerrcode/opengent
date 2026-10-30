@@ -1,10 +1,13 @@
 //! IPC boundary. Every command validates its input, touches state only through `AppState`,
 //! and returns serializable DTOs. Secrets are never returned to the webview.
 
-use agent_core::agent::{RunRequest, RunSink};
+mod providers;
+
+pub use providers::*;
+
+use agent_core::agent::{context, RunRequest, RunSink};
 use agent_core::config::{product, ProductInfo};
-use agent_core::domain::{ChatId, Message, Role, RunEvent, RunId};
-use agent_core::providers::CompletionRequest;
+use agent_core::domain::{ChatId, ContentBlock, Message, RunEvent, RunId};
 use agent_core::secrets::SecretRef;
 use agent_core::Error;
 use serde::Serialize;
@@ -16,6 +19,8 @@ use crate::AppState;
 
 /// Hard cap on a single user prompt; larger inputs go through attachments (Phase 1).
 const MAX_PROMPT_CHARS: usize = 64 * 1024;
+/// Hard cap on history accepted from the webview per run (Phase 1 moves history into Rust).
+const MAX_HISTORY_MESSAGES: usize = 500;
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
@@ -48,35 +53,71 @@ impl RunSink for ChannelSink {
     }
 }
 
-/// `async` so Tauri executes it on its Tokio runtime: the coordinator spawns the run task with
-/// `tokio::spawn`, which panics when called from the main thread.
+/// Starts a run for `chat_id` using the given provider/model. `history` is the full
+/// conversation including the new user turn as its last message.
+///
+/// `async` so Tauri executes it off the main thread.
 #[tauri::command]
 pub async fn start_run(
     state: State<'_, AppState>,
     chat_id: ChatId,
-    prompt: String,
+    provider_id: String,
+    model: String,
+    history: Vec<Message>,
     on_event: Channel<RunEvent>,
 ) -> Result<RunId, Error> {
-    let prompt = prompt.trim();
-    if prompt.is_empty() {
+    if model.trim().is_empty() {
+        return Err(Error::InvalidInput("choose a model first".into()));
+    }
+    if history.is_empty() || history.len() > MAX_HISTORY_MESSAGES {
+        return Err(Error::InvalidInput("invalid conversation history".into()));
+    }
+    let last_user_len: usize = history
+        .last()
+        .map(|m| {
+            m.blocks
+                .iter()
+                .map(|b| match b {
+                    ContentBlock::Text { text } => text.chars().count(),
+                    _ => 0,
+                })
+                .sum()
+        })
+        .unwrap_or(0);
+    if last_user_len == 0 {
         return Err(Error::InvalidInput("prompt is empty".into()));
     }
-    if prompt.chars().count() > MAX_PROMPT_CHARS {
+    if last_user_len > MAX_PROMPT_CHARS {
         return Err(Error::InvalidInput(format!(
             "prompt exceeds {MAX_PROMPT_CHARS} characters"
         )));
     }
-    let request = RunRequest {
-        chat_id,
-        provider: state.provider.clone(),
-        completion: CompletionRequest {
-            model: "fake-1".into(),
-            system: None,
-            messages: vec![Message::text(Role::User, prompt)],
-            max_output_tokens: None,
+
+    let config = state.providers.get(&provider_id)?;
+    let provider = state.providers.build(&provider_id)?;
+    let compiled = context::compile(
+        model.trim(),
+        &history,
+        config
+            .context_window
+            .or(provider.capabilities().context_window),
+    );
+    let mut notices = Vec::new();
+    if compiled.trimmed_messages > 0 {
+        notices.push(format!(
+            "Older messages were left out to fit the model's context window ({} omitted).",
+            compiled.trimmed_messages
+        ));
+    }
+    state.coordinator.start(
+        RunRequest {
+            chat_id,
+            provider,
+            completion: compiled.request,
+            notices,
         },
-    };
-    state.coordinator.start(request, ChannelSink(on_event))
+        ChannelSink(on_event),
+    )
 }
 
 #[tauri::command]

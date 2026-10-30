@@ -3,6 +3,9 @@
 //! path: the coordinator receives events over a bounded channel.
 
 pub mod fake;
+pub mod openai_compat;
+pub mod registry;
+pub mod sse;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;

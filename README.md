@@ -8,9 +8,10 @@ with per-tool permissions.
 Built with **Tauri 2** (desktop shell), **Svelte 5 + TypeScript** (interface), and **Rust** for
 everything privileged: networking, secrets, persistence, the MCP client, and the agent loop.
 
-> **Status: Phase 0 of 8 complete.** The foundation builds, launches, and streams against a
-> simulated provider. No real model provider, chat persistence, or MCP tooling is wired up yet.
-> See [Roadmap](#roadmap).
+> **Status: Phases 0 and 2 complete; Phase 1 (persistence) is next.** You can connect any
+> OpenAI-compatible server (Ollama, LM Studio, vLLM, hosted gateways) and chat with streamed,
+> Markdown-rendered replies. Chats are not yet saved between launches, and MCP tooling is not
+> wired up. See [Roadmap](#roadmap).
 
 ---
 
@@ -29,7 +30,7 @@ OpenGent aims for:
 
 ## Quick start
 
-Prerequisites: Rust (stable, via `rustup`), Node 22+, and the
+Prerequisites: Rust (stable, via `rustup`), Node 24 LTS (`nvm use`), and the
 [Tauri system dependencies](https://v2.tauri.app/start/prerequisites/) for your OS
 (Xcode Command Line Tools on macOS; MSVC Build Tools + WebView2 on Windows).
 
@@ -40,9 +41,11 @@ npm run tauri:build    # release bundle in target/release/bundle/
 npm run verify         # svelte-check, vitest, cargo fmt/clippy/test
 ```
 
-Right now the composer is connected to an in-process **simulated provider**: it echoes your prompt
-in streamed chunks so the streaming pipeline, cancellation (Stop / Esc), and event ordering can be
-exercised without an account. Real providers arrive in Phase 2.
+Open **Providers** (⌘, / Ctrl+,) to add an OpenAI-compatible endpoint — presets for Ollama,
+LM Studio, vLLM and OpenRouter are included. API keys go straight to the OS keychain. A built-in
+**simulated provider** is always available for trying the interface without an account. For a fake
+server with realistic streaming, run `node scripts/dev/mock-openai-server.mjs` and point a
+provider at `http://localhost:8787/v1`.
 
 ## Architecture
 
@@ -96,8 +99,8 @@ Each phase has an acceptance gate that must pass before the next begins.
 | Phase | Scope | Status |
 |---|---|---|
 | **0 – Foundation** | Cross-platform Tauri/Svelte build, product identity, typed IPC, run coordinator with real streaming/cancellation, native keychain + rmcp feasibility, CI | ✅ Done (macOS verified; Windows via CI, not yet run) |
-| **1 – Workspace & persistence** | SQLite (WAL) chat history, search, attachments as immutable content-hashed snapshots, restart recovery, command palette, inspector panel | ⏳ Next |
-| **2 – Custom/local providers** | OpenAI-compatible Chat Completions streaming, provider/model settings, capability flags, incremental sanitized Markdown, context limits. *First usable chat.* | |
+| **1 – Workspace & persistence** | SQLite (WAL) chat history, search, attachments as immutable content-hashed snapshots, restart recovery, command palette, inspector panel | ⏳ Next (deliberately sequenced after Phase 2) |
+| **2 – Custom/local providers** | OpenAI-compatible Chat Completions streaming, provider/model settings, capability flags, incremental sanitized Markdown, context limits. *First usable chat.* | ✅ Done |
 | **3 – MCP agent** | stdio + Streamable HTTP servers, tool discovery, Always allow / Ask / Block policies, approval UI, full loop: model → approval → tool → result → model. *Agent alpha.* | |
 | **4 – OAuth** | Browser sign-in (authorization code + PKCE, U2M) and client credentials (M2M) for MCP servers; token lifecycle in the keychain | |
 | **5 – OpenAI & Anthropic native** | Responses API and Messages API adapters, provider-aware prompt caching, cross-provider context projection | |
@@ -116,11 +119,24 @@ Each phase has an acceptance gate that must pass before the next begins.
   stdio MCP handshake and tool listing with `@modelcontextprotocol/server-everything`.
 - 36 automated tests (30 core, 2 host, 4 UI), clippy-clean, bindings drift check.
 
+### What Phase 2 delivered
+
+- OpenAI-compatible adapter with an incremental SSE parser (tested at every byte split), friendly
+  error mapping (auth, 404, connection refused, idle timeout, truncated streams), cancellation.
+- Provider store: named connections persisted as JSON under the data root (secrets in the keychain
+  only), model discovery via `/models`, connection test, active provider/model selection.
+- Context compiler: versioned system prompt as a stable prefix, token budget with disclosed
+  trimming of the oldest turns (surfaced as a notice in the UI).
+- UI: provider settings dialog with presets, provider/model picker in the composer, sanitized
+  Markdown rendering (markdown-it with raw HTML off + DOMPurify), links opened via the OS browser,
+  retry/regenerate, chat search and delete, and a theme that works on the macOS 12 WebKit baseline.
+
 ### Known gaps
 
 - Windows build has not been executed yet (CI job exists).
 - No packaged end-to-end UI test; the webview path is verified manually via `tauri:dev`.
-- Chats are in-memory until Phase 1. Markdown rendering is plain text until Phase 2.
+- Chats are in-memory until Phase 1 (conversation history is sent from the UI on each run; Rust will own it after Phase 1).
+- Only the OpenAI-compatible protocol is implemented; tool calls in streams are ignored until Phase 3.
 - Builds are unsigned. The DMG step can fail if a previous build's image is still mounted
   (`hdiutil detach`); the `.app` itself is unaffected.
 

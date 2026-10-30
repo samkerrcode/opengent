@@ -3,4 +3,4 @@ import type { RunPhase } from "./RunPhase";
 import type { StopReason } from "./StopReason";
 import type { Usage } from "./Usage";
 
-export type RunEventPayload = { "type": "phase", phase: RunPhase, } | { "type": "text_delta", text: string, } | { "type": "usage", usage: Usage, } | { "type": "completed", stop_reason: StopReason, } | { "type": "cancelled" } | { "type": "failed", message: string, };
+export type RunEventPayload = { "type": "phase", phase: RunPhase, } | { "type": "text_delta", text: string, } | { "type": "usage", usage: Usage, } | { "type": "notice", message: string, } | { "type": "completed", stop_reason: StopReason, } | { "type": "cancelled" } | { "type": "failed", message: string, };

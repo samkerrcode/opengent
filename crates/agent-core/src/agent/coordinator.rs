@@ -27,6 +27,8 @@ pub struct RunRequest {
     pub chat_id: ChatId,
     pub provider: Arc<dyn ModelProvider>,
     pub completion: CompletionRequest,
+    /// Surfaced to the user before generation starts (e.g. "older messages were trimmed").
+    pub notices: Vec<String>,
 }
 
 struct ActiveRun {
@@ -136,6 +138,9 @@ async fn run_loop<S: RunSink>(
     emitter.emit(RunEventPayload::Phase {
         phase: RunPhase::Preparing,
     });
+    for message in request.notices {
+        emitter.emit(RunEventPayload::Notice { message });
+    }
     let mut rx = match request.provider.stream(request.completion, cancel.clone()) {
         Ok(rx) => rx,
         Err(e) => {
@@ -206,6 +211,7 @@ mod tests {
                 messages: vec![Message::text(Role::User, "ping")],
                 max_output_tokens: None,
             },
+            notices: Vec::new(),
         }
     }
 

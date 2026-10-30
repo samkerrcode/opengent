@@ -70,6 +70,10 @@ pub enum RunEventPayload {
     Usage {
         usage: Usage,
     },
+    /// Non-fatal, user-visible information about how the run was prepared (e.g. trimmed history).
+    Notice {
+        message: String,
+    },
     Completed {
         stop_reason: StopReason,
     },

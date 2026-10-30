@@ -1,17 +1,22 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import { commands, describeError, type AppInfo } from "$lib/ipc/commands";
   import { product } from "$lib/generated/product";
   import Sidebar from "$features/history/Sidebar.svelte";
   import ChatView from "$features/chat/ChatView.svelte";
+  import ProviderSettings from "$features/providers/ProviderSettings.svelte";
   import { chatStore } from "$features/chat/chat-store.svelte";
+  import { providerStore } from "$features/providers/provider-store.svelte";
 
   let appInfo = $state<AppInfo | null>(null);
   let bootError = $state<string | null>(null);
+  let settingsOpen = $state(false);
 
   onMount(async () => {
     try {
       appInfo = await commands.getAppInfo();
+      await providerStore.load();
     } catch (e) {
       bootError = describeError(e);
     }
@@ -20,17 +25,31 @@
 
   function onKeydown(e: KeyboardEvent) {
     const mod = e.metaKey || e.ctrlKey;
-    if (mod && e.key.toLowerCase() === "n") {
+    if (!mod) return;
+    if (e.key.toLowerCase() === "n") {
       e.preventDefault();
       chatStore.newChat();
+    } else if (e.key === ",") {
+      e.preventDefault();
+      settingsOpen = !settingsOpen;
     }
+  }
+
+  // Links in rendered Markdown open in the system browser; the webview never navigates.
+  function onClick(e: MouseEvent) {
+    const anchor = (e.target as HTMLElement | null)?.closest("a[href]");
+    if (!anchor) return;
+    e.preventDefault();
+    const href = anchor.getAttribute("href") ?? "";
+    if (/^https?:\/\//i.test(href)) void openUrl(href);
   }
 </script>
 
 <svelte:window onkeydown={onKeydown} />
+<svelte:document onclick={onClick} />
 
 <div class="shell">
-  <Sidebar {appInfo} />
+  <Sidebar {appInfo} onopensettings={() => (settingsOpen = true)} />
   <main class="canvas" aria-label="Conversation">
     {#if bootError}
       <div class="boot-error" role="alert">
@@ -38,10 +57,14 @@
         <span>{bootError}</span>
       </div>
     {:else if chatStore.active}
-      <ChatView chat={chatStore.active} />
+      <ChatView chat={chatStore.active} onopensettings={() => (settingsOpen = true)} />
     {/if}
   </main>
 </div>
+
+{#if settingsOpen}
+  <ProviderSettings onclose={() => (settingsOpen = false)} />
+{/if}
 
 <style>
   .shell {

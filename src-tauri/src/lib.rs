@@ -32,6 +32,12 @@ pub fn run() {
             commands::start_run,
             commands::cancel_run,
             commands::probe_secret_store,
+            commands::list_providers,
+            commands::save_provider,
+            commands::delete_provider,
+            commands::get_active_selection,
+            commands::set_active_selection,
+            commands::test_provider,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the desktop application");
