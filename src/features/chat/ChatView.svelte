@@ -11,6 +11,9 @@
   let scroller = $state<HTMLElement | null>(null);
   let composer = $state<Composer | null>(null);
   let pinnedToBottom = $state(true);
+  // Set on programmatic scrolls so the resulting scroll events are not mistaken for the user
+  // scrolling away (content growth between scrollTo and the scroll event used to unpin).
+  let expectedTop: number | null = null;
   let editingTitle = $state(false);
   let titleDraft = $state("");
 
@@ -20,8 +23,16 @@
     "Summarize the attached file in five bullets",
   ];
 
+  function scrollToBottom() {
+    if (!scroller) return;
+    expectedTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    scroller.scrollTop = expectedTop;
+  }
+
   function onScroll() {
     if (!scroller) return;
+    if (expectedTop !== null && Math.abs(scroller.scrollTop - expectedTop) < 4) return;
+    expectedTop = null;
     pinnedToBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48;
   }
 
@@ -44,7 +55,7 @@
       seenUserId = lastUser.id;
       pinnedToBottom = true;
     }
-    if (pinnedToBottom) tick().then(() => scroller?.scrollTo({ top: scroller.scrollHeight }));
+    if (pinnedToBottom) tick().then(scrollToBottom);
   });
 
   $effect(() => {
@@ -53,14 +64,14 @@
     seenUserId = null;
     editingTitle = false;
     tick().then(() => {
-      scroller?.scrollTo({ top: scroller.scrollHeight });
+      scrollToBottom();
       composer?.focus();
     });
   });
 
   function jumpToLatest() {
-    scroller?.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" });
     pinnedToBottom = true;
+    scroller?.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" });
   }
 
   function startRename() {
@@ -188,6 +199,7 @@
   .scroller {
     flex: 1;
     overflow-y: auto;
+    overflow-x: hidden;
     min-height: 0;
   }
   .column {
@@ -252,6 +264,7 @@
   .user {
     align-self: flex-end;
     max-width: 80%;
+    min-width: 0;
     background: var(--accent-soft);
     border-radius: var(--radius-xl) var(--radius-xl) var(--radius-sm) var(--radius-xl);
     padding: 10px 14px;

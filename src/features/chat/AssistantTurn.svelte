@@ -152,6 +152,13 @@
   .body {
     font-size: 15px;
     line-height: 1.65;
+    min-width: 0;
+  }
+  /* Long unbroken tokens (URLs, identifiers) must wrap instead of overflowing. */
+  .markdown {
+    overflow-wrap: break-word;
+    word-break: break-word;
+    min-width: 0;
   }
   /* Streaming cursor: rendered inside the last block element so it sits at the end of the
      last line instead of wrapping to a fresh line below the block. */
@@ -313,10 +320,14 @@
     padding-left: 12px;
     color: var(--fg-muted);
   }
+  /* display:block lets a too-wide table scroll inside itself instead of widening the page. */
   .markdown :global(table) {
+    display: block;
+    overflow-x: auto;
     border-collapse: collapse;
     margin: 0.6em 0 1em;
     font-size: 0.95em;
+    max-width: 100%;
   }
   .markdown :global(th),
   .markdown :global(td) {
