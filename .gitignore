@@ -1,0 +1,16 @@
+# Rust
+/target
+/src-tauri/target
+/src-tauri/gen/schemas
+
+# Node
+node_modules
+/dist
+
+# Generated from product.json (run `npm run gen:product`)
+/src/lib/generated/product.ts
+/src-tauri/tauri.product.conf.json
+
+# OS / editor
+.DS_Store
+*.log

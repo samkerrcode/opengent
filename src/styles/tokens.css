@@ -1,0 +1,55 @@
+/* Design tokens. One accent, neutral surfaces, light/dark via color-scheme. */
+:root {
+  color-scheme: light dark;
+
+  --font-sans: ui-sans-serif, -apple-system, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  --measure: 72ch;
+  --sidebar-width: 272px;
+
+  --motion-fast: 120ms;
+  --motion-base: 200ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+
+  --bg: light-dark(#f6f7f9, #0e1014);
+  --bg-elevated: light-dark(#ffffff, #151821);
+  --bg-sunken: light-dark(#eceef2, #0a0c10);
+  --border: light-dark(rgba(16, 20, 28, 0.1), rgba(255, 255, 255, 0.08));
+  --border-strong: light-dark(rgba(16, 20, 28, 0.2), rgba(255, 255, 255, 0.16));
+  --fg: light-dark(#14171d, #e8eaf0);
+  --fg-muted: light-dark(#5b6270, #9aa3b2);
+  --fg-faint: light-dark(#8a909c, #6b7383);
+  --accent: light-dark(#1f7aec, #6db2ff);
+  --accent-soft: light-dark(rgba(31, 122, 236, 0.12), rgba(109, 178, 255, 0.16));
+  --accent-fg: light-dark(#ffffff, #0b1220);
+  --success: light-dark(#1d8a4e, #5fd39a);
+  --warning: light-dark(#b26a00, #f2b64d);
+  --danger: light-dark(#c62f3a, #ff7b86);
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+}
+
+@media (prefers-contrast: more) {
+  :root {
+    --border: light-dark(rgba(16, 20, 28, 0.4), rgba(255, 255, 255, 0.4));
+    --fg-muted: var(--fg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-base: 0ms;
+  }
+}

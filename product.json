@@ -1,0 +1,9 @@
+{
+  "$comment": "Single source of product identity. displayName may change freely; slug, dataDirName and identifier are stable technical identities and renaming them requires a migration.",
+  "displayName": "OpenGent",
+  "slug": "opengent",
+  "dataDirName": ".opengent",
+  "identifier": "dev.opengent.desktop",
+  "version": "0.1.0",
+  "description": "Model-agnostic desktop agent workbench"
+}
