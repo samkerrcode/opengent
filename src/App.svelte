@@ -78,11 +78,19 @@
   .shell {
     display: grid;
     grid-template-columns: var(--sidebar-width) 1fr;
+    /* Explicit bounded row: an implicit auto row can grow with the canvas's content past
+       100% height, which scrolls the document and takes the sidebar with it. */
+    grid-template-rows: minmax(0, 1fr);
     height: 100%;
+    /* App shell never scrolls at the document level; inner regions scroll themselves. */
+    overflow: hidden;
   }
   .canvas {
     position: relative;
     min-width: 0;
+    /* Grid item min-height defaults to auto — without this it can force the row taller
+       than the viewport and push the shell into document scroll. */
+    min-height: 0;
     display: flex;
     flex-direction: column;
     background: var(--bg);
