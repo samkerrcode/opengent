@@ -38,6 +38,13 @@ pub fn run() {
             commands::get_active_selection,
             commands::set_active_selection,
             commands::test_provider,
+            commands::list_chats,
+            commands::search_chats,
+            commands::create_chat,
+            commands::get_chat,
+            commands::rename_chat,
+            commands::delete_chat,
+            commands::pick_attachments,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the desktop application");

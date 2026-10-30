@@ -9,9 +9,11 @@ pub mod agent;
 pub mod config;
 pub mod domain;
 pub mod error;
+pub mod http;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod providers;
 pub mod secrets;
+pub mod storage;
 
 pub use error::{Error, Result};

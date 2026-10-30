@@ -319,7 +319,7 @@ mod tests {
         let s = ProviderStore::load(
             &root,
             Arc::new(MemorySecretStore::default()),
-            reqwest::Client::new(),
+            crate::http::client().unwrap(),
         )
         .unwrap();
         (s, tmp)
@@ -355,7 +355,7 @@ mod tests {
         let s2 = ProviderStore::load(
             &root,
             Arc::new(MemorySecretStore::default()),
-            reqwest::Client::new(),
+            crate::http::client().unwrap(),
         )
         .unwrap();
         let list = s2.list();

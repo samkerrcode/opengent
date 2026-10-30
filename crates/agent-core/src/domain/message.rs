@@ -21,6 +21,14 @@ pub enum ContentBlock {
     Text {
         text: String,
     },
+    /// Reference to an imported attachment; expanded to labeled text when compiling context.
+    Attachment {
+        id: String,
+        name: String,
+        mime: String,
+        #[ts(type = "number")]
+        char_count: i64,
+    },
     ToolCall {
         id: String,
         name: String,

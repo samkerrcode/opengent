@@ -23,7 +23,7 @@ async fn store_builds_provider_and_run_completes() {
     let store = ProviderStore::load(
         &root,
         Arc::new(MemorySecretStore::default()),
-        reqwest::Client::new(),
+        agent_core::http::client().unwrap(),
     )
     .unwrap();
     let saved = store
@@ -52,7 +52,7 @@ async fn store_builds_provider_and_run_completes() {
         Role::User,
         "Say hello in one short sentence.",
     )];
-    let compiled = context::compile(&model, &history, None);
+    let compiled = context::compile(&model, &history, None, &Default::default());
     let coord = RunCoordinator::new(1, tokio::runtime::Handle::current());
     let (tx, mut rx) = mpsc::unbounded_channel();
     coord

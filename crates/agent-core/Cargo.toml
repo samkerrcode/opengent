@@ -21,7 +21,10 @@ tracing.workspace = true
 uuid = { workspace = true, features = ["v4", "serde"] }
 ts-rs.workspace = true
 dirs = "7.0.0"
-reqwest = { version = "0.13.5", features = ["json"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+sha2 = "0.11.1"
+reqwest.workspace = true
+rustls.workspace = true
 keyring-core = { version = "1.0.1", optional = true }
 rmcp = { version = "3.6.0", default-features = false, features = [
     "client",

@@ -5,6 +5,8 @@
 pub mod context;
 mod coordinator;
 mod emitter;
+mod recorder;
 
 pub use coordinator::{RunCoordinator, RunRequest, RunSink};
 pub use emitter::{EmitterConfig, RunEmitter};
+pub use recorder::RunRecorder;

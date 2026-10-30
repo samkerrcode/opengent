@@ -11,11 +11,13 @@
   let scroller = $state<HTMLElement | null>(null);
   let composer = $state<Composer | null>(null);
   let pinnedToBottom = $state(true);
+  let editingTitle = $state(false);
+  let titleDraft = $state("");
 
   const suggestions = [
     "Explain the difference between threads and async tasks",
     "Draft a concise project status update",
-    "Review this function for edge cases",
+    "Summarize the attached file in five bullets",
   ];
 
   function onScroll() {
@@ -31,20 +33,53 @@
   });
 
   $effect(() => {
-    void chat.id;
+    void chat.summary.id;
     pinnedToBottom = true;
-    tick().then(() => composer?.focus());
+    editingTitle = false;
+    tick().then(() => {
+      scroller?.scrollTo({ top: scroller.scrollHeight });
+      composer?.focus();
+    });
   });
 
   function jumpToLatest() {
     scroller?.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" });
     pinnedToBottom = true;
   }
+
+  function startRename() {
+    titleDraft = chat.summary.title;
+    editingTitle = true;
+  }
+  async function commitRename() {
+    editingTitle = false;
+    const t = titleDraft.trim();
+    if (t && t !== chat.summary.title) await chatStore.rename(chat, t);
+  }
 </script>
+
+<header class="topbar">
+  {#if editingTitle}
+    <input
+      class="title-input"
+      type="text"
+      bind:value={titleDraft}
+      maxlength="120"
+      onblur={commitRename}
+      onkeydown={(e) => (e.key === "Enter" ? commitRename() : e.key === "Escape" ? (editingTitle = false) : null)}
+      aria-label="Chat title"
+    />
+  {:else}
+    <button class="title" onclick={startRename} title="Rename">{chat.summary.title}</button>
+  {/if}
+  {#if chat.summary.model}<span class="topbar-meta">{chat.summary.model}</span>{/if}
+</header>
 
 <div class="scroller" bind:this={scroller} onscroll={onScroll}>
   <div class="column">
-    {#if chat.items.length === 0}
+    {#if !chat.loaded}
+      <p class="loading">Loading…</p>
+    {:else if chat.items.length === 0}
       <section class="empty">
         <div class="mark" aria-hidden="true"></div>
         <h1>What are we working on?</h1>
@@ -71,7 +106,14 @@
     {#each chat.items as item (item.id)}
       {#if item.kind === "user"}
         <article class="user selectable" aria-label="You">
-          <p>{item.text}</p>
+          {#if item.attachments.length}
+            <ul class="user-files">
+              {#each item.attachments as a (a.id)}
+                <li title="{a.char_count} characters">▤ {a.name}</li>
+              {/each}
+            </ul>
+          {/if}
+          {#if item.text}<p>{item.text}</p>{/if}
         </article>
       {:else}
         <AssistantTurnView turn={item.turn} model={item.model} onretry={() => chatStore.retry(chat)} />
@@ -87,12 +129,46 @@
 <Composer
   bind:this={composer}
   busy={chat.activeRunId !== null}
+  pending={chat.pending}
   onsend={(text) => chatStore.send(chat, text)}
   onstop={() => chatStore.stop(chat)}
+  onattach={() => chatStore.pickAttachments(chat)}
+  onremoveattachment={(id) => chatStore.removePending(chat, id)}
   {onopensettings}
 />
 
 <style>
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: 10px var(--space-6);
+    border-bottom: 1px solid var(--border);
+    min-height: 44px;
+  }
+  .title {
+    font-weight: 600;
+    padding: 4px 8px;
+    margin-left: -8px;
+    max-width: 60ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: block;
+  }
+  .title:hover {
+    background: var(--bg-hover);
+  }
+  .title-input {
+    max-width: 60ch;
+    padding: 4px 8px;
+    margin-left: -8px;
+    font-weight: 600;
+  }
+  .topbar-meta {
+    font-size: 12px;
+    color: var(--fg-faint);
+  }
   .scroller {
     flex: 1;
     overflow-y: auto;
@@ -106,8 +182,13 @@
     flex-direction: column;
     gap: var(--space-6);
   }
+  .loading {
+    color: var(--fg-faint);
+    text-align: center;
+    margin-top: 20vh;
+  }
   .empty {
-    margin-top: 12vh;
+    margin-top: 10vh;
     color: var(--fg-muted);
     display: grid;
     gap: var(--space-3);
@@ -159,11 +240,28 @@
     border-radius: var(--radius-xl) var(--radius-xl) var(--radius-sm) var(--radius-xl);
     padding: 10px 14px;
     font-size: 15px;
+    display: grid;
+    gap: 6px;
   }
   .user p {
     margin: 0;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+  }
+  .user-files {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: 12.5px;
+  }
+  .user-files li {
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
   }
   .jump {
     position: absolute;

@@ -8,10 +8,11 @@ with per-tool permissions.
 Built with **Tauri 2** (desktop shell), **Svelte 5 + TypeScript** (interface), and **Rust** for
 everything privileged: networking, secrets, persistence, the MCP client, and the agent loop.
 
-> **Status: Phases 0 and 2 complete; Phase 1 (persistence) is next.** You can connect any
+> **Status: Phases 0, 1, and 2 complete; Phase 3 (MCP agent) is next.** You can connect any
 > OpenAI-compatible server (Ollama, LM Studio, vLLM, hosted gateways) and chat with streamed,
-> Markdown-rendered replies. Chats are not yet saved between launches, and MCP tooling is not
-> wired up. See [Roadmap](#roadmap).
+> Markdown-rendered replies. Chats persist between launches in `~/.opengent`, with search,
+> rename, attachments, and recovery of interrupted runs. MCP tooling is not wired up yet.
+> See [Roadmap](#roadmap).
 
 ---
 
@@ -99,7 +100,7 @@ Each phase has an acceptance gate that must pass before the next begins.
 | Phase | Scope | Status |
 |---|---|---|
 | **0 – Foundation** | Cross-platform Tauri/Svelte build, product identity, typed IPC, run coordinator with real streaming/cancellation, native keychain + rmcp feasibility, CI | ✅ Done (macOS verified; Windows via CI, not yet run) |
-| **1 – Workspace & persistence** | SQLite (WAL) chat history, search, attachments as immutable content-hashed snapshots, restart recovery, command palette, inspector panel | ⏳ Next (deliberately sequenced after Phase 2) |
+| **1 – Workspace & persistence** | SQLite (WAL) chat history, search, attachments as immutable content-hashed snapshots, restart recovery, command palette, inspector panel | ✅ Done (command palette and inspector deferred) |
 | **2 – Custom/local providers** | OpenAI-compatible Chat Completions streaming, provider/model settings, capability flags, incremental sanitized Markdown, context limits. *First usable chat.* | ✅ Done |
 | **3 – MCP agent** | stdio + Streamable HTTP servers, tool discovery, Always allow / Ask / Block policies, approval UI, full loop: model → approval → tool → result → model. *Agent alpha.* | |
 | **4 – OAuth** | Browser sign-in (authorization code + PKCE, U2M) and client credentials (M2M) for MCP servers; token lifecycle in the keychain | |
@@ -119,6 +120,19 @@ Each phase has an acceptance gate that must pass before the next begins.
   stdio MCP handshake and tool listing with `@modelcontextprotocol/server-everything`.
 - 36 automated tests (30 core, 2 host, 4 UI), clippy-clean, bindings drift check.
 
+### What Phase 1 delivered
+
+- SQLite (WAL) database under the data root on a dedicated worker thread, with schema migrations;
+  chats, messages, and attachment join tables.
+- Rust-owned history: `start_run` loads prior turns from the database, records streamed deltas as
+  checkpoints through `RunRecorder`, and finalizes each message (completed / cancelled / failed).
+  Startup recovery marks runs that were in-progress at shutdown as interrupted.
+- Attachments: native file picker, bounded text import with binary/oversized rejection, SHA-256
+  content-addressed blobs under `~/.opengent/attachments` with deduplication, and labeled
+  expansion into the model context.
+- UI: chat list/sidebar now backed by persisted summaries, rename and delete, attachment chips in
+  the composer, and interrupted/failed states restored on reload.
+
 ### What Phase 2 delivered
 
 - OpenAI-compatible adapter with an incremental SSE parser (tested at every byte split), friendly
@@ -135,7 +149,8 @@ Each phase has an acceptance gate that must pass before the next begins.
 
 - Windows build has not been executed yet (CI job exists).
 - No packaged end-to-end UI test; the webview path is verified manually via `tauri:dev`.
-- Chats are in-memory until Phase 1 (conversation history is sent from the UI on each run; Rust will own it after Phase 1).
+- Command palette and inspector panel from the Phase 1 scope are deferred (sidebar search covers
+  the primary need for now).
 - Only the OpenAI-compatible protocol is implemented; tool calls in streams are ignored until Phase 3.
 - Builds are unsigned. The DMG step can fail if a previous build's image is still mounted
   (`hdiutil detach`); the `.app` itself is unaffected.

@@ -16,11 +16,13 @@
   onMount(async () => {
     try {
       appInfo = await commands.getAppInfo();
-      await providerStore.load();
+      await Promise.all([providerStore.load(), chatStore.loadList()]);
     } catch (e) {
       bootError = describeError(e);
     }
-    if (chatStore.chats.length === 0) chatStore.newChat();
+    const first = chatStore.chats[0];
+    if (first) await chatStore.select(first.summary.id);
+    else await chatStore.newChat();
   });
 
   function onKeydown(e: KeyboardEvent) {
@@ -28,7 +30,7 @@
     if (!mod) return;
     if (e.key.toLowerCase() === "n") {
       e.preventDefault();
-      chatStore.newChat();
+      void chatStore.newChat();
     } else if (e.key === ",") {
       e.preventDefault();
       settingsOpen = !settingsOpen;
@@ -59,6 +61,12 @@
     {:else if chatStore.active}
       <ChatView chat={chatStore.active} onopensettings={() => (settingsOpen = true)} />
     {/if}
+    {#if chatStore.error}
+      <div class="toast" role="alert">
+        <span>{chatStore.error}</span>
+        <button class="btn-ghost btn-sm" onclick={() => (chatStore.error = null)} aria-label="Dismiss">✕</button>
+      </div>
+    {/if}
   </main>
 </div>
 
@@ -78,6 +86,24 @@
     display: flex;
     flex-direction: column;
     background: var(--bg);
+  }
+  .toast {
+    position: absolute;
+    left: 50%;
+    bottom: var(--space-4);
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 8px 10px 8px 14px;
+    border-radius: var(--radius-lg);
+    background: var(--bg-elevated);
+    border: 1px solid var(--danger);
+    color: var(--danger);
+    box-shadow: var(--shadow-2);
+    font-size: 13px;
+    z-index: 5;
+    max-width: 70%;
   }
   .boot-error {
     margin: auto;

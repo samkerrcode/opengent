@@ -5,21 +5,20 @@
 
   let { appInfo, onopensettings }: { appInfo: AppInfo | null; onopensettings: () => void } = $props();
 
-  let query = $state("");
-
   const groups = $derived.by(() => {
-    const q = query.trim().toLowerCase();
-    const today: typeof chatStore.chats = [];
-    const earlier: typeof chatStore.chats = [];
+    const now = Date.now();
     const startOfDay = new Date().setHours(0, 0, 0, 0);
+    const week = startOfDay - 6 * 86_400_000;
+    const buckets: { label: string; chats: typeof chatStore.chats }[] = [
+      { label: "Today", chats: [] },
+      { label: "Previous 7 days", chats: [] },
+      { label: "Older", chats: [] },
+    ];
     for (const c of chatStore.chats) {
-      if (q && !c.title.toLowerCase().includes(q)) continue;
-      (c.createdAt >= startOfDay ? today : earlier).push(c);
+      const t = Math.min(c.summary.updated_at, now);
+      (t >= startOfDay ? buckets[0] : t >= week ? buckets[1] : buckets[2])!.chats.push(c);
     }
-    return [
-      { label: "Today", chats: today },
-      { label: "Earlier", chats: earlier },
-    ].filter((g) => g.chats.length > 0);
+    return buckets.filter((g) => g.chats.length > 0);
   });
 </script>
 
@@ -36,29 +35,34 @@
 
   <label class="search">
     <span class="visually-hidden">Search chats</span>
-    <input type="text" placeholder="Search" bind:value={query} />
+    <input type="text" placeholder="Search chats" value={chatStore.query} oninput={(e) => chatStore.setQuery(e.currentTarget.value)} />
   </label>
 
   <div class="history">
     {#each groups as group (group.label)}
       <div class="group-label" id="group-{group.label}">{group.label}</div>
       <ul class="group" aria-labelledby="group-{group.label}">
-        {#each group.chats as chat (chat.id)}
-          <li class="row" class:active={chat.id === chatStore.activeId}>
+        {#each group.chats as chat (chat.summary.id)}
+          <li class="row" class:active={chat.summary.id === chatStore.activeId}>
             <button
               class="chat-item"
-              aria-current={chat.id === chatStore.activeId ? "page" : undefined}
-              onclick={() => chatStore.select(chat.id)}
+              aria-current={chat.summary.id === chatStore.activeId ? "page" : undefined}
+              onclick={() => chatStore.select(chat.summary.id)}
             >
               {#if chat.activeRunId}<span class="dot" role="img" aria-label="generating"></span>{/if}
-              <span class="chat-title">{chat.title}</span>
+              <span class="chat-title">{chat.summary.title}</span>
             </button>
-            <button class="delete" aria-label="Delete chat" title="Delete" onclick={() => chatStore.remove(chat.id)}>✕</button>
+            <button
+              class="delete"
+              aria-label="Delete chat"
+              title="Delete"
+              onclick={() => confirm(`Delete "${chat.summary.title}"? This cannot be undone.`) && chatStore.remove(chat.summary.id)}
+            >✕</button>
           </li>
         {/each}
       </ul>
     {:else}
-      <p class="none">{query ? "No matching chats." : "No chats yet."}</p>
+      <p class="none">{chatStore.query ? "No matching chats." : "No chats yet."}</p>
     {/each}
   </div>
 

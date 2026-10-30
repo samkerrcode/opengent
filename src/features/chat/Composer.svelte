@@ -1,12 +1,24 @@
 <script lang="ts">
   import ModelPicker from "$features/providers/ModelPicker.svelte";
+  import type { AttachmentMeta } from "$lib/ipc/commands";
 
   let {
     busy,
+    pending,
     onsend,
     onstop,
+    onattach,
+    onremoveattachment,
     onopensettings,
-  }: { busy: boolean; onsend: (text: string) => void; onstop: () => void; onopensettings: () => void } = $props();
+  }: {
+    busy: boolean;
+    pending: AttachmentMeta[];
+    onsend: (text: string) => void;
+    onstop: () => void;
+    onattach: () => void;
+    onremoveattachment: (id: string) => void;
+    onopensettings: () => void;
+  } = $props();
 
   let value = $state("");
   let textarea = $state<HTMLTextAreaElement | null>(null);
@@ -15,10 +27,11 @@
     textarea?.focus();
   }
 
+  const canSend = $derived(!busy && (value.trim().length > 0 || pending.length > 0));
+
   function submit() {
-    const text = value.trim();
-    if (!text || busy) return;
-    onsend(text);
+    if (!canSend) return;
+    onsend(value.trim());
     value = "";
     textarea?.focus();
   }
@@ -29,6 +42,10 @@
       submit();
     }
     if (e.key === "Escape" && busy) onstop();
+  }
+
+  function fmtChars(n: number) {
+    return n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k chars` : `${n} chars`;
   }
 
   $effect(() => {
@@ -42,13 +59,25 @@
 
 <form class="composer" onsubmit={(e) => (e.preventDefault(), submit())}>
   <div class="box">
+    {#if pending.length}
+      <ul class="pending" aria-label="Attachments for this message">
+        {#each pending as a (a.id)}
+          <li class="file">
+            <span class="file-icon" aria-hidden="true">▤</span>
+            <span class="file-name" title={a.name}>{a.name}</span>
+            <span class="file-meta">{fmtChars(a.char_count)}</span>
+            <button type="button" class="file-remove" aria-label="Remove {a.name}" onclick={() => onremoveattachment(a.id)}>✕</button>
+          </li>
+        {/each}
+      </ul>
+    {/if}
     <label class="visually-hidden" for="composer-input">Message</label>
     <textarea
       id="composer-input"
       bind:this={textarea}
       bind:value
       rows="1"
-      placeholder="Message… (Shift+Enter for a new line)"
+      placeholder={pending.length ? "Ask about the attached files…" : "Message… (Shift+Enter for a new line)"}
       onkeydown={onKeydown}
       autocomplete="off"
       spellcheck="true"
@@ -56,7 +85,9 @@
     <div class="row">
       <div class="context">
         <ModelPicker {onopensettings} />
-        <span class="chip" title="File attachments arrive in Phase 1">⌁ Attach</span>
+        <button type="button" class="chip" onclick={onattach} disabled={busy} title="Attach text files (up to 2 MiB each)">
+          ⌁ Attach{pending.length ? ` (${pending.length})` : ""}
+        </button>
         <span class="chip" title="MCP tools arrive in Phase 3">⚙ Tools</span>
       </div>
       {#if busy}
@@ -64,7 +95,7 @@
           <span class="stop-icon" aria-hidden="true"></span> Stop
         </button>
       {:else}
-        <button type="submit" class="btn-primary send" disabled={!value.trim()} title="Send (Enter)">
+        <button type="submit" class="btn-primary send" disabled={!canSend} title="Send (Enter)">
           Send <span aria-hidden="true">↵</span>
         </button>
       {/if}
@@ -93,6 +124,46 @@
   .box:focus-within {
     border-color: var(--accent);
     box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  .pending {
+    list-style: none;
+    margin: 0;
+    padding: 0 var(--space-1);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .file {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    padding: 4px 6px 4px 9px;
+    border-radius: var(--radius-md);
+    background: var(--bg-sunken);
+    border: 1px solid var(--border);
+    max-width: 260px;
+  }
+  .file-icon {
+    color: var(--accent);
+  }
+  .file-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .file-meta {
+    color: var(--fg-faint);
+    white-space: nowrap;
+  }
+  .file-remove {
+    padding: 0 4px;
+    color: var(--fg-faint);
+    border-radius: var(--radius-sm);
+  }
+  .file-remove:hover {
+    color: var(--danger);
+    background: var(--danger-soft);
   }
   textarea {
     width: 100%;

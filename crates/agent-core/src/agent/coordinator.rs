@@ -59,6 +59,18 @@ impl RunCoordinator {
 
     pub fn start<S: RunSink>(self: &Arc<Self>, request: RunRequest, sink: S) -> Result<RunId> {
         let run_id = RunId::new();
+        self.start_with_id(run_id, request, sink)?;
+        Ok(run_id)
+    }
+
+    /// Like `start`, but with a caller-chosen run id (so the host can persist it before the
+    /// first event is emitted).
+    pub fn start_with_id<S: RunSink>(
+        self: &Arc<Self>,
+        run_id: RunId,
+        request: RunRequest,
+        sink: S,
+    ) -> Result<()> {
         let cancel = CancellationToken::new();
         {
             let mut active = self.active.lock().expect("coordinator lock poisoned");
@@ -84,7 +96,7 @@ impl RunCoordinator {
                 .expect("coordinator lock poisoned")
                 .remove(&chat_id);
         });
-        Ok(run_id)
+        Ok(())
     }
 
     /// Requests cancellation. Returns `false` if the run is unknown or already finished.

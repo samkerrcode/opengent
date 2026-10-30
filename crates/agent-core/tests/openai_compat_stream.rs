@@ -101,8 +101,10 @@ data: [DONE]
 async fn streams_text_usage_and_done_across_odd_chunking() {
     for chunk in [1usize, 7, 64, 4096] {
         let base = serve_once("200 OK", OK_BODY, chunk, Duration::from_millis(1)).await;
-        let provider =
-            OpenAiCompatProvider::new(OpenAiCompatConfig::new("t", base), reqwest::Client::new());
+        let provider = OpenAiCompatProvider::new(
+            OpenAiCompatConfig::new("t", base),
+            agent_core::http::client().unwrap(),
+        );
         let (text, done, err, usage) = collect(&provider).await;
         assert_eq!(err, None, "chunk={chunk}");
         assert_eq!(text, "Hello → 世界", "chunk={chunk}");
@@ -120,8 +122,10 @@ async fn maps_auth_error_with_server_message() {
         Duration::ZERO,
     )
     .await;
-    let provider =
-        OpenAiCompatProvider::new(OpenAiCompatConfig::new("t", base), reqwest::Client::new());
+    let provider = OpenAiCompatProvider::new(
+        OpenAiCompatConfig::new("t", base),
+        agent_core::http::client().unwrap(),
+    );
     let (_, done, err, _) = collect(&provider).await;
     assert_eq!(done, None);
     let err = err.unwrap();
@@ -135,8 +139,10 @@ async fn maps_auth_error_with_server_message() {
 async fn truncated_stream_is_reported() {
     let body: &[u8] = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n";
     let base = serve_once("200 OK", body, 4096, Duration::ZERO).await;
-    let provider =
-        OpenAiCompatProvider::new(OpenAiCompatConfig::new("t", base), reqwest::Client::new());
+    let provider = OpenAiCompatProvider::new(
+        OpenAiCompatConfig::new("t", base),
+        agent_core::http::client().unwrap(),
+    );
     let (text, done, err, _) = collect(&provider).await;
     assert_eq!(text, "partial");
     assert_eq!(done, None);
@@ -151,8 +157,10 @@ async fn connection_refused_is_friendly() {
         listener.local_addr().unwrap().port()
     );
     drop(listener);
-    let provider =
-        OpenAiCompatProvider::new(OpenAiCompatConfig::new("t", base), reqwest::Client::new());
+    let provider = OpenAiCompatProvider::new(
+        OpenAiCompatConfig::new("t", base),
+        agent_core::http::client().unwrap(),
+    );
     let (_, _, err, _) = collect(&provider).await;
     assert!(err.unwrap().contains("could not connect"));
 }
@@ -160,8 +168,10 @@ async fn connection_refused_is_friendly() {
 #[tokio::test]
 async fn cancellation_stops_the_stream() {
     let base = serve_once("200 OK", OK_BODY, 8, Duration::from_millis(30)).await;
-    let provider =
-        OpenAiCompatProvider::new(OpenAiCompatConfig::new("t", base), reqwest::Client::new());
+    let provider = OpenAiCompatProvider::new(
+        OpenAiCompatConfig::new("t", base),
+        agent_core::http::client().unwrap(),
+    );
     let cancel = CancellationToken::new();
     let mut rx = provider.stream(request(), cancel.clone()).unwrap();
     let first = rx.recv().await;

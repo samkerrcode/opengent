@@ -1,6 +1,12 @@
-// In-memory chat state (Phase 1 replaces this with SQLite-backed commands; the shape mirrors the
-// canonical domain model so that swap is mechanical).
-import { commands, describeError, type Message } from "$lib/ipc/commands";
+// Chat state cached from Rust (SQLite is authoritative). Streaming events are applied to the
+// in-memory copy of the assistant message; Rust persists them independently via RunRecorder.
+import {
+  commands,
+  describeError,
+  type AttachmentMeta,
+  type ChatSummary,
+  type StoredMessage,
+} from "$lib/ipc/commands";
 import { applyRunEvent, emptyTurn, isTerminal, type AssistantTurn } from "$lib/state/run-reducer";
 import { providerStore } from "$features/providers/provider-store.svelte";
 
@@ -8,6 +14,7 @@ export interface UserTurn {
   kind: "user";
   id: string;
   text: string;
+  attachments: { id: string; name: string; char_count: number }[];
 }
 export interface AssistantTurnItem {
   kind: "assistant";
@@ -18,95 +25,226 @@ export interface AssistantTurnItem {
 export type TurnItem = UserTurn | AssistantTurnItem;
 
 export interface Chat {
-  id: string;
-  title: string;
-  createdAt: number;
+  summary: ChatSummary;
   items: TurnItem[];
+  loaded: boolean;
   activeRunId: string | null;
+  /** Attachments picked for the next message. */
+  pending: AttachmentMeta[];
 }
 
-const uuid = () => crypto.randomUUID();
+const SEND_DEBOUNCE_MS = 120;
 
-/** Converts UI turns into the canonical message list sent to Rust. Failed/empty assistant turns are skipped. */
-export function toHistory(items: TurnItem[]): Message[] {
-  const out: Message[] = [];
-  for (const item of items) {
-    if (item.kind === "user") {
-      out.push({ role: "user", blocks: [{ type: "text", text: item.text }] });
-    } else if (item.turn.text) {
-      out.push({ role: "assistant", blocks: [{ type: "text", text: item.turn.text }] });
-    }
+function fromStored(m: StoredMessage): TurnItem {
+  if (m.role === "user") {
+    const text = m.blocks
+      .filter((b): b is Extract<typeof b, { type: "text" }> => b.type === "text")
+      .map((b) => b.text)
+      .join("\n");
+    const attachments = m.blocks
+      .filter((b): b is Extract<typeof b, { type: "attachment" }> => b.type === "attachment")
+      .map((b) => ({ id: b.id, name: b.name, char_count: b.char_count }));
+    return { kind: "user", id: m.id, text, attachments };
   }
-  return out;
+  const text = m.blocks.filter((b) => b.type === "text").map((b) => (b.type === "text" ? b.text : "")).join("");
+  const turn: AssistantTurn = {
+    ...emptyTurn(),
+    runId: m.run_id,
+    text,
+    usage: m.usage,
+    error: m.error,
+    phase:
+      m.status === "complete" ? "completed"
+      : m.status === "cancelled" ? "cancelled"
+      : m.status === "failed" ? "failed"
+      : m.status === "interrupted" ? "failed"
+      : "generating",
+  };
+  if (m.status === "interrupted") turn.error = "Generation was interrupted when the app closed.";
+  return { kind: "assistant", id: m.id, model: m.model ?? "", turn };
 }
 
 class ChatStore {
   chats = $state<Chat[]>([]);
   activeId = $state<string | null>(null);
+  query = $state("");
+  error = $state<string | null>(null);
+  private searchTimer: ReturnType<typeof setTimeout> | null = null;
 
   get active(): Chat | null {
-    return this.chats.find((c) => c.id === this.activeId) ?? null;
+    return this.chats.find((c) => c.summary.id === this.activeId) ?? null;
   }
 
-  newChat(): Chat {
-    const current = this.active;
-    if (current && current.items.length === 0) return current;
-    const chat: Chat = { id: uuid(), title: "New chat", createdAt: Date.now(), items: [], activeRunId: null };
-    this.chats.unshift(chat);
-    this.activeId = chat.id;
+  private upsert(summary: ChatSummary): Chat {
+    let chat = this.chats.find((c) => c.summary.id === summary.id);
+    if (chat) {
+      chat.summary = summary;
+    } else {
+      chat = { summary, items: [], loaded: false, activeRunId: null, pending: [] };
+      this.chats.unshift(chat);
+    }
     return chat;
   }
 
-  select(id: string) {
+  async loadList() {
+    try {
+      const list = this.query.trim() ? await commands.searchChats(this.query) : await commands.listChats();
+      const ids = new Set(list.map((s) => s.id));
+      // Keep local state for chats still present; drop the rest (except an unsaved active chat).
+      const kept = new Map(this.chats.filter((c) => ids.has(c.summary.id)).map((c) => [c.summary.id, c]));
+      this.chats = list.map((s) => {
+        const existing = kept.get(s.id);
+        if (existing) {
+          existing.summary = s;
+          return existing;
+        }
+        return { summary: s, items: [], loaded: false, activeRunId: null, pending: [] };
+      });
+      this.error = null;
+    } catch (e) {
+      this.error = describeError(e);
+    }
+  }
+
+  setQuery(q: string) {
+    this.query = q;
+    if (this.searchTimer) clearTimeout(this.searchTimer);
+    this.searchTimer = setTimeout(() => void this.loadList(), SEND_DEBOUNCE_MS);
+  }
+
+  async ensureLoaded(chat: Chat) {
+    if (chat.loaded || chat.activeRunId) return;
+    try {
+      const detail = await commands.getChat(chat.summary.id);
+      chat.summary = detail.chat;
+      chat.items = detail.messages.map(fromStored);
+      chat.loaded = true;
+    } catch (e) {
+      this.error = describeError(e);
+    }
+  }
+
+  async newChat(): Promise<Chat | null> {
+    const current = this.active;
+    if (current && current.loaded && current.items.length === 0) return current;
+    try {
+      const summary = await commands.createChat();
+      const chat = this.upsert(summary);
+      chat.loaded = true;
+      this.activeId = chat.summary.id;
+      return chat;
+    } catch (e) {
+      this.error = describeError(e);
+      return null;
+    }
+  }
+
+  async select(id: string) {
     this.activeId = id;
+    const chat = this.active;
+    if (chat) await this.ensureLoaded(chat);
   }
 
-  remove(id: string) {
-    this.chats = this.chats.filter((c) => c.id !== id);
-    if (this.activeId === id) this.activeId = this.chats[0]?.id ?? null;
-    if (!this.activeId) this.newChat();
+  async rename(chat: Chat, title: string) {
+    try {
+      await commands.renameChat(chat.summary.id, title);
+      chat.summary.title = title.trim();
+    } catch (e) {
+      this.error = describeError(e);
+    }
   }
 
-  async send(chat: Chat, prompt: string) {
+  async remove(id: string) {
+    try {
+      await commands.deleteChat(id);
+    } catch (e) {
+      this.error = describeError(e);
+      return;
+    }
+    this.chats = this.chats.filter((c) => c.summary.id !== id);
+    if (this.activeId === id) {
+      this.activeId = this.chats[0]?.summary.id ?? null;
+      if (this.activeId) await this.select(this.activeId);
+      else await this.newChat();
+    }
+  }
+
+  async pickAttachments(chat: Chat) {
+    try {
+      const picked = await commands.pickAttachments();
+      for (const a of picked) if (!chat.pending.some((p) => p.id === a.id)) chat.pending.push(a);
+    } catch (e) {
+      this.error = describeError(e);
+    }
+  }
+
+  removePending(chat: Chat, id: string) {
+    chat.pending = chat.pending.filter((a) => a.id !== id);
+  }
+
+  async send(chat: Chat, prompt: string, replaceFrom: string | null = null) {
     const text = prompt.trim();
-    if (!text || chat.activeRunId) return;
+    if ((!text && chat.pending.length === 0) || chat.activeRunId) return;
     const selection = providerStore.active;
+    const attachmentIds = chat.pending.map((a) => a.id);
 
-    chat.items.push({ kind: "user", id: uuid(), text });
-    if (chat.items.length === 1) chat.title = text.length > 48 ? `${text.slice(0, 48)}…` : text;
-
-    const assistant: AssistantTurnItem = { kind: "assistant", id: uuid(), model: selection?.model ?? "", turn: emptyTurn() };
-    chat.items.push(assistant);
+    // Optimistic local turns; replaced by the stored copies once Rust confirms.
+    const userItem: UserTurn = {
+      kind: "user",
+      id: `local-${crypto.randomUUID()}`,
+      text,
+      attachments: chat.pending.map((a) => ({ id: a.id, name: a.name, char_count: a.char_count })),
+    };
+    const assistant: AssistantTurnItem = { kind: "assistant", id: `local-${crypto.randomUUID()}`, model: selection?.model ?? "", turn: emptyTurn() };
+    chat.items.push(userItem, assistant);
+    chat.pending = [];
+    if (chat.summary.title === "New chat" && text) chat.summary.title = text.length > 60 ? `${text.slice(0, 60)}…` : text;
 
     if (!selection) {
       assistant.turn = { ...assistant.turn, phase: "failed", error: "Choose a provider and model first (⌘, / Ctrl+,)." };
       return;
     }
 
-    const history = toHistory(chat.items);
+    chat.activeRunId = "pending";
     try {
-      const runId = await commands.startRun(chat.id, selection.provider_id, selection.model, history, (event) => {
-        assistant.turn = applyRunEvent(assistant.turn, event);
-        if (isTerminal(assistant.turn.phase)) chat.activeRunId = null;
-      });
-      if (!isTerminal(assistant.turn.phase)) chat.activeRunId = runId;
+      const started = await commands.startRun(
+        chat.summary.id,
+        selection.provider_id,
+        selection.model,
+        text,
+        attachmentIds,
+        replaceFrom,
+        (event) => {
+          assistant.turn = applyRunEvent(assistant.turn, event);
+          if (isTerminal(assistant.turn.phase)) {
+            chat.activeRunId = null;
+            chat.summary.updated_at = Date.now();
+          }
+        },
+      );
+      userItem.id = started.user_message.id;
+      assistant.id = started.assistant_message.id;
+      chat.summary.message_count = chat.items.length;
+      if (!isTerminal(assistant.turn.phase)) chat.activeRunId = started.run_id;
     } catch (e) {
       assistant.turn = { ...assistant.turn, phase: "failed", error: describeError(e) };
       chat.activeRunId = null;
     }
   }
 
-  /** Re-runs the last user prompt as a fresh attempt (the failed/stopped turn is replaced). */
+  /** Re-runs the last user prompt as a fresh attempt; Rust removes the old pair first. */
   async retry(chat: Chat) {
     const last = chat.items.at(-1);
     const prev = chat.items.at(-2);
     if (!last || last.kind !== "assistant" || !prev || prev.kind !== "user" || chat.activeRunId) return;
+    const replaceFrom = prev.id.startsWith("local-") ? null : prev.id;
     chat.items.splice(-2, 2);
-    await this.send(chat, prev.text);
+    chat.pending = prev.attachments.map((a) => ({ id: a.id, name: a.name, char_count: a.char_count, sha256: "", mime: "", size_bytes: 0 }));
+    await this.send(chat, prev.text, replaceFrom);
   }
 
   async stop(chat: Chat) {
-    if (chat.activeRunId) await commands.cancelRun(chat.activeRunId);
+    if (chat.activeRunId && chat.activeRunId !== "pending") await commands.cancelRun(chat.activeRunId);
   }
 }
 

@@ -1,14 +1,20 @@
 //! IPC boundary. Every command validates its input, touches state only through `AppState`,
 //! and returns serializable DTOs. Secrets are never returned to the webview.
 
+mod chats;
 mod providers;
 
+pub use chats::*;
 pub use providers::*;
 
-use agent_core::agent::{context, RunRequest, RunSink};
+use std::collections::HashMap;
+
+use agent_core::agent::{context, RunRecorder, RunRequest, RunSink};
 use agent_core::config::{product, ProductInfo};
-use agent_core::domain::{ChatId, ContentBlock, Message, RunEvent, RunId};
+use agent_core::domain::{ChatId, ContentBlock, Role, RunEvent, RunId};
 use agent_core::secrets::SecretRef;
+use agent_core::storage::chats as repo;
+use agent_core::storage::StoredMessage;
 use agent_core::Error;
 use serde::Serialize;
 use tauri::ipc::Channel;
@@ -17,10 +23,9 @@ use ts_rs::TS;
 
 use crate::AppState;
 
-/// Hard cap on a single user prompt; larger inputs go through attachments (Phase 1).
+/// Hard cap on a single user prompt; larger inputs go through attachments.
 const MAX_PROMPT_CHARS: usize = 64 * 1024;
-/// Hard cap on history accepted from the webview per run (Phase 1 moves history into Rust).
-const MAX_HISTORY_MESSAGES: usize = 500;
+const MAX_ATTACHMENTS_PER_MESSAGE: usize = 20;
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
@@ -53,55 +58,124 @@ impl RunSink for ChannelSink {
     }
 }
 
-/// Starts a run for `chat_id` using the given provider/model. `history` is the full
-/// conversation including the new user turn as its last message.
-///
-/// `async` so Tauri executes it off the main thread.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct RunStarted {
+    pub run_id: RunId,
+    pub user_message: StoredMessage,
+    pub assistant_message: StoredMessage,
+}
+
+/// Persists the user turn, creates the assistant placeholder, compiles context from stored
+/// history and starts streaming. If `replace_from` is set (retry), that message and everything
+/// after it is removed first.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn start_run(
     state: State<'_, AppState>,
     chat_id: ChatId,
     provider_id: String,
     model: String,
-    history: Vec<Message>,
+    prompt: String,
+    attachment_ids: Vec<String>,
+    replace_from: Option<String>,
     on_event: Channel<RunEvent>,
-) -> Result<RunId, Error> {
-    if model.trim().is_empty() {
+) -> Result<RunStarted, Error> {
+    let model = model.trim().to_owned();
+    let prompt = prompt.trim().to_owned();
+    if model.is_empty() {
         return Err(Error::InvalidInput("choose a model first".into()));
     }
-    if history.is_empty() || history.len() > MAX_HISTORY_MESSAGES {
-        return Err(Error::InvalidInput("invalid conversation history".into()));
-    }
-    let last_user_len: usize = history
-        .last()
-        .map(|m| {
-            m.blocks
-                .iter()
-                .map(|b| match b {
-                    ContentBlock::Text { text } => text.chars().count(),
-                    _ => 0,
-                })
-                .sum()
-        })
-        .unwrap_or(0);
-    if last_user_len == 0 {
+    if prompt.is_empty() && attachment_ids.is_empty() {
         return Err(Error::InvalidInput("prompt is empty".into()));
     }
-    if last_user_len > MAX_PROMPT_CHARS {
+    if prompt.chars().count() > MAX_PROMPT_CHARS {
         return Err(Error::InvalidInput(format!(
             "prompt exceeds {MAX_PROMPT_CHARS} characters"
         )));
     }
+    if attachment_ids.len() > MAX_ATTACHMENTS_PER_MESSAGE {
+        return Err(Error::InvalidInput("too many attachments".into()));
+    }
+    if state.coordinator.active_run(chat_id).is_some() {
+        return Err(Error::RunBusy);
+    }
 
     let config = state.providers.get(&provider_id)?;
     let provider = state.providers.build(&provider_id)?;
-    let compiled = context::compile(
-        model.trim(),
-        &history,
-        config
-            .context_window
-            .or(provider.capabilities().context_window),
-    );
+    let context_window = config
+        .context_window
+        .or(provider.capabilities().context_window);
+    let run_id = RunId::new();
+
+    // One database round trip: truncate (retry), persist the user turn, create the placeholder,
+    // and load everything needed to compile the request.
+    let store = state.attachments.clone();
+    let (pid, mdl) = (provider_id.clone(), model.clone());
+    let prepared = state
+        .db
+        .call(move |conn| {
+            if let Some(from) = replace_from {
+                repo::truncate_from(conn, chat_id, &from)?;
+            }
+            let mut blocks = Vec::new();
+            let mut texts = HashMap::new();
+            for id in &attachment_ids {
+                let meta = store
+                    .get(conn, id)?
+                    .ok_or_else(|| Error::NotFound(format!("attachment {id}")))?;
+                texts.insert(meta.id.clone(), store.read_text(&meta)?);
+                blocks.push(ContentBlock::Attachment {
+                    id: meta.id,
+                    name: meta.name,
+                    mime: meta.mime,
+                    char_count: meta.char_count,
+                });
+            }
+            if !prompt.is_empty() {
+                blocks.push(ContentBlock::Text { text: prompt });
+            }
+            let user_id =
+                repo::append_message(conn, chat_id, Role::User, &blocks, &attachment_ids)?;
+            let assistant_id = repo::begin_assistant_message(conn, chat_id, run_id, &pid, &mdl)?;
+            let messages = repo::list_messages(conn, chat_id)?;
+            // Attachment texts for earlier turns too, so history stays coherent.
+            for m in &messages {
+                for b in &m.blocks {
+                    if let ContentBlock::Attachment { id, .. } = b {
+                        if !texts.contains_key(id) {
+                            if let Some(meta) = store.get(conn, id)? {
+                                if let Ok(t) = store.read_text(&meta) {
+                                    texts.insert(id.clone(), t);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok((user_id, assistant_id, messages, texts))
+        })
+        .await?;
+    let (user_id, assistant_id, messages, texts) = prepared;
+
+    let user_message = messages
+        .iter()
+        .find(|m| m.id == user_id)
+        .cloned()
+        .ok_or_else(|| Error::Internal("user message vanished".into()))?;
+    let assistant_message = messages
+        .iter()
+        .find(|m| m.id == assistant_id)
+        .cloned()
+        .ok_or_else(|| Error::Internal("assistant message vanished".into()))?;
+
+    // History = everything complete/interrupted before the placeholder, as domain messages.
+    let history: Vec<_> = messages
+        .iter()
+        .filter(|m| m.id != assistant_id && !m.blocks.is_empty())
+        .map(StoredMessage::to_message)
+        .collect();
+    let compiled = context::compile(&model, &history, context_window, &texts);
     let mut notices = Vec::new();
     if compiled.trimmed_messages > 0 {
         notices.push(format!(
@@ -109,15 +183,38 @@ pub async fn start_run(
             compiled.trimmed_messages
         ));
     }
-    state.coordinator.start(
+
+    let sink = RunRecorder::new(ChannelSink(on_event), state.db.clone(), assistant_id);
+    let started = state.coordinator.start_with_id(
+        run_id,
         RunRequest {
             chat_id,
             provider,
             completion: compiled.request,
             notices,
         },
-        ChannelSink(on_event),
-    )
+        sink,
+    );
+    if let Err(e) = started {
+        let id = assistant_message.id.clone();
+        let msg = e.to_string();
+        state.db.spawn_job(move |c| {
+            repo::finalize_assistant_message(
+                c,
+                &id,
+                "",
+                agent_core::storage::MessageStatus::Failed,
+                None,
+                Some(&msg),
+            )
+        });
+        return Err(e);
+    }
+    Ok(RunStarted {
+        run_id,
+        user_message,
+        assistant_message,
+    })
 }
 
 #[tauri::command]

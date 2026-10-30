@@ -3,28 +3,36 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import type { ActiveSelection } from "$lib/generated/bindings/ActiveSelection";
 import type { AppInfo } from "$lib/generated/bindings/AppInfo";
+import type { AttachmentMeta } from "$lib/generated/bindings/AttachmentMeta";
+import type { ChatDetail } from "$lib/generated/bindings/ChatDetail";
+import type { ChatSummary } from "$lib/generated/bindings/ChatSummary";
 import type { ChatId } from "$lib/generated/bindings/ChatId";
 import type { Error as CoreError } from "$lib/generated/bindings/Error";
-import type { Message } from "$lib/generated/bindings/Message";
 import type { ProviderConfig } from "$lib/generated/bindings/ProviderConfig";
 import type { ProviderInput } from "$lib/generated/bindings/ProviderInput";
 import type { ProviderTestResult } from "$lib/generated/bindings/ProviderTestResult";
 import type { RunEvent } from "$lib/generated/bindings/RunEvent";
 import type { RunId } from "$lib/generated/bindings/RunId";
+import type { RunStarted } from "$lib/generated/bindings/RunStarted";
+import type { StoredMessage } from "$lib/generated/bindings/StoredMessage";
 import type { SecretProbe } from "$lib/generated/bindings/SecretProbe";
 
 export type {
   ActiveSelection,
   AppInfo,
+  AttachmentMeta,
+  ChatDetail,
   ChatId,
+  ChatSummary,
   CoreError,
-  Message,
   ProviderConfig,
   ProviderInput,
   ProviderTestResult,
   RunEvent,
   RunId,
+  RunStarted,
   SecretProbe,
+  StoredMessage,
 };
 
 export function isCoreError(value: unknown): value is CoreError {
@@ -45,13 +53,23 @@ export const commands = {
     chatId: ChatId,
     providerId: string,
     model: string,
-    history: Message[],
+    prompt: string,
+    attachmentIds: string[],
+    replaceFrom: string | null,
     onEvent: (event: RunEvent) => void,
-  ): Promise<RunId> {
+  ): Promise<RunStarted> {
     const channel = new Channel<RunEvent>();
     channel.onmessage = onEvent;
-    return invoke<RunId>("start_run", { chatId, providerId, model, history, onEvent: channel });
+    return invoke<RunStarted>("start_run", { chatId, providerId, model, prompt, attachmentIds, replaceFrom, onEvent: channel });
   },
+
+  listChats: () => invoke<ChatSummary[]>("list_chats"),
+  searchChats: (query: string) => invoke<ChatSummary[]>("search_chats", { query }),
+  createChat: () => invoke<ChatSummary>("create_chat"),
+  getChat: (id: ChatId) => invoke<ChatDetail>("get_chat", { id }),
+  renameChat: (id: ChatId, title: string) => invoke<void>("rename_chat", { id, title }),
+  deleteChat: (id: ChatId) => invoke<void>("delete_chat", { id }),
+  pickAttachments: () => invoke<AttachmentMeta[]>("pick_attachments"),
 
   cancelRun: (runId: RunId) => invoke<boolean>("cancel_run", { runId }),
 
