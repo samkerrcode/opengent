@@ -10,6 +10,7 @@ import "katex/dist/katex.min.css";
 import MarkdownIt, { type MarkdownIt as Md } from "markdown-it";
 import markdownItKatexPkg from "@vscode/markdown-it-katex";
 import DOMPurify from "dompurify";
+import hljs from "./hljs";
 
 // The plugin is CJS exporting `{ default: fn }`; bundler interop differs on whether the
 // default import unwraps it (vite dev does not, vitest does), so handle both shapes.
@@ -24,6 +25,20 @@ const md = new MarkdownIt({
   breaks: false,
   typographer: false,
 });
+
+// Non-empty return goes into <pre><code class="hljs"> as markup; hljs escapes the source
+// itself. Unknown/empty language falls back to escaped plain text (no auto-detect — it
+// guesses wrong often enough to be worse than none).
+md.options.highlight = (code, lang) => {
+  if (lang && hljs.getLanguage(lang)) {
+    try {
+      return hljs.highlight(code, { language: lang, ignoreIllegals: true }).value;
+    } catch {
+      // fall through to escaped plain text
+    }
+  }
+  return md.utils.escapeHtml(code);
+};
 
 // Add a language class and a copy-friendly wrapper around fenced code.
 const defaultFence = md.renderer.rules.fence!;

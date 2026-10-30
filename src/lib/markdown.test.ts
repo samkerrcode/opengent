@@ -31,6 +31,20 @@ describe("renderMarkdown", () => {
     expect(html).toContain("language-rust");
   });
 
+  it("syntax-highlights code in a registered language", () => {
+    const html = renderMarkdown("```rust\nlet x: i32 = 42;\n```");
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    expect(doc.querySelector(".hljs-keyword")?.textContent).toBe("let");
+    expect(doc.querySelector(".hljs-number")?.textContent).toBe("42");
+  });
+
+  it("falls back to plain escaped text for unknown languages", () => {
+    const html = renderMarkdown("```cobol\nDISPLAY x\n```");
+    expect(html).toContain("language-cobol");
+    expect(html).not.toContain("hljs-keyword");
+    expect(html).toContain("DISPLAY x");
+  });
+
   it("renders inline $...$ math as KaTeX", () => {
     const html = renderMarkdown("Working in $\\mathbb{Z}_n$ here.");
     const doc = new DOMParser().parseFromString(html, "text/html");
