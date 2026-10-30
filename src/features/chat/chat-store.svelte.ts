@@ -189,19 +189,33 @@ class ChatStore {
     const attachmentIds = chat.pending.map((a) => a.id);
 
     // Optimistic local turns; replaced by the stored copies once Rust confirms.
-    const userItem: UserTurn = {
-      kind: "user",
-      id: `local-${crypto.randomUUID()}`,
-      text,
-      attachments: chat.pending.map((a) => ({ id: a.id, name: a.name, char_count: a.char_count })),
-    };
-    const assistant: AssistantTurnItem = { kind: "assistant", id: `local-${crypto.randomUUID()}`, model: selection?.model ?? "", turn: emptyTurn() };
-    chat.items.push(userItem, assistant);
+    // IMPORTANT: after push(), mutations must go through chat.items[i] — the $state proxy —
+    // not the raw object reference, or the UI will not re-render.
+    const idx = chat.items.length;
+    chat.items.push(
+      {
+        kind: "user",
+        id: `local-${crypto.randomUUID()}`,
+        text,
+        attachments: chat.pending.map((a) => ({ id: a.id, name: a.name, char_count: a.char_count })),
+      },
+      { kind: "assistant", id: `local-${crypto.randomUUID()}`, model: selection?.model ?? "", turn: emptyTurn() },
+    );
     chat.pending = [];
     if (chat.summary.title === "New chat" && text) chat.summary.title = text.length > 60 ? `${text.slice(0, 60)}…` : text;
 
+    const assistantItem = (): AssistantTurnItem | null => {
+      const item = chat.items[idx + 1];
+      return item?.kind === "assistant" ? item : null;
+    };
+    const fail = (message: string) => {
+      const item = assistantItem();
+      if (item) item.turn = { ...item.turn, phase: "failed", error: message };
+      chat.activeRunId = null;
+    };
+
     if (!selection) {
-      assistant.turn = { ...assistant.turn, phase: "failed", error: "Choose a provider and model first (⌘, / Ctrl+,)." };
+      fail("Choose a provider and model first (⌘, / Ctrl+,).");
       return;
     }
 
@@ -215,20 +229,43 @@ class ChatStore {
         attachmentIds,
         replaceFrom,
         (event) => {
-          assistant.turn = applyRunEvent(assistant.turn, event);
-          if (isTerminal(assistant.turn.phase)) {
-            chat.activeRunId = null;
-            chat.summary.updated_at = Date.now();
+          try {
+            const item = assistantItem();
+            if (!item) return;
+            item.turn = applyRunEvent(item.turn, event);
+            if (isTerminal(item.turn.phase)) {
+              chat.activeRunId = null;
+              chat.summary.updated_at = Date.now();
+              // Rust already persisted the final state; pull it so the view matches the
+              // database even if intermediate events were missed.
+              void this.refresh(chat);
+            }
+          } catch (e) {
+            console.error("failed to apply run event", e, event);
           }
         },
       );
-      userItem.id = started.user_message.id;
-      assistant.id = started.assistant_message.id;
+      const user = chat.items[idx];
+      const asst = assistantItem();
+      if (user?.kind === "user") user.id = started.user_message.id;
+      if (asst) asst.id = started.assistant_message.id;
       chat.summary.message_count = chat.items.length;
-      if (!isTerminal(assistant.turn.phase)) chat.activeRunId = started.run_id;
+      if (!isTerminal(asst?.turn.phase ?? "queued")) chat.activeRunId = started.run_id;
     } catch (e) {
-      assistant.turn = { ...assistant.turn, phase: "failed", error: describeError(e) };
-      chat.activeRunId = null;
+      fail(describeError(e));
+    }
+  }
+
+  /** Re-reads a chat from SQLite, preserving any optimistic (unsent) tail items. */
+  private async refresh(chat: Chat) {
+    try {
+      const detail = await commands.getChat(chat.summary.id);
+      chat.summary = detail.chat;
+      const optimistic = chat.items.filter((i) => i.id.startsWith("local-"));
+      chat.items = [...detail.messages.map(fromStored), ...optimistic];
+      chat.loaded = true;
+    } catch {
+      // Keep the streamed state if the refetch fails.
     }
   }
 
