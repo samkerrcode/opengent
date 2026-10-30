@@ -6,6 +6,8 @@
   import Sidebar from "$features/history/Sidebar.svelte";
   import ChatView from "$features/chat/ChatView.svelte";
   import ProviderSettings from "$features/providers/ProviderSettings.svelte";
+  import ContextMenu, { type ContextMenuItem } from "$lib/components/ContextMenu.svelte";
+  import { copyText } from "$lib/clipboard";
   import { chatStore } from "$features/chat/chat-store.svelte";
   import { providerStore } from "$features/providers/provider-store.svelte";
 
@@ -37,6 +39,42 @@
     }
   }
 
+  let ctxMenu = $state<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
+
+  // Suppress the webview's browser-style context menu (Reload / Inspect Element) so the app
+  // feels native. Editable fields keep their native editing menu; .selectable regions (chat
+  // messages) get a minimal app-styled menu of real text operations instead — the native
+  // text menu can't be filtered and would still leak "Inspect Element" in dev builds.
+  function onContextMenu(e: MouseEvent) {
+    const el = e.target as HTMLElement | null;
+    if (el?.closest("input, textarea, [contenteditable='true']")) {
+      ctxMenu = null;
+      return;
+    }
+    e.preventDefault();
+    const region = el?.closest(".selectable");
+    if (!region) {
+      ctxMenu = null;
+      return;
+    }
+    const selection = window.getSelection()?.toString() ?? "";
+    ctxMenu = {
+      x: e.clientX,
+      y: e.clientY,
+      items: [
+        {
+          label: "Copy",
+          disabled: !selection,
+          action: () => void copyText(selection),
+        },
+        {
+          label: "Select All",
+          action: () => window.getSelection()?.selectAllChildren(region),
+        },
+      ],
+    };
+  }
+
   // Links in rendered Markdown open in the system browser; the webview never navigates.
   function onClick(e: MouseEvent) {
     const anchor = (e.target as HTMLElement | null)?.closest("a[href]");
@@ -47,7 +85,7 @@
   }
 </script>
 
-<svelte:window onkeydown={onKeydown} />
+<svelte:window onkeydown={onKeydown} oncontextmenu={onContextMenu} />
 <svelte:document onclick={onClick} />
 
 <div class="shell">
@@ -72,6 +110,10 @@
 
 {#if settingsOpen}
   <ProviderSettings onclose={() => (settingsOpen = false)} />
+{/if}
+
+{#if ctxMenu}
+  <ContextMenu x={ctxMenu.x} y={ctxMenu.y} items={ctxMenu.items} onclose={() => (ctxMenu = null)} />
 {/if}
 
 <style>
