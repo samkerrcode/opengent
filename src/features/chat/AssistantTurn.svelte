@@ -2,6 +2,7 @@
   import type { AssistantTurn } from "$lib/state/run-reducer";
   import { isTerminal } from "$lib/state/run-reducer";
   import { renderMarkdown } from "$lib/markdown";
+  import { copyText } from "$lib/clipboard";
 
   let { turn, model, onretry }: { turn: AssistantTurn; model: string; onretry: () => void } = $props();
 
@@ -31,9 +32,42 @@
     if (u.cache_read_tokens) parts.push(`${u.cache_read_tokens} cached`);
     return parts.join(" · ");
   });
+
+  let copied = $state(false);
+  let copyTimer: ReturnType<typeof setTimeout> | undefined;
+
+  // Copies the raw markdown source of the response (the streamed text is markdown already).
+  async function copyResponse() {
+    if (await copyText(turn.text)) {
+      copied = true;
+      clearTimeout(copyTimer);
+      copyTimer = setTimeout(() => (copied = false), 1400);
+    }
+  }
+
+  // Code-block copy buttons live inside {@html} output, so handle their clicks with one
+  // delegated listener on the article (imperative, to avoid an a11y warning on a div).
+  function onCopyClick(e: MouseEvent) {
+    const btn = (e.target as HTMLElement | null)?.closest<HTMLButtonElement>("button.code-copy");
+    if (!btn) return;
+    const code = btn.closest(".code-block")?.querySelector("pre code")?.textContent ?? "";
+    void copyText(code).then((ok) => {
+      if (!ok) return;
+      btn.classList.add("copied");
+      setTimeout(() => btn.classList.remove("copied"), 1400);
+    });
+  }
+
+  let articleEl = $state<HTMLElement>();
+  $effect(() => {
+    const el = articleEl;
+    if (!el) return;
+    el.addEventListener("click", onCopyClick);
+    return () => el.removeEventListener("click", onCopyClick);
+  });
 </script>
 
-<article class="assistant" aria-label="Assistant">
+<article class="assistant" aria-label="Assistant" bind:this={articleEl}>
   <div class="avatar" class:live aria-hidden="true"></div>
 
   <div class="content">
@@ -76,6 +110,24 @@
         </div>
       {/if}
     </div>
+
+    {#if turn.text}
+      <div class="actions">
+        <button
+          class="icon-btn"
+          class:copied
+          onclick={copyResponse}
+          title={copied ? "Copied" : "Copy response"}
+          aria-label="Copy response"
+        >
+          {#if copied}
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 8.5 6 12 13.5 4"/></svg>
+          {:else}
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5v-2A1.5 1.5 0 0 0 9 2H3.5A1.5 1.5 0 0 0 2 3.5V9a1.5 1.5 0 0 0 1.5 1.5h2"/></svg>
+          {/if}
+        </button>
+      </div>
+    {/if}
   </div>
 </article>
 
@@ -292,21 +344,67 @@
   .markdown :global(.code-block) {
     position: relative;
     margin: 0.6em 0 1em;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--code-bg);
+    /* Clip the header strip and pre to the block's rounded corners; pre scrolls internally. */
+    overflow: hidden;
   }
-  .markdown :global(.code-lang) {
-    position: absolute;
-    top: 6px;
-    right: 10px;
+  .markdown :global(.code-head) {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 3px 6px 3px 12px;
+    background: var(--bg-sunken);
+    border-bottom: 1px solid var(--border);
     font-size: 11px;
     color: var(--fg-faint);
     font-family: var(--font-mono);
+    min-height: 26px;
+  }
+  /* The icon is a -webkit-mask data-URI on a ::before so the glyph renders in currentColor
+     and no SVG markup is needed in sanitized HTML (DOMPurify strips SVG geometry attrs). */
+  .markdown :global(.code-copy) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border-radius: var(--radius-sm);
+    color: var(--fg-faint);
+  }
+  .markdown :global(.code-copy::before) {
+    content: "";
+    width: 13px;
+    height: 13px;
+    background-color: currentColor;
+    mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='5.5' y='5.5' width='8' height='8' rx='1.5'/%3E%3Cpath d='M10.5 5.5v-2A1.5 1.5 0 0 0 9 2H3.5A1.5 1.5 0 0 0 2 3.5V9a1.5 1.5 0 0 0 1.5 1.5h2'/%3E%3C/svg%3E");
+    -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='5.5' y='5.5' width='8' height='8' rx='1.5'/%3E%3Cpath d='M10.5 5.5v-2A1.5 1.5 0 0 0 9 2H3.5A1.5 1.5 0 0 0 2 3.5V9a1.5 1.5 0 0 0 1.5 1.5h2'/%3E%3C/svg%3E");
+    mask-position: center;
+    -webkit-mask-position: center;
+    mask-repeat: no-repeat;
+    -webkit-mask-repeat: no-repeat;
+    mask-size: contain;
+    -webkit-mask-size: contain;
+  }
+  .markdown :global(.code-copy:hover) {
+    background: var(--bg-hover);
+    color: var(--fg);
+  }
+  .markdown :global(.code-copy.copied) {
+    color: var(--success);
+  }
+  .markdown :global(.code-copy.copied::before) {
+    mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2.5 8.5 6 12 13.5 4'/%3E%3C/svg%3E");
+    -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2.5 8.5 6 12 13.5 4'/%3E%3C/svg%3E");
   }
   .markdown :global(pre) {
     margin: 0;
     padding: 12px 14px;
-    background: var(--code-bg);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
+    border: none;
+    border-radius: 0;
+    background: transparent;
     overflow-x: auto;
     font-size: 13px;
     line-height: 1.5;
@@ -354,5 +452,27 @@
     font-family: var(--font-mono);
     font-size: 0.9em;
     color: var(--danger, #c0392b);
+  }
+  .actions {
+    display: flex;
+    gap: 2px;
+    margin-top: 2px;
+  }
+  .icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border-radius: var(--radius-sm);
+    color: var(--fg-faint);
+  }
+  .icon-btn:hover {
+    background: var(--bg-hover);
+    color: var(--fg-muted);
+  }
+  .icon-btn.copied {
+    color: var(--success);
   }
 </style>

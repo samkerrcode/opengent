@@ -40,14 +40,20 @@ md.options.highlight = (code, lang) => {
   return md.utils.escapeHtml(code);
 };
 
-// Add a language class and a copy-friendly wrapper around fenced code.
+// The button is intentionally empty: its icon is drawn via a CSS -webkit-mask data-URI so it
+// follows currentColor and can't be mangled by the sanitizer (DOMPurify strips nearly all SVG
+// geometry attributes). The click is handled by delegated listeners in the views.
+const codeCopyButton = `<button class="code-copy" type="button" title="Copy code" aria-label="Copy code"></button>`;
+
+// Wrap fenced code in a block with a header strip: language label on the left, copy button
+// on the right. (```math fences never reach here — the katex plugin intercepts them.)
 const defaultFence = md.renderer.rules.fence!;
 md.renderer.rules.fence = (tokens, idx, options, env, self) => {
   const token = tokens[idx]!;
   const lang = token.info.trim().split(/\s+/)[0] ?? "";
   const html = defaultFence(tokens, idx, options, env, self);
-  const label = lang ? `<span class="code-lang">${md.utils.escapeHtml(lang)}</span>` : "";
-  return `<div class="code-block">${label}${html}</div>`;
+  const label = lang ? `<span class="code-lang">${md.utils.escapeHtml(lang)}</span>` : "<span></span>";
+  return `<div class="code-block"><div class="code-head">${label}${codeCopyButton}</div>${html}</div>`;
 };
 
 // Registered after our fence wrapper: it intercepts ```math fences itself and delegates all

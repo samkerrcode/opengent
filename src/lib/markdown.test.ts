@@ -45,6 +45,14 @@ describe("renderMarkdown", () => {
     expect(html).toContain("DISPLAY x");
   });
 
+  it("renders a code header with a copy button that survives sanitization", () => {
+    const html = renderMarkdown("```js\nlet a = 1;\n```");
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const btn = doc.querySelector("button.code-copy");
+    expect(btn).not.toBeNull();
+    expect(doc.querySelector(".code-head .code-lang")?.textContent).toBe("js");
+  });
+
   it("renders inline $...$ math as KaTeX", () => {
     const html = renderMarkdown("Working in $\\mathbb{Z}_n$ here.");
     const doc = new DOMParser().parseFromString(html, "text/html");
