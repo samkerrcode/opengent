@@ -47,9 +47,10 @@
     {/each}
 
     <div class="body selectable">
-      {#if html}
+      {#if html && live}
+        <div class="markdown streaming">{@html html}</div>
+      {:else if html}
         <div class="markdown">{@html html}</div>
-        {#if live}<span class="cursor" aria-hidden="true"></span>{/if}
       {:else if live}
         <div class="thinking" aria-hidden="true"><span></span><span></span><span></span></div>
       {/if}
@@ -142,14 +143,18 @@
     font-size: 15px;
     line-height: 1.65;
   }
-  .cursor {
+  /* Streaming cursor: rendered inside the last block element so it sits at the end of the
+     last line instead of wrapping to a fresh line below the block. */
+  .markdown.streaming > :global(:last-child:not(.code-block))::after,
+  .markdown.streaming > :global(.code-block:last-child > pre)::after {
+    content: "";
     display: inline-block;
     width: 8px;
     height: 1em;
     background: var(--accent);
     border-radius: 2px;
     animation: pulse 1s ease-in-out infinite;
-    vertical-align: text-bottom;
+    vertical-align: -0.12em;
     margin-left: 2px;
   }
   .thinking {
@@ -201,8 +206,11 @@
   @media (prefers-reduced-motion: reduce) {
     .avatar.live,
     .phase.live::before,
-    .cursor,
     .thinking span {
+      animation: none;
+    }
+    .markdown.streaming > :global(:last-child:not(.code-block))::after,
+    .markdown.streaming > :global(.code-block:last-child > pre)::after {
       animation: none;
     }
   }

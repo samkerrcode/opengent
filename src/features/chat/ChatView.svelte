@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import { chatStore, type Chat } from "./chat-store.svelte";
+  import { chatStore, type Chat, type TurnItem } from "./chat-store.svelte";
   import Composer from "./Composer.svelte";
   import AssistantTurnView from "./AssistantTurn.svelte";
   import { product } from "$lib/generated/product";
@@ -25,16 +25,32 @@
     pinnedToBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48;
   }
 
-  // Follow new output only while the user is already at the bottom.
+  // Follow new output while the user is pinned to the bottom. Sending a message always
+  // re-pins — it is explicit intent to watch the response, regardless of scroll position.
+  let seenUserId: string | null = null;
   $effect(() => {
-    const last = chat.items.at(-1);
-    void (last?.kind === "assistant" ? last.turn.text.length : chat.items.length);
+    const items = chat.items;
+    const last = items[items.length - 1];
+    void (last?.kind === "assistant" ? last.turn.text.length : items.length);
+    let lastUser: TurnItem | null = null;
+    for (let i = items.length - 1; i >= 0; i--) {
+      const item = items[i];
+      if (item?.kind === "user") {
+        lastUser = item;
+        break;
+      }
+    }
+    if (lastUser && lastUser.id !== seenUserId) {
+      seenUserId = lastUser.id;
+      pinnedToBottom = true;
+    }
     if (pinnedToBottom) tick().then(() => scroller?.scrollTo({ top: scroller.scrollHeight }));
   });
 
   $effect(() => {
     void chat.summary.id;
     pinnedToBottom = true;
+    seenUserId = null;
     editingTitle = false;
     tick().then(() => {
       scroller?.scrollTo({ top: scroller.scrollHeight });
