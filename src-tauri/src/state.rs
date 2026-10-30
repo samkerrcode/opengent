@@ -29,7 +29,10 @@ impl AppState {
         };
         Ok(Self {
             data_root,
-            coordinator: RunCoordinator::new(MAX_CONCURRENT_RUNS),
+            coordinator: RunCoordinator::new(
+                MAX_CONCURRENT_RUNS,
+                tauri::async_runtime::handle().inner().clone(),
+            ),
             secrets,
             provider: Arc::new(FakeProvider::default()),
         })

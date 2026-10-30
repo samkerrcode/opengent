@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use tokio::runtime::Handle;
 use tokio::sync::{mpsc, Semaphore};
 use tokio_util::sync::CancellationToken;
 
@@ -39,14 +40,18 @@ pub struct RunCoordinator {
     active: Mutex<HashMap<ChatId, ActiveRun>>,
     slots: Arc<Semaphore>,
     emitter_config: EmitterConfig,
+    /// Runs are spawned on this runtime explicitly so `start` may be called from any thread
+    /// (e.g. a host UI thread with no ambient Tokio context).
+    runtime: Handle,
 }
 
 impl RunCoordinator {
-    pub fn new(max_concurrent_runs: usize) -> Arc<Self> {
+    pub fn new(max_concurrent_runs: usize, runtime: Handle) -> Arc<Self> {
         Arc::new(Self {
             active: Mutex::new(HashMap::new()),
             slots: Arc::new(Semaphore::new(max_concurrent_runs.max(1))),
             emitter_config: EmitterConfig::default(),
+            runtime,
         })
     }
 
@@ -69,7 +74,7 @@ impl RunCoordinator {
 
         let this = Arc::clone(self);
         let emitter = RunEmitter::new(sink, request.chat_id, run_id, self.emitter_config);
-        tokio::spawn(async move {
+        self.runtime.spawn(async move {
             let chat_id = request.chat_id;
             run_loop(request, emitter, cancel, Arc::clone(&this.slots)).await;
             this.active
@@ -214,7 +219,7 @@ mod tests {
 
     #[tokio::test]
     async fn completes_with_ordered_events_and_frees_slot() {
-        let coord = RunCoordinator::new(2);
+        let coord = RunCoordinator::new(2, Handle::current());
         let (tx, rx) = mpsc::unbounded_channel();
         let chat = ChatId::new();
         coord.start(request(chat, Duration::ZERO), tx).unwrap();
@@ -246,7 +251,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_second_run_on_same_chat_and_cancels() {
-        let coord = RunCoordinator::new(2);
+        let coord = RunCoordinator::new(2, Handle::current());
         let chat = ChatId::new();
         let (tx, rx) = mpsc::unbounded_channel();
         let run_id = coord
@@ -268,9 +273,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn start_works_from_a_thread_without_runtime_context() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let coord = RunCoordinator::new(1, rt.handle().clone());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        std::thread::spawn(move || {
+            coord
+                .start(request(ChatId::new(), Duration::ZERO), tx)
+                .unwrap()
+        })
+        .join()
+        .unwrap();
+        let last = rt.block_on(async {
+            let mut last = None;
+            while let Some(e) = rx.recv().await {
+                last = Some(e);
+            }
+            last
+        });
+        assert_eq!(
+            last.unwrap().payload,
+            RunEventPayload::Completed {
+                stop_reason: StopReason::EndTurn
+            }
+        );
+    }
+
     #[tokio::test]
     async fn dropped_sink_cancels_run() {
-        let coord = RunCoordinator::new(1);
+        let coord = RunCoordinator::new(1, Handle::current());
         let (tx, rx) = mpsc::unbounded_channel();
         coord
             .start(request(ChatId::new(), Duration::from_millis(5)), tx)

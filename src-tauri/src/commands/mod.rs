@@ -48,8 +48,10 @@ impl RunSink for ChannelSink {
     }
 }
 
+/// `async` so Tauri executes it on its Tokio runtime: the coordinator spawns the run task with
+/// `tokio::spawn`, which panics when called from the main thread.
 #[tauri::command]
-pub fn start_run(
+pub async fn start_run(
     state: State<'_, AppState>,
     chat_id: ChatId,
     prompt: String,
