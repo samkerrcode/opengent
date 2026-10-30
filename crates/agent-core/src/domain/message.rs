@@ -21,6 +21,11 @@ pub enum ContentBlock {
     Text {
         text: String,
     },
+    /// Model reasoning streamed before the answer (OpenAI `reasoning_content`, Anthropic
+    /// thinking). Displayed to the user but never sent back in request history.
+    Thinking {
+        text: String,
+    },
     /// Reference to an imported attachment; expanded to labeled text when compiling context.
     Attachment {
         id: String,

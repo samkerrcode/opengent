@@ -64,22 +64,35 @@ fn request() -> CompletionRequest {
     }
 }
 
-async fn collect(
-    provider: &OpenAiCompatProvider,
-) -> (String, Option<StopReason>, Option<String>, bool) {
+struct Collected {
+    text: String,
+    thinking: String,
+    done: Option<StopReason>,
+    err: Option<String>,
+    usage: bool,
+}
+
+async fn collect(provider: &OpenAiCompatProvider) -> Collected {
     let mut rx = provider
         .stream(request(), CancellationToken::new())
         .unwrap();
-    let (mut text, mut done, mut err, mut usage) = (String::new(), None, None, false);
+    let mut c = Collected {
+        text: String::new(),
+        thinking: String::new(),
+        done: None,
+        err: None,
+        usage: false,
+    };
     while let Some(ev) = rx.recv().await {
         match ev {
-            ProviderEvent::TextDelta(t) => text.push_str(&t),
-            ProviderEvent::Usage(u) => usage = u.input_tokens.is_some(),
-            ProviderEvent::Done(r) => done = Some(r),
-            ProviderEvent::Error(e) => err = Some(e),
+            ProviderEvent::TextDelta(t) => c.text.push_str(&t),
+            ProviderEvent::ReasoningDelta(t) => c.thinking.push_str(&t),
+            ProviderEvent::Usage(u) => c.usage = u.input_tokens.is_some(),
+            ProviderEvent::Done(r) => c.done = Some(r),
+            ProviderEvent::Error(e) => c.err = Some(e),
         }
     }
-    (text, done, err, usage)
+    c
 }
 
 const OK_BODY: &[u8] = r#"data: {"id":"1","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
@@ -105,11 +118,11 @@ async fn streams_text_usage_and_done_across_odd_chunking() {
             OpenAiCompatConfig::new("t", base),
             agent_core::http::client().unwrap(),
         );
-        let (text, done, err, usage) = collect(&provider).await;
-        assert_eq!(err, None, "chunk={chunk}");
-        assert_eq!(text, "Hello → 世界", "chunk={chunk}");
-        assert_eq!(done, Some(StopReason::EndTurn));
-        assert!(usage, "usage missing at chunk={chunk}");
+        let c = collect(&provider).await;
+        assert_eq!(c.err, None, "chunk={chunk}");
+        assert_eq!(c.text, "Hello → 世界", "chunk={chunk}");
+        assert_eq!(c.done, Some(StopReason::EndTurn));
+        assert!(c.usage, "usage missing at chunk={chunk}");
     }
 }
 
@@ -126,9 +139,9 @@ async fn maps_auth_error_with_server_message() {
         OpenAiCompatConfig::new("t", base),
         agent_core::http::client().unwrap(),
     );
-    let (_, done, err, _) = collect(&provider).await;
-    assert_eq!(done, None);
-    let err = err.unwrap();
+    let c = collect(&provider).await;
+    assert_eq!(c.done, None);
+    let err = c.err.unwrap();
     assert!(
         err.contains("authentication failed") && err.contains("Incorrect API key"),
         "{err}"
@@ -143,10 +156,10 @@ async fn truncated_stream_is_reported() {
         OpenAiCompatConfig::new("t", base),
         agent_core::http::client().unwrap(),
     );
-    let (text, done, err, _) = collect(&provider).await;
-    assert_eq!(text, "partial");
-    assert_eq!(done, None);
-    assert!(err.unwrap().contains("without a completion marker"));
+    let c = collect(&provider).await;
+    assert_eq!(c.text, "partial");
+    assert_eq!(c.done, None);
+    assert!(c.err.unwrap().contains("without a completion marker"));
 }
 
 #[tokio::test]
@@ -161,8 +174,8 @@ async fn connection_refused_is_friendly() {
         OpenAiCompatConfig::new("t", base),
         agent_core::http::client().unwrap(),
     );
-    let (_, _, err, _) = collect(&provider).await;
-    assert!(err.unwrap().contains("could not connect"));
+    let c = collect(&provider).await;
+    assert!(c.err.unwrap().contains("could not connect"));
 }
 
 #[tokio::test]
@@ -182,4 +195,27 @@ async fn cancellation_stops_the_stream() {
         rest += 1;
     }
     assert!(rest <= 2, "stream kept going after cancel: {rest} events");
+}
+
+#[tokio::test]
+async fn reasoning_content_is_streamed_separately() {
+    let body: &[u8] = br#"data: {"choices":[{"index":0,"delta":{"reasoning_content":"let me think"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"reasoning_content":" about this"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"content":"the answer"},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+"#;
+    let base = serve_once("200 OK", body, 4096, Duration::ZERO).await;
+    let provider = OpenAiCompatProvider::new(
+        OpenAiCompatConfig::new("t", base),
+        agent_core::http::client().unwrap(),
+    );
+    let c = collect(&provider).await;
+    assert_eq!(c.err, None);
+    assert_eq!(c.thinking, "let me think about this");
+    assert_eq!(c.text, "the answer");
+    assert_eq!(c.done, Some(StopReason::EndTurn));
 }

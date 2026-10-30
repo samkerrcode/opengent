@@ -84,6 +84,9 @@ pub fn render_message(m: &Message, texts: &AttachmentTexts) -> Message {
             ContentBlock::Attachment { id, name, mime, .. } => {
                 attachments.push(expand_attachment(id, name, mime, texts))
             }
+            // Reasoning is displayed in the UI but must never be replayed to the model:
+            // OpenAI-compatible APIs reject or waste context on reasoning_content in history.
+            ContentBlock::Thinking { .. } => {}
             o => other.push(o.clone()),
         }
     }
@@ -135,21 +138,31 @@ pub fn compile(
     let mut used = estimate_tokens(&system) + 8;
 
     let mut kept = Vec::new();
+    let mut processed = 0usize;
     for m in history.iter().rev() {
         let rendered = render_message(m, texts);
+        // Drop messages that render to nothing (e.g. an assistant turn that contains only
+        // reasoning after Thinking blocks are excluded) — empty content confuses providers.
+        if rendered.blocks.is_empty() {
+            processed += 1;
+            continue;
+        }
         let cost = message_tokens(&rendered);
         if used + cost > budget && !kept.is_empty() {
             break;
         }
         used += cost;
         kept.push(rendered);
+        processed += 1;
     }
     kept.reverse();
     // Never start the kept window with an assistant turn: providers expect user-first ordering.
     while kept.first().is_some_and(|m| m.role == Role::Assistant) {
         kept.remove(0);
     }
-    let trimmed = history.len() - kept.len();
+    // Only messages dropped for budget count as "trimmed"; empty-rendered ones were skipped,
+    // not trimmed, so they don't trigger a false notice.
+    let trimmed = history.len() - processed;
     let max_output = ((window as f32) * OUTPUT_RESERVE) as u32;
 
     CompiledContext {
@@ -157,7 +170,9 @@ pub fn compile(
             model: model.to_owned(),
             system: Some(system),
             messages: kept,
-            max_output_tokens: Some(max_output.max(256)),
+            // Floor sized for reasoning models, which burn output tokens thinking before
+            // the answer starts; 256 tokens was far too small for them.
+            max_output_tokens: Some(max_output.max(4096)),
         },
         trimmed_messages: trimmed,
         estimated_input_tokens: used,

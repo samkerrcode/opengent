@@ -5,4 +5,4 @@
  * signatures, etc.) is preserved verbatim in `ProviderOpaque` so it can be replayed to the
  * same provider and never leaked to a different one.
  */
-export type ContentBlock = { "type": "text", text: string, } | { "type": "attachment", id: string, name: string, mime: string, char_count: number, } | { "type": "tool_call", id: string, name: string, arguments: unknown, } | { "type": "tool_result", call_id: string, content: unknown, is_error: boolean, } | { "type": "provider_opaque", provider: string, data: unknown, };
+export type ContentBlock = { "type": "text", text: string, } | { "type": "thinking", text: string, } | { "type": "attachment", id: string, name: string, mime: string, char_count: number, } | { "type": "tool_call", id: string, name: string, arguments: unknown, } | { "type": "tool_result", call_id: string, content: unknown, is_error: boolean, } | { "type": "provider_opaque", provider: string, data: unknown, };

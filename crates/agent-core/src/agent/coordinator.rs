@@ -179,6 +179,7 @@ async fn run_loop<S: RunSink>(
             }
             ev = rx.recv() => match ev {
                 Some(ProviderEvent::TextDelta(text)) => emitter.push_text(&text),
+                Some(ProviderEvent::ReasoningDelta(text)) => emitter.push_thinking(&text),
                 Some(ProviderEvent::Usage(usage)) => emitter.emit(RunEventPayload::Usage { usage }),
                 Some(ProviderEvent::Done(stop_reason)) => {
                     emitter.emit(RunEventPayload::Phase { phase: RunPhase::Completed });

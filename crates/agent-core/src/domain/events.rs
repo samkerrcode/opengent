@@ -67,6 +67,10 @@ pub enum RunEventPayload {
     TextDelta {
         text: String,
     },
+    /// Coalesced reasoning ("thinking") content for models that expose it.
+    ThinkingDelta {
+        text: String,
+    },
     Usage {
         usage: Usage,
     },

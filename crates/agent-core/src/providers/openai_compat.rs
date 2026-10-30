@@ -169,6 +169,9 @@ struct Choice {
 struct Delta {
     #[serde(default)]
     content: Option<String>,
+    /// Reasoning models (Qwen3, DeepSeek-R1, …) stream their chain of thought here.
+    #[serde(default)]
+    reasoning_content: Option<String>,
 }
 #[derive(Deserialize)]
 struct ChunkUsage {
@@ -271,6 +274,11 @@ async fn run_stream(
                 ));
             }
             for choice in parsed.choices {
+                if let Some(text) = choice.delta.reasoning_content.filter(|t| !t.is_empty()) {
+                    if tx.send(ProviderEvent::ReasoningDelta(text)).await.is_err() {
+                        return Ok(());
+                    }
+                }
                 if let Some(text) = choice.delta.content.filter(|t| !t.is_empty()) {
                     if tx.send(ProviderEvent::TextDelta(text)).await.is_err() {
                         return Ok(());

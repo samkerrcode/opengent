@@ -30,7 +30,8 @@ pub struct RunEmitter<S: RunSink> {
     chat_id: ChatId,
     run_id: RunId,
     seq: u64,
-    buffer: String,
+    text_buf: String,
+    thinking_buf: String,
     buffer_since: Option<Instant>,
     config: EmitterConfig,
     /// Set once the sink reports the receiver is gone; further sends are dropped.
@@ -44,7 +45,8 @@ impl<S: RunSink> RunEmitter<S> {
             chat_id,
             run_id,
             seq: 0,
-            buffer: String::new(),
+            text_buf: String::new(),
+            thinking_buf: String::new(),
             buffer_since: None,
             config,
             disconnected: false,
@@ -56,27 +58,44 @@ impl<S: RunSink> RunEmitter<S> {
     }
 
     pub fn push_text(&mut self, text: &str) {
-        if self.buffer.is_empty() {
+        if self.text_buf.is_empty() && self.thinking_buf.is_empty() {
             self.buffer_since = Some(Instant::now());
         }
-        self.buffer.push_str(text);
-        if self.buffer.len() >= self.config.flush_bytes {
+        self.text_buf.push_str(text);
+        if self.text_buf.len() >= self.config.flush_bytes {
             self.flush();
         }
     }
 
-    /// Deadline at which buffered text must be flushed, if any text is buffered.
+    pub fn push_thinking(&mut self, text: &str) {
+        if self.text_buf.is_empty() && self.thinking_buf.is_empty() {
+            self.buffer_since = Some(Instant::now());
+        }
+        self.thinking_buf.push_str(text);
+        if self.thinking_buf.len() >= self.config.flush_bytes {
+            self.flush();
+        }
+    }
+
+    /// Deadline at which buffered deltas must be flushed, if any are buffered.
     pub fn flush_deadline(&self) -> Option<Instant> {
         self.buffer_since.map(|t| t + self.config.flush_interval)
     }
 
     pub fn flush(&mut self) {
-        if self.buffer.is_empty() {
+        if self.text_buf.is_empty() && self.thinking_buf.is_empty() {
             return;
         }
-        let text = std::mem::take(&mut self.buffer);
+        let thinking = std::mem::take(&mut self.thinking_buf);
+        let text = std::mem::take(&mut self.text_buf);
         self.buffer_since = None;
-        self.send_now(RunEventPayload::TextDelta { text });
+        // Reasoning precedes the answer in stream order; emit it first.
+        if !thinking.is_empty() {
+            self.send_now(RunEventPayload::ThinkingDelta { text: thinking });
+        }
+        if !text.is_empty() {
+            self.send_now(RunEventPayload::TextDelta { text });
+        }
     }
 
     /// Flushes pending text first so ordering is preserved, then sends `payload`.

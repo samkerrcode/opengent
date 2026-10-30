@@ -47,10 +47,12 @@ function fromStored(m: StoredMessage): TurnItem {
     return { kind: "user", id: m.id, text, attachments };
   }
   const text = m.blocks.filter((b) => b.type === "text").map((b) => (b.type === "text" ? b.text : "")).join("");
+  const thinking = m.blocks.filter((b) => b.type === "thinking").map((b) => (b.type === "thinking" ? b.text : "")).join("");
   const turn: AssistantTurn = {
     ...emptyTurn(),
     runId: m.run_id,
     text,
+    thinking,
     usage: m.usage,
     error: m.error,
     phase:

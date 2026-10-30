@@ -38,6 +38,8 @@ pub struct CompletionRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProviderEvent {
     TextDelta(String),
+    /// Reasoning/thinking content for models that expose it (e.g. OpenAI `reasoning_content`).
+    ReasoningDelta(String),
     Usage(Usage),
     Done(StopReason),
     Error(String),

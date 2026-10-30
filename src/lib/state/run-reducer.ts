@@ -2,6 +2,7 @@
 // unit-testable and reusable by any view.
 import type { RunEvent } from "$lib/generated/bindings/RunEvent";
 import type { RunPhase } from "$lib/generated/bindings/RunPhase";
+import type { StopReason } from "$lib/generated/bindings/StopReason";
 import type { Usage } from "$lib/generated/bindings/Usage";
 
 export const RUN_EVENT_SCHEMA = 1;
@@ -10,7 +11,10 @@ export interface AssistantTurn {
   runId: string | null;
   phase: RunPhase;
   text: string;
+  /** Model reasoning streamed before the answer (thinking models). */
+  thinking: string;
   usage: Usage | null;
+  stopReason: StopReason | null;
   error: string | null;
   notices: string[];
   lastSeq: number;
@@ -19,7 +23,7 @@ export interface AssistantTurn {
 }
 
 export function emptyTurn(): AssistantTurn {
-  return { runId: null, phase: "queued", text: "", usage: null, error: null, notices: [], lastSeq: -1, desynced: false };
+  return { runId: null, phase: "queued", text: "", thinking: "", usage: null, stopReason: null, error: null, notices: [], lastSeq: -1, desynced: false };
 }
 
 export function isTerminal(phase: RunPhase): boolean {
@@ -42,6 +46,9 @@ export function applyRunEvent(turn: AssistantTurn, event: RunEvent): AssistantTu
     case "text_delta":
       next.text += p.text;
       break;
+    case "thinking_delta":
+      next.thinking += p.text;
+      break;
     case "usage":
       next.usage = p.usage;
       break;
@@ -50,6 +57,7 @@ export function applyRunEvent(turn: AssistantTurn, event: RunEvent): AssistantTu
       break;
     case "completed":
       next.phase = "completed";
+      next.stopReason = p.stop_reason;
       break;
     case "cancelled":
       next.phase = "cancelled";

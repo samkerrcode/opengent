@@ -20,6 +20,8 @@
   // Re-rendering the whole turn per coalesced update is fine at these sizes; chunked
   // reconciliation comes with the performance pass.
   const html = $derived(turn.text ? renderMarkdown(turn.text) : "");
+  const thinkingHtml = $derived(turn.thinking ? renderMarkdown(turn.thinking) : "");
+  const truncated = $derived(turn.stopReason === "max_tokens");
   const usageText = $derived.by(() => {
     const u = turn.usage;
     if (!u) return null;
@@ -45,6 +47,14 @@
     {#each turn.notices as notice (notice)}
       <p class="notice">{notice}</p>
     {/each}
+    {#if truncated}<p class="notice">Response was cut off at the output token limit.</p>{/if}
+
+    {#if thinkingHtml}
+      <details class="thinking-block" open={live}>
+        <summary>{live && !turn.text ? "Thinking…" : "Thinking"}</summary>
+        <div class="markdown thinking-body">{@html thinkingHtml}</div>
+      </details>
+    {/if}
 
     <div class="body selectable">
       {#if html && live}
@@ -197,6 +207,24 @@
     color: var(--fg-faint);
     font-size: 13px;
     margin-top: var(--space-2);
+  }
+  .thinking-block {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-sunken);
+    font-size: 13px;
+  }
+  .thinking-block > summary {
+    padding: 6px 10px;
+    color: var(--fg-faint);
+    cursor: default;
+    user-select: none;
+    list-style-position: inside;
+  }
+  .thinking-body {
+    padding: 2px 10px 8px;
+    color: var(--fg-muted);
+    border-top: 1px solid var(--border);
   }
   @keyframes spin {
     to {

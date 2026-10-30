@@ -16,6 +16,7 @@ const CHECKPOINT_EVERY: Duration = Duration::from_millis(750);
 
 struct Progress {
     text: String,
+    thinking: String,
     usage: Option<Usage>,
     last_checkpoint: Instant,
     dirty: bool,
@@ -37,6 +38,7 @@ impl<S: RunSink> RunRecorder<S> {
             message_id,
             progress: Mutex::new(Progress {
                 text: String::new(),
+                thinking: String::new(),
                 usage: None,
                 last_checkpoint: Instant::now(),
                 dirty: false,
@@ -53,14 +55,11 @@ impl<S: RunSink> RunRecorder<S> {
         match event {
             RunEventPayload::TextDelta { text } => {
                 p.text.push_str(text);
-                p.dirty = true;
-                if p.last_checkpoint.elapsed() >= CHECKPOINT_EVERY {
-                    p.last_checkpoint = Instant::now();
-                    p.dirty = false;
-                    let (id, snapshot) = (self.message_id.clone(), p.text.clone());
-                    self.db
-                        .spawn_job(move |conn| checkpoint_assistant_text(conn, &id, &snapshot));
-                }
+                self.maybe_checkpoint(&mut p);
+            }
+            RunEventPayload::ThinkingDelta { text } => {
+                p.thinking.push_str(text);
+                self.maybe_checkpoint(&mut p);
             }
             RunEventPayload::Usage { usage } => p.usage = Some(*usage),
             RunEventPayload::Completed { .. } => self.finish(&mut p, MessageStatus::Complete, None),
@@ -72,11 +71,28 @@ impl<S: RunSink> RunRecorder<S> {
         }
     }
 
+    fn maybe_checkpoint(&self, p: &mut Progress) {
+        p.dirty = true;
+        if p.last_checkpoint.elapsed() < CHECKPOINT_EVERY {
+            return;
+        }
+        p.last_checkpoint = Instant::now();
+        p.dirty = false;
+        let (id, text, thinking) = (self.message_id.clone(), p.text.clone(), p.thinking.clone());
+        self.db
+            .spawn_job(move |conn| checkpoint_assistant_text(conn, &id, &text, &thinking));
+    }
+
     fn finish(&self, p: &mut Progress, status: MessageStatus, error: Option<String>) {
         p.finished = true;
-        let (id, text, usage) = (self.message_id.clone(), p.text.clone(), p.usage);
+        let (id, text, thinking, usage) = (
+            self.message_id.clone(),
+            p.text.clone(),
+            p.thinking.clone(),
+            p.usage,
+        );
         self.db.spawn_job(move |conn| {
-            finalize_assistant_message(conn, &id, &text, status, usage, error.as_deref())
+            finalize_assistant_message(conn, &id, &text, &thinking, status, usage, error.as_deref())
         });
     }
 }
@@ -94,12 +110,18 @@ impl<S: RunSink> Drop for RunRecorder<S> {
     fn drop(&mut self) {
         let p = self.progress.get_mut().unwrap();
         if !p.finished {
-            let (id, text, usage) = (self.message_id.clone(), p.text.clone(), p.usage);
+            let (id, text, thinking, usage) = (
+                self.message_id.clone(),
+                p.text.clone(),
+                p.thinking.clone(),
+                p.usage,
+            );
             self.db.spawn_job(move |conn| {
                 finalize_assistant_message(
                     conn,
                     &id,
                     &text,
+                    &thinking,
                     MessageStatus::Interrupted,
                     usage,
                     None,
