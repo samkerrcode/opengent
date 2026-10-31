@@ -35,9 +35,17 @@ pub struct ServerBrief {
     pub tool_count: usize,
     /// The server's `instructions` from the MCP handshake, if any.
     pub instructions: Option<String>,
+    /// Exposed names of user-disabled tools on this server (truncated list).
+    /// The model can then say "that tool is disabled" instead of pretending it
+    /// doesn't exist — without ever seeing the disabled tools' definitions.
+    pub disabled: Vec<String>,
+    /// How many disabled tools were omitted from `disabled` (very large sets).
+    pub disabled_extra: usize,
 }
 
 const MAX_SERVER_INSTRUCTIONS: usize = 600;
+/// Character budget per tool result when re-rendered from chat history.
+const HISTORICAL_RESULT_CHARS: usize = 2_000;
 
 /// System prompt section appended when tools are offered. Appended after the base prompt so
 /// the stable prefix stays cacheable.
@@ -55,10 +63,24 @@ pub fn tools_prompt(servers: &[ServerBrief], on_demand: bool) -> String {
             super::tools::FIND_TOOLS
         ));
     }
+    if servers.iter().any(|b| !b.disabled.is_empty()) {
+        s.push_str(
+            " Tools listed as disabled below exist but were turned off by the user and cannot \
+             be called. If a request needs one, tell the user it is disabled (they can \
+             re-enable it in the Tools menu) instead of working around it with other tools.",
+        );
+    }
     if !servers.is_empty() {
         s.push_str("\n\nConnected servers:");
         for b in servers {
-            s.push_str(&format!("\n- {} ({} tools)", b.name, b.tool_count));
+            s.push_str(&format!("\n- {} ({} tools", b.name, b.tool_count));
+            if !b.disabled.is_empty() {
+                s.push_str(&format!("; disabled: {}", b.disabled.join(", ")));
+                if b.disabled_extra > 0 {
+                    s.push_str(&format!(", +{} more", b.disabled_extra));
+                }
+            }
+            s.push(')');
             if let Some(i) = b
                 .instructions
                 .as_deref()
@@ -254,12 +276,19 @@ pub fn render_turn(
                 .iter()
                 .find(|r| matches!(r, ContentBlock::ToolResult { call_id, .. } if call_id == id))
                 .cloned();
-            answered.push(found.unwrap_or_else(|| ContentBlock::ToolResult {
+            let mut block = found.unwrap_or_else(|| ContentBlock::ToolResult {
                 call_id: id.clone(),
                 content: serde_json::Value::String("The tool call did not complete.".into()),
                 is_error: true,
                 status: None,
-            }));
+            });
+            // History only needs the gist of a tool result: cap it tighter than fresh
+            // results (MAX_TOOL_RESULT_CHARS) so old turns stop consuming context.
+            if let ContentBlock::ToolResult { content, .. } = &mut block {
+                *content =
+                    super::tools::cap_result_with(std::mem::take(content), HISTORICAL_RESULT_CHARS);
+            }
+            answered.push(block);
         }
         results.clear();
         if !answered.is_empty() {
@@ -510,6 +539,34 @@ mod tests {
             panic!()
         };
         assert!(text.contains("truncated: showing"));
+    }
+
+    #[test]
+    fn tools_prompt_names_disabled_tools_without_definitions() {
+        let prompt = tools_prompt(
+            &[ServerBrief {
+                name: "test".into(),
+                tool_count: 4,
+                instructions: None,
+                disabled: vec!["test__fail".into()],
+                disabled_extra: 2,
+            }],
+            false,
+        );
+        assert!(prompt.contains("- test (4 tools; disabled: test__fail, +2 more)"));
+        assert!(prompt.contains("cannot be called"));
+        // No disabled tools: no disabled-tools guidance.
+        let plain = tools_prompt(
+            &[ServerBrief {
+                name: "test".into(),
+                tool_count: 4,
+                instructions: None,
+                disabled: vec![],
+                disabled_extra: 0,
+            }],
+            false,
+        );
+        assert!(plain.contains("- test (4 tools)") && !plain.contains("disabled"));
     }
 
     fn tool_call(id: &str, name: &str) -> ContentBlock {

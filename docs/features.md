@@ -40,7 +40,14 @@ composer; status dots and stderr tails surface failures.
 ⚒ Tools menu (each server expands into its tool list) or per server in Connections via the
 default policy. Blocked tools are never sent to the model; *Ask* pauses the run on an
 approval card (Allow once / Always allow / Deny), *Always allow* persists the choice.
-Enforcement happens in Rust at dispatch, not just in the UI.
+Enforcement happens in Rust at dispatch, not just in the UI. Two extra guardrails:
+*Always allow* (per tool or as the server default) pins a signature of the tool's
+definition, captured at grant time or on first use — if the server changes the schema or
+description the tool falls back to *Ask* and shows a "changed" badge; and a new stdio server,
+or a change to its command, working directory or environment, must be confirmed in a native
+OS dialog, so server installs can't be driven silently. A model that calls a disabled tool
+is told it is disabled (and to say so) rather than that it doesn't exist. Approval cards open their arguments automatically and carry the
+server's destructive/read-only hints; unanswered approvals auto-deny after 15 minutes.
 
 **Tool loading.** Under ⚒ Tools → *Tool loading*: **Always load all** sends every enabled
 tool's schema each request; **On-demand** sends only a `find_tools` search tool — the model
@@ -50,15 +57,25 @@ tokens or a quarter of the context window, then switches to on-demand. Tools loa
 `find_tools` stay available for the rest of the conversation.
 
 **How it works.** The run loop is model → tool calls → (approval) → results → model (max 8
-steps). Calls stream in as `tool_calls` fragments, execute against the MCP connection, and
-results feed back; tool cards in the chat show status, arguments, and results. Results are
-capped (40k chars, binary parts stubbed) before persistence and replay. Key code:
-`crates/agent-core/src/mcp/` (config, stdio env, manager), `agent/tools.rs` (catalog,
-naming, search), `agent/coordinator.rs` (loop), `providers/openai_compat.rs` (tool_calls).
+steps, max 16 calls per step). Calls stream in as `tool_calls` fragments, execute against
+the MCP connection, and results feed back; tool cards in the chat show status, arguments,
+and results. Results are capped before persistence and replay: the lesser of 40k chars or
+a quarter of the context window, re-capped to 2k on later turns; binary parts become
+labeled stubs. Arguments must be a JSON object — malformed calls are rejected before the
+approval step. Stdio servers run as process-group leaders with kill-on-drop, so `npx →
+node` grandchildren die on disconnect or app quit; a timed-out or cancelled call notifies
+the server via `notifications/cancelled`. Remote (HTTP) connections never follow
+redirects, keeping credential headers on the origin. Stderr tails are line-capped and
+redact known secret values. Key code: `crates/agent-core/src/mcp/` (config, stdio env,
+manager), `agent/tools.rs` (catalog, naming, search), `agent/coordinator.rs` (loop),
+`providers/openai_compat.rs` (tool_calls).
 
-**Limits.** Max 8 tool steps per run; calls run sequentially. Stdio children get an
-allow-listed environment plus a recovered login-shell PATH so `npx`/`uvx` resolve from GUI
-launches. MCP auth (OAuth) is Phase 4 — remote servers that need browser sign-in can't
+**Limits.** Max 8 tool steps per run and 16 calls per step; calls run sequentially. Per
+server: up to 500 tools, 64 env/header entries, 1 KB tool descriptions, 16 KB input
+schemas (oversized tools are skipped). Stdio children get an allow-listed environment plus
+a recovered login-shell PATH so `npx`/`uvx` resolve from GUI launches. Server-supplied
+metadata (descriptions, schemas) is treated as untrusted and bounded before it reaches the
+model. MCP auth (OAuth) is Phase 4 — remote servers that need browser sign-in can't
 connect yet.
 
 ## Attachments

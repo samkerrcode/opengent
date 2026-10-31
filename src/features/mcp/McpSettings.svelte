@@ -28,7 +28,7 @@
   const policies: { value: ToolPolicy; label: string }[] = [
     { value: "always_allow", label: "Always allow — tools run without asking" },
     { value: "ask", label: "Ask — approve each call in the chat" },
-    { value: "block", label: "Block — tools are hidden from the model" },
+    { value: "block", label: "Disable — tools are hidden from the model" },
   ];
 
   let editing = $state<Form | null>(null);
@@ -85,6 +85,13 @@
     };
   }
 
+  // Heuristic for marking imported env/header values as keychain secrets.
+  const SECRETISH = /key|token|secret|auth|pass|credential|cookie/i;
+
+  // Quotes a value so Rust's split_command parses it back as one arg (round-trips
+  // spaces, quotes and backslashes).
+  const shellQuote = (s: string) => (/[\s"'\\]/.test(s) ? '"' + s.replace(/["\\]/g, "\\$1") + '"' : s);
+
   // Accepts the standard {"mcpServers": {name: {command,args,env} | {url,headers}}} shape.
   function applyImport() {
     if (!editing) return;
@@ -97,12 +104,12 @@
       if (typeof cfg.url === "string" && cfg.url) {
         editing.transport = "streamable_http";
         editing.url = cfg.url;
-        editing.headers = Object.entries((cfg.headers as Record<string, string>) ?? {}).map(([n, v]) => ({ name: n, value: v, secret: /key|token|auth/i.test(n) }));
+        editing.headers = Object.entries((cfg.headers as Record<string, string>) ?? {}).map(([n, v]) => ({ name: n, value: v, secret: SECRETISH.test(n) }));
       } else {
         editing.transport = "stdio";
-        const cmd = [cfg.command, ...((cfg.args as string[]) ?? [])].filter(Boolean).join(" ");
+        const cmd = [cfg.command, ...((cfg.args as string[]) ?? [])].filter(Boolean).map((a) => shellQuote(String(a))).join(" ");
         editing.command = cmd;
-        editing.env = Object.entries((cfg.env as Record<string, string>) ?? {}).map(([n, v]) => ({ name: n, value: v, secret: /key|token|secret|auth/i.test(n) }));
+        editing.env = Object.entries((cfg.env as Record<string, string>) ?? {}).map(([n, v]) => ({ name: n, value: v, secret: SECRETISH.test(n) }));
       }
       if (!editing.name) editing.name = name;
       showImport = false;

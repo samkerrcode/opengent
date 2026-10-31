@@ -156,16 +156,26 @@ Each phase has an acceptance gate that must pass before the next begins.
 - `McpManager`: background connect/reconnect, `tools/list_changed` refresh, disconnect
   watchdog, and the `ToolHost` seam used by the run loop. Policies are enforced in Rust at
   dispatch: **Always allow / Ask / Block** per tool plus a per-server default; blocked tools
-  are never advertised to the model.
-- Agent loop: model → tool calls → (approval pause) → results → model, up to 8 tool steps.
-  Streamed `tool_calls` fragments are assembled in the OpenAI-compatible adapter; assistant
-  turns persist as ordered content blocks (text, calls, results) and reload identically.
+  are never advertised to the model (only named in the system prompt as disabled).
+  *Always allow* grants are bound to the tool's definition signature (pinned at grant
+  time or first use) — a changed schema/description reverts to *Ask*.
+- Agent loop: model → tool calls → (approval pause) → results → model, up to 8 tool steps
+  and 16 calls per step. Streamed `tool_calls` fragments are assembled in the
+  OpenAI-compatible adapter (bounded index/argument size, deduplicated call ids);
+  assistant turns persist as ordered content blocks (text, calls, results) and reload
+  identically. Arguments must be a JSON object — malformed calls never reach the tool.
 - **Tools menu** in the composer: connection toggles, per-tool permission submenu, and the
   **tool loading** mode — *All*, *On-demand* (`find_tools` meta-tool loads matching tools by
   keyword), or *Auto* (all when small, on-demand past a size/context threshold). The loaded
   set is recovered from chat history on later turns.
-- Approval UI on tool cards: Allow once / Always allow / Deny; denial and blocking are
-  reported back to the model as results. Mock servers for dev: `mock-mcp-server.mjs`
+- Approval UI on tool cards: Allow once / Always allow / Deny, with arguments shown and
+  server-provided destructive/read-only hints; unanswered approvals auto-deny after
+  15 minutes. Denial and blocking are reported back to the model as results. New stdio
+  servers, or changes to their command/cwd/env, require a native confirmation dialog.
+- Sandboxing & hygiene: stdio servers run as process-group leaders with kill-on-drop
+  (grandchildren die on disconnect/quit); stderr tails are line-capped and redact secrets;
+  `mcp.json` is owner-only (0600); remote connections never follow redirects; cancelled
+  calls send `notifications/cancelled`. Mock servers for dev: `mock-mcp-server.mjs`
   (stdio + `--http`, `--many N` filler tools) and the mock OpenAI server can emit tool calls.
 
 ### Known gaps

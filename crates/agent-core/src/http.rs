@@ -25,6 +25,15 @@ fn builder() -> reqwest::ClientBuilder {
         .pool_idle_timeout(Duration::from_secs(90))
 }
 
+/// Pooled client that never follows redirects, for remote MCP servers. Redirects are off
+/// because reqwest strips `Authorization`/`Cookie` on cross-origin hops but forwards
+/// custom headers (e.g. `X-API-Key`) — which would leak MCP credentials to a third host.
+pub fn client_no_redirect() -> reqwest::Result<reqwest::Client> {
+    builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+}
+
 /// Pooled client with product user agent. Per-request timeouts are set by callers.
 /// Certificate verification uses the operating system's verifier and trust store
 /// (rustls-platform-verifier), so certificates trusted in the macOS Keychain or

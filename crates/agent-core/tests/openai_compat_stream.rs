@@ -76,7 +76,7 @@ struct Collected {
 
 async fn collect(provider: &OpenAiCompatProvider) -> Collected {
     let mut rx = provider
-        .stream(request(), CancellationToken::new())
+        .stream(&request(), CancellationToken::new())
         .unwrap();
     let mut c = Collected {
         text: String::new(),
@@ -194,7 +194,7 @@ async fn cancellation_stops_the_stream() {
         agent_core::http::client().unwrap(),
     );
     let cancel = CancellationToken::new();
-    let mut rx = provider.stream(request(), cancel.clone()).unwrap();
+    let mut rx = provider.stream(&request(), cancel.clone()).unwrap();
     let first = rx.recv().await;
     assert!(matches!(first, Some(ProviderEvent::TextDelta(_))));
     cancel.cancel();

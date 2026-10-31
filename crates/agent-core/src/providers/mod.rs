@@ -74,7 +74,7 @@ pub trait ModelProvider: Send + Sync + 'static {
     /// channel closes; implementations must stop promptly when `cancel` fires.
     fn stream(
         &self,
-        request: CompletionRequest,
+        request: &CompletionRequest,
         cancel: CancellationToken,
     ) -> Result<mpsc::Receiver<ProviderEvent>>;
 }

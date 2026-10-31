@@ -11,7 +11,7 @@
     completed: "Done",
     failed: "Failed",
     denied: "Denied",
-    blocked: "Blocked",
+    blocked: "Disabled",
     cancelled: "Cancelled",
   };
 
@@ -19,6 +19,16 @@
   const isSearch = $derived(segment.call.name === "find_tools");
   const title = $derived(
     isSearch ? "find_tools — search available tools" : `${segment.call.server ?? segment.call.name} · ${segment.call.tool}`,
+  );
+
+  // Server-declared hints for the approval prompt: looked up live so they reflect the
+  // current tool definition. Untrusted metadata — informational only.
+  const info = $derived(
+    segment.call.server
+      ? mcpStore.servers
+          .find((s) => s.name === segment.call.server)
+          ?.tools.find((t) => t.name === segment.call.tool)
+      : undefined,
   );
 
   function pretty(v: unknown): string {
@@ -46,9 +56,14 @@
     return parts.join("\n");
   }
 
-  const argsText = $derived(pretty(segment.call.arguments));
-  const output = $derived(resultText(segment.content));
-  let open = $state(false);
+  // The detail panel opens itself while approval is pending (users must see the
+  // arguments they are approving) and stays closed otherwise.
+  let manualOpen = $state<boolean | null>(null);
+  const open = $derived(manualOpen ?? awaiting);
+  // Argument/result formatting only runs when the panel is actually visible — results
+  // can be tens of KB and re-stringifying them per streamed delta is wasteful.
+  const argsText = $derived(open ? pretty(segment.call.arguments) : "");
+  const output = $derived(open ? resultText(segment.content) : "");
 
   function decide(decision: "allow_once" | "always_allow" | "deny") {
     if (runId) void mcpStore.approve(runId, segment.call.id, decision);
@@ -56,10 +71,12 @@
 </script>
 
 <div class="tool-card" class:error={segment.isError} class:awaiting>
-  <button class="head" onclick={() => (open = !open)} aria-expanded={open}>
+  <button class="head" onclick={() => (manualOpen = !open)} aria-expanded={open}>
     <span class="chev" aria-hidden="true">›</span>
     <span class="wrench" aria-hidden="true">⚒</span>
     <span class="title" title={segment.call.name}>{title}</span>
+    {#if info?.destructive}<span class="hint" title="The server marks this tool as potentially destructive">destructive</span>{/if}
+    {#if info?.read_only}<span class="hint ro" title="The server marks this tool as read-only">read-only</span>{/if}
     <span class="status" data-status={segment.status}>{labels[segment.status]}</span>
   </button>
 
@@ -125,6 +142,21 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .hint {
+    flex: none;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--danger);
+    border: 1px solid var(--danger);
+    border-radius: var(--radius-sm);
+    padding: 0 4px;
+  }
+  .hint.ro {
+    color: var(--fg-faint);
+    border-color: var(--border-strong);
   }
   .status {
     margin-left: auto;

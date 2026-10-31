@@ -119,12 +119,12 @@
           <button
             type="button"
             class="chip"
-            class:accent={mcpStore.toolCount > 0 && mcpStore.connected.length > 0}
+            class:accent={mcpStore.activeToolCount > 0}
             onclick={() => (toolsOpen = !toolsOpen)}
             aria-expanded={toolsOpen}
             title="MCP connections and tool permissions"
           >
-            ⚒ Tools{mcpStore.toolCount ? ` · ${mcpStore.toolCount}` : ""}
+            ⚒ Tools{mcpStore.activeToolCount ? ` · ${mcpStore.activeToolCount}` : ""}
           </button>
           {#if toolsOpen}
             <ToolsMenu {onopenconnections} onclose={() => (toolsOpen = false)} />

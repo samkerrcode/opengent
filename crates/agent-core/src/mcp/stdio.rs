@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use super::config::{McpServerConfig, McpStore};
+use crate::Result;
 
 /// Variables inherited from the app environment when present. Everything else the child
 /// needs must come from the server config or the login-shell PATH.
@@ -84,6 +85,11 @@ pub(crate) fn expand_tilde(p: &str) -> String {
     p.to_owned()
 }
 
+/// Delimiters around `$PATH` in the shell probe's output so login-rc noise can't
+/// corrupt the parse.
+#[cfg(unix)]
+const PATH_MARK: &str = "__OPENGENT_PATH__";
+
 /// Reads `$PATH` from the user's login shell. Unix only; Windows GUI launches already carry
 /// a full PATH. Returns `None` quickly on failure (2s cap, runs once per process).
 #[cfg(unix)]
@@ -92,25 +98,44 @@ fn query_login_path() -> Option<String> {
     use std::process::{Command, Stdio};
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let mut child = Command::new(&shell)
-        .args(["-lc", "printf '%s' \"$PATH\""])
+        .args([
+            "-lc",
+            &format!("printf '{PATH_MARK}%s{PATH_MARK}' \"$PATH\""),
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    // No async needed: this runs once, on a connect path, and is capped by a watchdog
-    // thread that kills the child if the shell hangs.
+    // A reader thread drains stdout; the main thread watches for exit and kills the shell
+    // if the rc files hang (network fs, prompts) instead of leaking it.
+    let mut stdout = child.stdout.take()?;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut out = String::new();
-        if let Some(mut stdout) = child.stdout.take() {
-            let _ = stdout.read_to_string(&mut out);
-        }
-        let _ = child.wait();
+        let _ = stdout.read_to_string(&mut out);
         let _ = tx.send(out);
     });
-    let out = rx.recv_timeout(Duration::from_secs(2)).ok()?;
-    let path = out.trim();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(_) => return None,
+        }
+    }
+    let out = rx.recv_timeout(Duration::from_millis(500)).ok()?;
+    let start = out.find(PATH_MARK)? + PATH_MARK.len();
+    let end = out.rfind(PATH_MARK)?;
+    if end <= start {
+        return None;
+    }
+    let path = out[start..end].trim();
     if path.is_empty() {
         None
     } else {
@@ -173,19 +198,24 @@ fn resolved_path() -> Option<String> {
     std::env::var("PATH").ok()
 }
 
+/// Warms the login-shell PATH cache. Meant to be called off the async runtime's request
+/// path (e.g. `spawn_blocking` at startup) since the first call can block for up to 2s.
+pub(crate) fn prewarm() {
+    let _ = resolved_path();
+}
+
 /// The env a stdio server is spawned with: allow-listed app vars, the recovered PATH, then
 /// user-configured entries (which may override anything, e.g. a pinned PATH).
-pub fn build_env(store: &McpStore, config: &McpServerConfig) -> HashMap<String, String> {
+pub fn build_env(store: &McpStore, config: &McpServerConfig) -> Result<HashMap<String, String>> {
     let mut env: HashMap<String, String> = std::env::vars()
         .filter(|(k, _)| ENV_ALLOWLIST.contains(&k.as_str()))
         .collect();
     if let Some(path) = resolved_path() {
         env.insert("PATH".into(), path);
     }
-    if let Ok((user_env, _)) = store.resolved_entries(config) {
-        env.extend(user_env);
-    }
-    env
+    let (user_env, _) = store.resolved_entries(config)?;
+    env.extend(user_env);
+    Ok(env)
 }
 
 #[cfg(test)]
@@ -217,7 +247,7 @@ mod tests {
             tool_policies: HashMap::new(),
             call_timeout_secs: 60,
         };
-        let env = build_env(&store, &config);
+        let env = build_env(&store, &config).unwrap();
         assert!(!env.contains_key("OPENGENT_TEST_SECRET"));
         assert!(env.contains_key("PATH"));
         assert!(env.contains_key("HOME") || cfg!(windows));

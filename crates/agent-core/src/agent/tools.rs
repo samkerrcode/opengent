@@ -71,6 +71,8 @@ pub struct ToolEntry {
     pub server_name: String,
     /// Original tool name on the server.
     pub tool: String,
+    /// Estimated prompt cost of sending this definition, computed once at catalog build.
+    pub def_tokens: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -128,7 +130,7 @@ pub fn resolve_on_demand(
         ToolLoading::All => false,
         ToolLoading::OnDemand => true,
         ToolLoading::Auto => {
-            let cost = definitions_tokens(catalog.iter().map(|e| &e.spec));
+            let cost: u32 = catalog.iter().map(|e| e.def_tokens).sum();
             cost > settings.auto_threshold_tokens || cost > context_window / 4
         }
     }
@@ -302,10 +304,15 @@ fn find_tools_spec(search_limit: usize) -> ToolSpec {
 /// Caps a tool result for storage and for the model: long text is truncated with a note and
 /// binary payloads (images, audio, blob resources) are reduced to a labeled stub.
 pub fn cap_result(content: Value) -> Value {
+    cap_result_with(content, MAX_TOOL_RESULT_CHARS)
+}
+
+/// `cap_result` with an explicit character budget shared across all parts.
+pub fn cap_result_with(content: Value, max_chars: usize) -> Value {
     let Value::Array(parts) = content else {
         return content;
     };
-    let mut budget = MAX_TOOL_RESULT_CHARS;
+    let mut budget = max_chars;
     let mut out = Vec::with_capacity(parts.len());
     for mut p in parts {
         match p.get("type").and_then(Value::as_str) {
@@ -331,12 +338,34 @@ pub fn cap_result(content: Value) -> Value {
             }
             Some("resource") => {
                 if let Some(r) = p.get_mut("resource") {
+                    if let Some(text) = r.get("text").and_then(Value::as_str) {
+                        let len = text.chars().count();
+                        if len > budget {
+                            let kept: String = text.chars().take(budget).collect();
+                            r["text"] = Value::String(format!(
+                                "{kept}\n[… truncated: showing {budget} of {len} characters]"
+                            ));
+                            budget = 0;
+                        } else {
+                            budget -= len;
+                        }
+                    }
                     if r.get("blob").is_some() {
                         r["blob"] = Value::Null;
                     }
                 }
             }
-            _ => {}
+            _ => {
+                // Unknown/vendor part types share the budget by serialized size; anything
+                // over it becomes a stub rather than inflating the transcript.
+                let len = p.to_string().chars().count();
+                if len > budget {
+                    p = json!({ "type": "text", "text": "[tool output part omitted]" });
+                    budget = 0;
+                } else {
+                    budget -= len;
+                }
+            }
         }
         out.push(p);
     }
@@ -349,25 +378,37 @@ pub struct RunTools {
     catalog: Vec<ToolEntry>,
     on_demand: bool,
     search_limit: usize,
+    /// Per-result character budget: `MAX_TOOL_RESULT_CHARS` capped further for small
+    /// context windows so one result can't swamp the model.
+    pub result_cap: usize,
     /// On-demand mode: exposed names currently loaded, oldest first.
     loaded: Vec<String>,
+    /// Exposed names of user-disabled tools: never offered, but recognized at dispatch so
+    /// the model is told "disabled" rather than "unknown" / "call find_tools".
+    disabled: HashSet<String>,
 }
 
 impl RunTools {
     /// `history` lets on-demand mode restore tools loaded or used in earlier turns.
+    /// `context_window` sizes `result_cap` (~a quarter of the window).
     pub fn new(
         host: Arc<dyn ToolHost>,
         catalog: Vec<ToolEntry>,
         on_demand: bool,
         search_limit: usize,
         history: &[Message],
+        context_window: u32,
     ) -> Self {
         let mut tools = Self {
             host,
             catalog,
             on_demand,
             search_limit: search_limit.clamp(1, 20),
+            // ~3 chars/token over a quarter of the window, floored so a bogus tiny window
+            // can't reduce every result to nothing.
+            result_cap: MAX_TOOL_RESULT_CHARS.min((context_window as usize / 4 * 3).max(2_000)),
             loaded: Vec::new(),
+            disabled: HashSet::new(),
         };
         if on_demand {
             for b in history.iter().flat_map(|m| &m.blocks) {
@@ -383,6 +424,16 @@ impl RunTools {
             }
         }
         tools
+    }
+
+    /// Registers the exposed names of user-disabled tools (see `is_disabled`).
+    pub fn with_disabled(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.disabled.extend(names);
+        self
+    }
+
+    pub fn is_disabled(&self, name: &str) -> bool {
+        self.disabled.contains(name)
     }
 
     pub fn is_on_demand(&self) -> bool {
@@ -417,6 +468,23 @@ impl RunTools {
                 .map(|e| e.spec.clone()),
         );
         specs
+    }
+
+    /// Estimated prompt cost of the definitions `specs()` will send (cached per entry, so
+    /// this doesn't re-serialize schemas at run start).
+    pub fn definition_tokens(&self) -> u32 {
+        if !self.on_demand {
+            return self.catalog.iter().map(|e| e.def_tokens).sum();
+        }
+        let find = find_tools_spec(self.search_limit);
+        let mut tokens = definitions_tokens([&find]);
+        tokens += self
+            .catalog
+            .iter()
+            .filter(|e| self.loaded.contains(&e.spec.name))
+            .map(|e| e.def_tokens)
+            .sum::<u32>();
+        tokens
     }
 
     /// Looks up a callable tool. In on-demand mode only loaded tools resolve, so the model
@@ -513,15 +581,18 @@ pub(crate) mod tests {
     use crate::domain::Role;
 
     pub fn entry(server: &str, tool: &str, desc: &str, namer: &mut ToolNamer) -> ToolEntry {
+        let spec = ToolSpec {
+            name: namer.name(server, tool),
+            description: desc.into(),
+            parameters: json!({ "type": "object" }),
+        };
+        let def_tokens = definitions_tokens([&spec]);
         ToolEntry {
-            spec: ToolSpec {
-                name: namer.name(server, tool),
-                description: desc.into(),
-                parameters: json!({ "type": "object" }),
-            },
+            spec,
             server_id: format!("id-{server}"),
             server_name: server.into(),
             tool: tool.into(),
+            def_tokens,
         }
     }
 
@@ -588,7 +659,7 @@ pub(crate) mod tests {
             entry("fs", "read_file", "Read a file", &mut n),
             entry("fs", "write_file", "Write a file", &mut n),
         ];
-        let mut tools = RunTools::new(Arc::new(NoopHost), catalog.clone(), true, 5, &[]);
+        let mut tools = RunTools::new(Arc::new(NoopHost), catalog.clone(), true, 5, &[], 8192);
         assert_eq!(tools.specs().len(), 1, "only find_tools before any search");
         assert!(tools.entry("fs__read_file").is_none());
         let out = tools.find_tools(&json!({ "query": "read" }));
@@ -607,10 +678,10 @@ pub(crate) mod tests {
                 status: None,
             }],
         }];
-        let restored = RunTools::new(Arc::new(NoopHost), catalog.clone(), true, 5, &history);
+        let restored = RunTools::new(Arc::new(NoopHost), catalog.clone(), true, 5, &history, 8192);
         assert!(restored.entry("fs__read_file").is_some());
 
-        let all = RunTools::new(Arc::new(NoopHost), catalog, false, 5, &[]);
+        let all = RunTools::new(Arc::new(NoopHost), catalog, false, 5, &[], 8192);
         assert_eq!(all.specs().len(), 2);
         assert!(all.entry("fs__write_file").is_some());
     }
@@ -633,6 +704,23 @@ pub(crate) mod tests {
             ..s
         };
         assert!(!resolve_on_demand(&all, &catalog, 128_000));
+    }
+
+    #[test]
+    fn cap_result_bounds_resource_text_and_unknown_parts() {
+        let capped = cap_result_with(
+            json!([
+                { "type": "resource", "resource": { "uri": "file:///x", "text": "z".repeat(100) } },
+                { "type": "vendor_big", "blob": "y".repeat(100) },
+            ]),
+            50,
+        );
+        let parts = capped.as_array().unwrap();
+        assert!(parts[0]["resource"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("truncated"));
+        assert!(parts[1]["text"].as_str().unwrap().contains("omitted"));
     }
 
     #[test]

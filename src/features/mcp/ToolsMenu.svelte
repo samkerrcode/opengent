@@ -10,7 +10,7 @@
   const policies: { value: ToolPolicy; label: string; hint: string }[] = [
     { value: "always_allow", label: "Allow", hint: "run without asking" },
     { value: "ask", label: "Ask", hint: "approve each call" },
-    { value: "block", label: "Block", hint: "hidden from the model" },
+    { value: "block", label: "Disable", hint: "hidden from the model" },
   ];
 
   const loadings: { value: ToolLoading; label: string }[] = [
@@ -31,7 +31,10 @@
 
   function statusText(s: McpServerView): string {
     switch (s.status.kind) {
-      case "connected": return `${s.status.tool_count} tools`;
+      case "connected": {
+        const off = s.tools.filter((t) => t.policy === "block").length;
+        return `${s.tools.length - off} tools${off ? ` · ${off} off` : ""}`;
+      }
       case "connecting": return "connecting…";
       case "failed": return "failed";
       case "disabled": return "off";
@@ -89,8 +92,11 @@
               </select>
             </label>
             {#each s.tools as t (t.name)}
-              <div class="tool" title={t.description ?? t.name}>
+              <div class="tool" class:off={t.policy === "block"} title={t.description ?? t.name}>
                 <span class="tname">{t.title ?? t.name}</span>
+                {#if t.changed}
+                  <span class="warn" title="This tool's definition changed since it was allowed — it will ask for approval again">changed</span>
+                {/if}
                 <select
                   class="policy"
                   value={t.policy}
@@ -243,12 +249,26 @@
     gap: 6px;
     font-size: 12px;
   }
+  .tool.off {
+    opacity: 0.5;
+  }
   .tname {
     flex: 1;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .warn {
+    flex: none;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--warning);
+    border: 1px solid var(--warning);
+    border-radius: var(--radius-sm);
+    padding: 0 4px;
   }
   .policy {
     width: auto;

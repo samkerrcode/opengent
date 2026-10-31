@@ -12,7 +12,7 @@ pub use providers::*;
 use std::collections::HashMap;
 
 use agent_core::agent::context::{self, AttachmentContent, ToolContext};
-use agent_core::agent::{definitions_tokens, RunRecorder, RunRequest, RunSink};
+use agent_core::agent::{RunRecorder, RunRequest, RunSink};
 use agent_core::config::{product, ProductInfo};
 use agent_core::domain::{ChatId, ContentBlock, Role, RunEvent, RunId};
 use agent_core::secrets::SecretRef;
@@ -208,11 +208,11 @@ pub async fn start_run(
     let mut tool_ctx = ToolContext::default();
     let mut run_tools = None;
     if caps.tools {
-        if let Some((tools, prompt)) = state.mcp.prepare_tools(
+        if let Some((tools, prompt, def_tokens)) = state.mcp.prepare_tools(
             &history,
             context_window.unwrap_or(context::DEFAULT_CONTEXT_TOKENS),
         ) {
-            tool_ctx.definition_tokens = definitions_tokens(&tools.specs());
+            tool_ctx.definition_tokens = def_tokens;
             tool_ctx.prompt = prompt;
             run_tools = Some(tools);
         }

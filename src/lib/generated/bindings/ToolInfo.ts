@@ -13,4 +13,9 @@ exposed: string, title: string | null, description: string | null, policy: ToolP
 /**
  * MCP annotation hints (untrusted metadata, shown for information only).
  */
-read_only: boolean, destructive: boolean, };
+read_only: boolean, destructive: boolean, 
+/**
+ * An `always_allow` grant exists but the tool's definition changed since it was
+ * granted; it currently behaves as `ask` until re-approved.
+ */
+changed: boolean, };

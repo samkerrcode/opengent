@@ -12,6 +12,6 @@ pub use coordinator::{RunCoordinator, RunRequest, RunSink};
 pub use emitter::{EmitterConfig, RunEmitter};
 pub use recorder::RunRecorder;
 pub use tools::{
-    cap_result, definitions_tokens, resolve_on_demand, RunTools, ToolEntry, ToolFuture, ToolHost,
-    ToolLoading, ToolNamer, ToolOutput, ToolSettings, FIND_TOOLS,
+    cap_result, cap_result_with, definitions_tokens, resolve_on_demand, RunTools, ToolEntry,
+    ToolFuture, ToolHost, ToolLoading, ToolNamer, ToolOutput, ToolSettings, FIND_TOOLS,
 };

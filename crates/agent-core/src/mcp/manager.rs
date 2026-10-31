@@ -4,8 +4,8 @@
 //! Status changes are pushed to the host through an `on_change` callback (the Tauri layer
 //! emits an app event; the UI refetches `list_mcp_servers`).
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use rmcp::model::{CallToolRequestParams, ClientConfig};
@@ -17,13 +17,14 @@ use rmcp::transport::TokioChildProcess;
 use rmcp::{ClientHandler, RoleClient, ServiceExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 
 use super::config::{McpServerConfig, McpStore, McpTransport};
 use super::{client_config, StdioServerSpec};
-use crate::agent::context::{tools_prompt, ServerBrief};
+use crate::agent::context::{estimate_tokens, tools_prompt, ServerBrief};
 use crate::agent::tools::{
     resolve_on_demand, RunTools, ToolEntry, ToolFuture, ToolHost, ToolNamer, ToolOutput,
 };
@@ -36,8 +37,36 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const WATCHDOG_POLL: Duration = Duration::from_secs(2);
 /// Keep the last N stderr lines of a stdio server for diagnostics.
 const STDERR_LINES: usize = 40;
+/// Max chars kept per stderr line; longer lines are truncated (and never grow the
+/// read buffer unboundedly).
+const MAX_STDERR_LINE: usize = 2_048;
+/// Max tools offered per server; a misbehaving server can't flood the catalog.
+const MAX_TOOLS_PER_SERVER: usize = 500;
+/// Disabled tools named in the system prompt per server; beyond this they are
+/// counted as "+N more".
+const MAX_DISABLED_LISTED: usize = 16;
+/// Bounds on untrusted server-provided metadata sent to the model.
+const MAX_TOOL_DESC_CHARS: usize = 1_024;
+const MAX_TOOL_SCHEMA_CHARS: usize = 16_384;
 
 type Service = RunningService<RoleClient, AppClientHandler>;
+
+/// Truncates, redacts known secret values, logs, and appends a stderr line to the bounded
+/// tail the UI reads for diagnostics.
+fn push_stderr_line(line: &str, tail: &Mutex<VecDeque<String>>, secrets: &[String], server: &str) {
+    let mut line: String = line.chars().take(MAX_STDERR_LINE).collect();
+    for s in secrets {
+        if line.contains(s.as_str()) {
+            line = line.replace(s.as_str(), "[redacted]");
+        }
+    }
+    tracing::debug!(server = %server, "mcp stderr: {line}");
+    let mut tail = tail.lock().expect("stderr lock");
+    if tail.len() >= STDERR_LINES {
+        tail.pop_front();
+    }
+    tail.push_back(line);
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -68,6 +97,10 @@ pub struct ToolInfo {
     /// MCP annotation hints (untrusted metadata, shown for information only).
     pub read_only: bool,
     pub destructive: bool,
+    /// An `always_allow` grant exists but the tool's definition changed since it was
+    /// granted; it currently behaves as `ask` until re-approved.
+    #[serde(default)]
+    pub changed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -88,13 +121,40 @@ struct Live {
     tools: Mutex<Vec<rmcp::model::Tool>>,
     server_info: String,
     instructions: Option<String>,
-    stderr: Arc<Mutex<Vec<String>>>,
+    stderr: Arc<Mutex<VecDeque<String>>>,
 }
 
 #[derive(Default)]
 struct Inner {
     status: HashMap<String, McpServerStatus>,
     live: HashMap<String, Arc<Live>>,
+    /// Bumped on every connect/disconnect so a slow handshake finishing late can't install
+    /// a session for a server that was disabled, deleted or reconnected meanwhile.
+    epochs: HashMap<String, u64>,
+}
+
+/// sha256 over the fields that define what a tool does. `AlwaysAllow` grants record the
+/// signature at grant time and are honored only while it matches — a server that changes
+/// the tool's schema or description behind the grant falls back to `Ask`.
+pub(crate) fn tool_signature(t: &rmcp::model::Tool) -> String {
+    let mut h = Sha256::new();
+    h.update(t.name.as_bytes());
+    h.update(b"\0");
+    if let Some(d) = t.description.as_deref() {
+        h.update(d.as_bytes());
+    }
+    h.update(b"\0");
+    h.update(
+        serde_json::to_string(&t.input_schema)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    h.update(b"\0");
+    if let Some(ann) = &t.annotations {
+        h.update(serde_json::to_string(ann).unwrap_or_default().as_bytes());
+    }
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(h.finalize())
 }
 
 /// Client-side MCP handler: declares our identity/capabilities and forwards
@@ -157,6 +217,56 @@ impl McpManager {
         self.notify();
     }
 
+    /// Starts a new connect generation for `id`: any earlier in-flight `establish` for this
+    /// server becomes stale and must not install its session when it finishes.
+    fn next_epoch(&self, id: &str) -> u64 {
+        let mut inner = self.inner.lock().expect("mcp lock");
+        let e = inner.epochs.entry(id.to_owned()).or_insert(0);
+        *e += 1;
+        *e
+    }
+
+    fn is_current(&self, id: &str, epoch: u64) -> bool {
+        self.inner.lock().expect("mcp lock").epochs.get(id).copied() == Some(epoch)
+    }
+
+    /// Definition signature of the live tool, if the server is connected.
+    fn current_signature(&self, server_id: &str, tool: &str) -> Option<String> {
+        let live = self
+            .inner
+            .lock()
+            .expect("mcp lock")
+            .live
+            .get(server_id)
+            .cloned()?;
+        let tools = live.tools.lock().expect("tools lock");
+        tools.iter().find(|t| t.name == tool).map(tool_signature)
+    }
+
+    /// Persists a tool policy and, when the server is connected, the tool's current
+    /// definition signature so an `AlwaysAllow` grant stays verifiable.
+    pub fn set_policy(&self, server_id: &str, tool: &str, policy: ToolPolicy) {
+        let sig = self.current_signature(server_id, tool);
+        if let Err(e) = self.store.set_tool_policy(server_id, tool, policy, sig) {
+            tracing::warn!(error = %e, "failed to persist tool policy");
+        }
+        self.notify();
+    }
+
+    /// Cancels every session; called at app exit. Process-group kill-on-drop guarantees
+    /// child processes die even while the runtime is tearing down.
+    pub fn shutdown(&self) {
+        let lives: Vec<Arc<Live>> = {
+            let mut inner = self.inner.lock().expect("mcp lock");
+            inner.epochs.clear();
+            inner.status.clear();
+            inner.live.drain().map(|(_, l)| l).collect()
+        };
+        for live in lives {
+            live.service.cancellation_token().cancel();
+        }
+    }
+
     /// Snapshot for the UI: every configured server with live status, tools and diagnostics.
     pub fn list_views(&self) -> Vec<McpServerView> {
         let inner = self.inner.lock().expect("mcp lock");
@@ -174,6 +284,7 @@ impl McpManager {
                             .iter()
                             .map(|t| {
                                 let ann = t.annotations.as_ref();
+                                let policy = self.store.policy_for(&config.id, &t.name);
                                 ToolInfo {
                                     name: t.name.to_string(),
                                     exposed: namer.name(&config.name, &t.name),
@@ -182,11 +293,17 @@ impl McpManager {
                                         .clone()
                                         .or_else(|| ann.and_then(|a| a.title.clone())),
                                     description: t.description.as_deref().map(str::to_owned),
-                                    policy: self.store.policy_for(&config.id, &t.name),
+                                    policy,
                                     read_only: ann.and_then(|a| a.read_only_hint).unwrap_or(false),
                                     destructive: ann
                                         .and_then(|a| a.destructive_hint)
                                         .unwrap_or(true),
+                                    changed: policy == ToolPolicy::AlwaysAllow
+                                        && self.store.grant_stale(
+                                            &config.id,
+                                            &t.name,
+                                            &tool_signature(t),
+                                        ),
                                 }
                             })
                             .collect()
@@ -205,7 +322,14 @@ impl McpManager {
                     server_info: live.map(|l| l.server_info.clone()),
                     tools,
                     stderr_tail: live
-                        .map(|l| l.stderr.lock().expect("stderr lock").clone())
+                        .map(|l| {
+                            l.stderr
+                                .lock()
+                                .expect("stderr lock")
+                                .iter()
+                                .cloned()
+                                .collect()
+                        })
                         .unwrap_or_default(),
                     config,
                 }
@@ -216,6 +340,11 @@ impl McpManager {
     /// Connects all enabled servers that aren't already connected, in the background.
     /// Called once at startup.
     pub fn autoconnect(self: &Arc<Self>) {
+        // The first login-shell PATH probe can block ~2s; warm the cache off the async
+        // request path so the first connect doesn't stall a runtime worker.
+        self.handle.spawn(async {
+            let _ = tokio::task::spawn_blocking(super::stdio::prewarm).await;
+        });
         let ids: Vec<String> = {
             let inner = self.inner.lock().expect("mcp lock");
             self.store
@@ -231,9 +360,16 @@ impl McpManager {
         }
     }
 
-    /// Disconnects and drops the session, if any.
+    /// Disconnects and drops the session, if any. Also invalidates an in-flight connect:
+    /// when it finishes it will see a stale epoch and drop the session instead of
+    /// installing it.
     pub fn disconnect(&self, id: &str) {
-        let live = self.inner.lock().expect("mcp lock").live.remove(id);
+        let live = {
+            let mut inner = self.inner.lock().expect("mcp lock");
+            *inner.epochs.entry(id.to_owned()).or_insert(0) += 1;
+            inner.status.remove(id);
+            inner.live.remove(id)
+        };
         if let Some(live) = live {
             // Cancel in the background; dropping the Arc closes the transport for real
             // once in-flight calls finish holding it.
@@ -243,55 +379,79 @@ impl McpManager {
         }
         if self.store.get(id).is_ok() {
             self.set_status(id, McpServerStatus::Idle);
+        } else {
+            self.notify();
         }
     }
 
     /// (Re)connects a single server: handshake, tool listing, catalog install. Errors are
     /// recorded as `Failed` status rather than returned — this usually runs on background
-    /// tasks and the UI reads the status.
+    /// tasks and the UI reads the status. A connect that finishes after the server was
+    /// disabled, deleted or reconnected drops its session instead of installing it.
     pub async fn connect(self: &Arc<Self>, id: &str) {
         let config = match self.store.get(id) {
             Ok(c) if c.enabled => c,
             _ => return,
         };
         self.disconnect(id);
+        let epoch = self.next_epoch(id);
         self.set_status(id, McpServerStatus::Connecting);
 
-        match self.establish(&config).await {
+        match self.establish(&config, epoch).await {
             Ok((live, tool_changed_rx)) => {
+                if !self.is_current(id, epoch)
+                    || !self.store.get(id).map(|c| c.enabled).unwrap_or(false)
+                {
+                    // Superseded while establishing; dropping `live` cancels the service
+                    // and kills the child process.
+                    return;
+                }
+                let live = Arc::new(live);
                 let count = live.tools.lock().expect("tools lock").len() as u32;
                 self.inner
                     .lock()
                     .expect("mcp lock")
                     .live
-                    .insert(id.to_owned(), Arc::new(live));
+                    .insert(id.to_owned(), Arc::clone(&live));
                 self.set_status(id, McpServerStatus::Connected { tool_count: count });
-                self.spawn_watchdog(id.to_owned());
-                self.spawn_tool_change_listener(id.to_owned(), tool_changed_rx);
+                self.spawn_watchdog(id.to_owned(), Arc::clone(&live));
+                self.spawn_tool_change_listener(
+                    id.to_owned(),
+                    Arc::downgrade(&live),
+                    tool_changed_rx,
+                );
             }
             Err(error) => {
-                self.set_status(id, McpServerStatus::Failed { error });
+                if self.is_current(id, epoch) {
+                    self.set_status(id, McpServerStatus::Failed { error });
+                }
             }
         }
     }
 
-    /// Marks the server `Failed` if its transport dies (server exit, network drop).
-    fn spawn_watchdog(self: &Arc<Self>, id: String) {
+    /// Marks the server `Failed` if its transport dies (server exit, network drop). Bound
+    /// to a specific `Live` so a watchdog can't outlive and flag a newer session.
+    fn spawn_watchdog(self: &Arc<Self>, id: String, live: Arc<Live>) {
         let this = Arc::clone(self);
         self.handle.spawn(async move {
             loop {
                 tokio::time::sleep(WATCHDOG_POLL).await;
-                let live = this.inner.lock().expect("mcp lock").live.get(&id).cloned();
-                let Some(live) = live else { return };
+                let current = this.inner.lock().expect("mcp lock").live.get(&id).cloned();
+                match current {
+                    Some(cur) if Arc::ptr_eq(&cur, &live) => {}
+                    _ => return, // removed or replaced — this session is no longer ours
+                }
                 if live.service.is_closed() || live.service.is_transport_closed() {
-                    if this
-                        .inner
-                        .lock()
-                        .expect("mcp lock")
-                        .live
-                        .remove(&id)
-                        .is_some()
-                    {
+                    let removed = {
+                        let mut inner = this.inner.lock().expect("mcp lock");
+                        match inner.live.get(&id) {
+                            Some(cur) if Arc::ptr_eq(cur, &live) => {
+                                inner.live.remove(&id).is_some()
+                            }
+                            _ => false,
+                        }
+                    };
+                    if removed {
                         this.set_status(
                             &id,
                             McpServerStatus::Failed {
@@ -307,30 +467,48 @@ impl McpManager {
         });
     }
 
-    /// Applies `tools/list_changed` notifications to the live catalog.
+    /// Applies `tools/list_changed` notifications to the live catalog, coalescing bursts
+    /// into a single refetch. Bound to the session via `Weak<Live>`.
     fn spawn_tool_change_listener(
         self: &Arc<Self>,
         id: String,
+        live: Weak<Live>,
         mut rx: mpsc::UnboundedReceiver<Peer<RoleClient>>,
     ) {
         let this = Arc::clone(self);
         self.handle.spawn(async move {
             while let Some(peer) = rx.recv().await {
+                while rx.try_recv().is_ok() {}
+                let Some(live) = live.upgrade() else { return };
+                let still_current = this
+                    .inner
+                    .lock()
+                    .expect("mcp lock")
+                    .live
+                    .get(&id)
+                    .is_some_and(|cur| Arc::ptr_eq(cur, &live));
+                if !still_current {
+                    return;
+                }
                 let tools = tokio::time::timeout(CONNECT_TIMEOUT, peer.list_all_tools())
                     .await
                     .ok()
                     .and_then(std::result::Result::ok);
                 if let Some(tools) = tools {
+                    let still_current = this
+                        .inner
+                        .lock()
+                        .expect("mcp lock")
+                        .live
+                        .get(&id)
+                        .is_some_and(|cur| Arc::ptr_eq(cur, &live));
+                    if !still_current {
+                        return;
+                    }
                     let count = {
-                        let inner = this.inner.lock().expect("mcp lock");
-                        match inner.live.get(&id) {
-                            Some(l) => {
-                                let mut t = l.tools.lock().expect("tools lock");
-                                *t = tools;
-                                t.len() as u32
-                            }
-                            None => return,
-                        }
+                        let mut t = live.tools.lock().expect("tools lock");
+                        *t = tools;
+                        t.len() as u32
                     };
                     this.set_status(&id, McpServerStatus::Connected { tool_count: count });
                 }
@@ -339,12 +517,15 @@ impl McpManager {
     }
 
     /// Performs transport setup + handshake + initial tool list for one server.
+    /// `epoch` ties this attempt to a connect generation; if the server was disconnected
+    /// meanwhile the partially-established session is abandoned.
     async fn establish(
         &self,
         config: &McpServerConfig,
+        epoch: u64,
     ) -> std::result::Result<(Live, mpsc::UnboundedReceiver<Peer<RoleClient>>), String> {
         let (tool_changed_tx, tool_changed_rx) = mpsc::unbounded_channel::<Peer<RoleClient>>();
-        let stderr = Arc::new(Mutex::new(Vec::<String>::new()));
+        let stderr = Arc::new(Mutex::new(VecDeque::<String>::new()));
         let handler = AppClientHandler {
             info: client_config(),
             tool_changed: tool_changed_tx,
@@ -352,7 +533,10 @@ impl McpManager {
 
         let service = match config.transport {
             McpTransport::Stdio => {
-                let env = super::stdio::build_env(&self.store, config);
+                let env =
+                    super::stdio::build_env(&self.store, config).map_err(|e| e.to_string())?;
+                // Known secret values, scrubbed from stderr before it reaches the log or UI.
+                let secrets = self.store.secret_values(config);
                 let spec = StdioServerSpec {
                     command: super::stdio::expand_tilde(&config.command),
                     // `~` in paths can't be expanded by the child (no shell runs).
@@ -368,29 +552,55 @@ impl McpManager {
                         .map(std::path::PathBuf::from),
                     env,
                 };
+                // Windows: `Command::new("npx")` won't find `npx.cmd` via PATHEXT.
+                #[cfg(windows)]
+                let mut cmd = rmcp::transport::which_command(&spec.command)
+                    .unwrap_or_else(|_| tokio::process::Command::new(&spec.command));
+                #[cfg(not(windows))]
                 let mut cmd = tokio::process::Command::new(&spec.command);
                 cmd.args(&spec.args).env_clear().envs(&spec.env);
                 if let Some(cwd) = &spec.cwd {
                     cmd.current_dir(cwd);
                 }
+                // Wrap so kill()/drop kills the whole process tree (e.g. `npx` → `node`),
+                // not just the direct child.
+                let mut cmd = process_wrap::tokio::CommandWrap::from(cmd);
+                #[cfg(unix)]
+                cmd.wrap(process_wrap::tokio::ProcessGroup::leader());
+                #[cfg(windows)]
+                cmd.wrap(process_wrap::tokio::JobObject);
+                cmd.wrap(process_wrap::tokio::KillOnDrop);
                 let (transport, stderr_stream) = TokioChildProcess::builder(cmd)
                     .stderr(std::process::Stdio::piped())
                     .spawn()
                     .map_err(|e| format!("failed to launch `{}`: {e}", spec.command))?;
-                // Drain stderr into a bounded tail for diagnostics + the log.
+                // Drain stderr into a bounded, redacted tail for diagnostics + the log.
                 if let Some(mut err) = stderr_stream {
                     let tail_buf = stderr.clone();
                     let server = config.name.clone();
                     self.handle.spawn(async move {
-                        use tokio::io::AsyncBufReadExt;
-                        let mut lines = tokio::io::BufReader::new(&mut err).lines();
-                        while let Ok(Some(line)) = lines.next_line().await {
-                            tracing::debug!(server = %server, "mcp stderr: {line}");
-                            let mut tail = tail_buf.lock().expect("stderr lock");
-                            if tail.len() >= STDERR_LINES {
-                                tail.remove(0);
+                        use tokio::io::AsyncReadExt;
+                        let mut buf = [0u8; 8192];
+                        let mut pending = String::new();
+                        loop {
+                            let n = match err.read(&mut buf).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => n,
+                            };
+                            pending.push_str(&String::from_utf8_lossy(&buf[..n]));
+                            while let Some(pos) = pending.find('\n') {
+                                let mut line: String = pending.drain(..=pos).collect();
+                                line.pop();
+                                push_stderr_line(&line, &tail_buf, &secrets, &server);
                             }
-                            tail.push(line);
+                            if pending.chars().count() > MAX_STDERR_LINE {
+                                let line: String = pending.chars().take(MAX_STDERR_LINE).collect();
+                                pending.clear();
+                                push_stderr_line(&line, &tail_buf, &secrets, &server);
+                            }
+                        }
+                        if !pending.trim().is_empty() {
+                            push_stderr_line(&pending, &tail_buf, &secrets, &server);
                         }
                     });
                 }
@@ -403,7 +613,7 @@ impl McpManager {
                         } else {
                             format!(
                                 "handshake timed out after {CONNECT_TIMEOUT:?}: {}",
-                                tail.join(" | ")
+                                tail.iter().cloned().collect::<Vec<_>>().join(" | ")
                             )
                         }
                     })?
@@ -436,10 +646,16 @@ impl McpManager {
             }
         };
 
+        if !self.is_current(&config.id, epoch) {
+            return Err("connect superseded".into());
+        }
         let tools = tokio::time::timeout(CONNECT_TIMEOUT, service.list_all_tools())
             .await
             .map_err(|_| "tools/list timed out".to_owned())?
             .map_err(|e| format!("tools/list failed: {e}"))?;
+        if !self.is_current(&config.id, epoch) {
+            return Err("connect superseded".into());
+        }
         let info = service.peer_info();
         let server_info = info
             .as_ref()
@@ -461,16 +677,17 @@ impl McpManager {
     }
 
     /// The run-facing snapshot: a catalog of non-blocked tools from connected, enabled
-    /// servers plus the system-prompt addition. `history` restores the on-demand loaded set.
-    /// Returns `None` when nothing is callable.
+    /// servers plus the system-prompt addition and the estimated definition cost.
+    /// `history` restores the on-demand loaded set. Returns `None` when nothing is callable.
     pub fn prepare_tools(
         self: &Arc<Self>,
         history: &[Message],
         context_window: u32,
-    ) -> Option<(RunTools, String)> {
+    ) -> Option<(RunTools, String, u32)> {
         let settings = self.store.settings();
         let mut catalog = Vec::new();
         let mut briefs = Vec::new();
+        let mut all_disabled = Vec::new();
         let mut namer = ToolNamer::new();
         {
             let inner = self.inner.lock().expect("mcp lock");
@@ -482,31 +699,66 @@ impl McpManager {
                     continue;
                 };
                 let mut count = 0usize;
+                let mut skipped = 0usize;
+                let mut disabled = Vec::new();
+                let mut disabled_extra = 0usize;
                 for t in live.tools.lock().expect("tools lock").iter() {
+                    // Name every tool in list order so exposed names stay stable when tools
+                    // are disabled or skipped.
+                    let exposed = namer.name(&config.name, &t.name);
                     if self.store.policy_for(&config.id, &t.name) == ToolPolicy::Block {
+                        // Named but never defined: the model can explain it's disabled.
+                        if disabled.len() < MAX_DISABLED_LISTED {
+                            disabled.push(exposed.clone());
+                        } else {
+                            disabled_extra += 1;
+                        }
+                        all_disabled.push(exposed);
                         continue;
                     }
+                    if count >= MAX_TOOLS_PER_SERVER {
+                        continue;
+                    }
+                    let schema_json = serde_json::to_string(&t.input_schema).unwrap_or_default();
+                    if schema_json.len() > MAX_TOOL_SCHEMA_CHARS {
+                        skipped += 1;
+                        continue;
+                    }
+                    // Server-provided descriptions are untrusted content; bound them.
+                    let description: String = t
+                        .description
+                        .as_deref()
+                        .or(t.title.as_deref())
+                        .unwrap_or("")
+                        .chars()
+                        .take(MAX_TOOL_DESC_CHARS)
+                        .collect();
+                    let def_tokens = estimate_tokens(&exposed)
+                        + estimate_tokens(&description)
+                        + estimate_tokens(&schema_json)
+                        + 8;
                     count += 1;
                     catalog.push(ToolEntry {
                         spec: ToolSpec {
-                            name: namer.name(&config.name, &t.name),
-                            description: t
-                                .description
-                                .as_deref()
-                                .or(t.title.as_deref())
-                                .unwrap_or("")
-                                .to_owned(),
+                            name: exposed,
+                            description,
                             parameters: Value::Object((*t.input_schema).clone()),
                         },
                         server_id: config.id.clone(),
                         server_name: config.name.clone(),
                         tool: t.name.to_string(),
+                        def_tokens,
                     });
+                }
+                if skipped > 0 {
+                    tracing::warn!(server = %config.name, skipped, "skipped tools with oversized schemas");
                 }
                 briefs.push(ServerBrief {
                     name: config.name.clone(),
                     tool_count: count,
                     instructions: live.instructions.clone(),
+                    disabled,
+                    disabled_extra,
                 });
             }
         }
@@ -520,24 +772,28 @@ impl McpManager {
             on_demand,
             settings.search_limit as usize,
             history,
-        );
-        Some((tools, tools_prompt(&briefs, on_demand)))
+            context_window,
+        )
+        .with_disabled(all_disabled);
+        let def_tokens = tools.definition_tokens();
+        Some((tools, tools_prompt(&briefs, on_demand), def_tokens))
     }
 }
 
 /// `McpManager` implements `ToolHost`; runs hold it as `Arc<dyn ToolHost>`.
 impl ToolHost for McpManager {
     fn policy(&self, server_id: &str, tool: &str) -> ToolPolicy {
-        self.store.policy_for(server_id, tool)
+        let sig = self.current_signature(server_id, tool);
+        self.store.effective_policy(server_id, tool, sig.as_deref())
     }
 
     fn set_policy(&self, server_id: &str, tool: &str, policy: ToolPolicy) {
-        if let Err(e) = self.store.set_tool_policy(server_id, tool, policy) {
-            tracing::warn!(error = %e, "failed to persist tool policy");
-        }
-        self.notify();
+        McpManager::set_policy(self, server_id, tool, policy)
     }
 
+    /// `call_tool` abandons its request on drop, which makes rmcp send
+    /// `notifications/cancelled` — so the coordinator's timeout/cancel path (which drops
+    /// this future) already notifies the server; `_cancel` only short-circuits locally.
     fn call(
         &self,
         server_id: &str,
@@ -595,5 +851,49 @@ impl ToolHost for McpManager {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::resolve_data_root;
+    use crate::secrets::MemorySecretStore;
+
+    fn manager() -> Arc<McpManager> {
+        let tmp = std::env::temp_dir().join(format!("opengent-mgr-{}", uuid::Uuid::new_v4()));
+        let root = resolve_data_root(Some(&tmp)).unwrap();
+        let store = McpStore::load(&root, Arc::new(MemorySecretStore::default())).unwrap();
+        McpManager::new(
+            store,
+            reqwest::Client::new(),
+            tokio::runtime::Handle::current(),
+            || {},
+        )
+    }
+
+    #[tokio::test]
+    async fn disconnect_invalidates_an_in_flight_connect() {
+        let m = manager();
+        let epoch = m.next_epoch("s");
+        assert!(m.is_current("s", epoch));
+        m.disconnect("s");
+        assert!(
+            !m.is_current("s", epoch),
+            "a superseded connect must fail the currency check"
+        );
+        assert!(!m.is_current("never-connected", u64::MAX));
+    }
+
+    #[test]
+    fn stderr_tail_redacts_secrets_and_caps_lines() {
+        let tail = Mutex::new(VecDeque::new());
+        let secrets = vec!["sekret-token".to_string()];
+        push_stderr_line("boom sekret-token happened", &tail, &secrets, "s");
+        let long = "x".repeat(MAX_STDERR_LINE + 64);
+        push_stderr_line(&long, &tail, &secrets, "s");
+        let t = tail.lock().unwrap();
+        assert!(t[0].contains("[redacted]") && !t[0].contains("sekret-token"));
+        assert_eq!(t[1].chars().count(), MAX_STDERR_LINE);
     }
 }

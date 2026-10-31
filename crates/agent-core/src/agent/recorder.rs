@@ -79,12 +79,14 @@ impl<S: RunSink> RunRecorder<S> {
         match event {
             RunEventPayload::TextDelta { text } => {
                 append_block(&mut p.blocks, text, false);
-                self.maybe_checkpoint(&mut p);
+                self.maybe_checkpoint(&mut p, false);
             }
             RunEventPayload::ThinkingDelta { text } => {
                 append_block(&mut p.blocks, text, true);
-                self.maybe_checkpoint(&mut p);
+                self.maybe_checkpoint(&mut p, false);
             }
+            // Tool events are rare and a call can then sit in `pending approval` for a
+            // long time: checkpoint immediately so a crash doesn't lose them.
             RunEventPayload::ToolCall { call } => {
                 p.blocks.push(ContentBlock::ToolCall {
                     id: call.id.clone(),
@@ -93,7 +95,7 @@ impl<S: RunSink> RunRecorder<S> {
                     server: call.server.clone(),
                     tool: Some(call.tool.clone()),
                 });
-                self.maybe_checkpoint(&mut p);
+                self.maybe_checkpoint(&mut p, true);
             }
             RunEventPayload::ToolResult {
                 call_id,
@@ -107,7 +109,7 @@ impl<S: RunSink> RunRecorder<S> {
                     is_error: *is_error,
                     status: Some(*status),
                 });
-                self.maybe_checkpoint(&mut p);
+                self.maybe_checkpoint(&mut p, true);
             }
             RunEventPayload::Usage { usage } => p.usage = Some(*usage),
             RunEventPayload::Completed { .. } => self.finish(&mut p, MessageStatus::Complete, None),
@@ -121,9 +123,9 @@ impl<S: RunSink> RunRecorder<S> {
         }
     }
 
-    fn maybe_checkpoint(&self, p: &mut Progress) {
+    fn maybe_checkpoint(&self, p: &mut Progress, force: bool) {
         p.dirty = true;
-        if p.last_checkpoint.elapsed() < CHECKPOINT_EVERY {
+        if !force && p.last_checkpoint.elapsed() < CHECKPOINT_EVERY {
             return;
         }
         p.last_checkpoint = Instant::now();

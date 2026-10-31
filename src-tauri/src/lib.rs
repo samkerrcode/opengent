@@ -60,8 +60,16 @@ pub fn run() {
             commands::set_tool_settings,
             commands::resolve_tool_approval,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running the desktop application");
+        .build(tauri::generate_context!())
+        .expect("error while building the desktop application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Stop every MCP server (and its process tree) before teardown.
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.mcp.shutdown();
+                }
+            }
+        });
 }
 
 fn init_tracing() {

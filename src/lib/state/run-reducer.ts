@@ -50,15 +50,23 @@ export function turnThinking(turn: AssistantTurn): string {
   return turn.segments.filter((s) => s.kind === "thinking").map((s) => s.text).join("\n\n");
 }
 
-function pushText(segments: TurnSegment[], kind: "text" | "thinking", delta: string) {
-  const last = segments[segments.length - 1];
-  if (last && last.kind === kind) last.text += delta;
-  else segments.push({ kind, text: delta });
+// Copy-on-write updates: unchanged segments keep their object identity so Svelte doesn't
+// re-render (or re-run markdown-it + DOMPurify on) them for every streamed delta.
+function pushText(turn: AssistantTurn, kind: "text" | "thinking", delta: string) {
+  const segs = turn.segments;
+  const last = segs[segs.length - 1];
+  if (last && last.kind === kind) {
+    turn.segments = [...segs.slice(0, -1), { ...last, text: last.text + delta }];
+  } else {
+    turn.segments = [...segs, { kind, text: delta }];
+  }
 }
 
-function toolSegment(segments: TurnSegment[], callId: string): ToolSegment | undefined {
-  const s = segments.find((s): s is ToolSegment => s.kind === "tool" && s.call.id === callId);
-  return s;
+function patchToolSegment(turn: AssistantTurn, callId: string, patch: Partial<ToolSegment>) {
+  const idx = turn.segments.findIndex((s) => s.kind === "tool" && s.call.id === callId);
+  const seg = idx >= 0 ? turn.segments[idx] : undefined;
+  if (!seg || seg.kind !== "tool") return;
+  turn.segments = [...turn.segments.slice(0, idx), { ...seg, ...patch }, ...turn.segments.slice(idx + 1)];
 }
 
 export function applyRunEvent(turn: AssistantTurn, event: RunEvent): AssistantTurn {
@@ -66,7 +74,7 @@ export function applyRunEvent(turn: AssistantTurn, event: RunEvent): AssistantTu
     return { ...turn, phase: "failed", error: `unsupported event schema ${event.schema}` };
   }
   if (turn.runId !== null && turn.runId !== event.run_id) return turn;
-  const next: AssistantTurn = { ...turn, runId: event.run_id, lastSeq: event.seq, segments: turn.segments.map((s) => ({ ...s })) };
+  const next: AssistantTurn = { ...turn, runId: event.run_id, lastSeq: event.seq };
   if (event.seq !== turn.lastSeq + 1) next.desynced = true;
 
   const p = event.payload;
@@ -75,10 +83,10 @@ export function applyRunEvent(turn: AssistantTurn, event: RunEvent): AssistantTu
       next.phase = p.phase;
       break;
     case "text_delta":
-      pushText(next.segments, "text", p.text);
+      pushText(next, "text", p.text);
       break;
     case "thinking_delta":
-      pushText(next.segments, "thinking", p.text);
+      pushText(next, "thinking", p.text);
       break;
     case "usage":
       next.usage = p.usage;
@@ -87,22 +95,14 @@ export function applyRunEvent(turn: AssistantTurn, event: RunEvent): AssistantTu
       next.notices = [...turn.notices, p.message];
       break;
     case "tool_call":
-      next.segments.push({ kind: "tool", call: p.call, status: "running", content: null, isError: false });
+      next.segments = [...turn.segments, { kind: "tool", call: p.call, status: "running", content: null, isError: false }];
       break;
-    case "tool_status": {
-      const seg = toolSegment(next.segments, p.call_id);
-      if (seg) seg.status = p.status;
+    case "tool_status":
+      patchToolSegment(next, p.call_id, { status: p.status });
       break;
-    }
-    case "tool_result": {
-      const seg = toolSegment(next.segments, p.call_id);
-      if (seg) {
-        seg.status = p.status;
-        seg.content = p.content;
-        seg.isError = p.is_error;
-      }
+    case "tool_result":
+      patchToolSegment(next, p.call_id, { status: p.status, content: p.content, isError: p.is_error });
       break;
-    }
     case "completed":
       next.phase = "completed";
       next.stopReason = p.stop_reason;

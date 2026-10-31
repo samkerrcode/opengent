@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::Value;
 use tokio::runtime::Handle;
@@ -13,11 +14,22 @@ use crate::domain::{
 use crate::providers::{CompletionRequest, ModelProvider, ProviderEvent};
 use crate::{Error, Result};
 
-use super::tools::{cap_result, RunTools, ToolOutput, FIND_TOOLS};
+use super::tools::{cap_result_with, RunTools, ToolOutput, FIND_TOOLS};
 use super::{EmitterConfig, RunEmitter, ToolHost};
 
 /// Maximum model↔tool round trips in one run; beyond that the run stops with a notice.
 const MAX_TOOL_STEPS: usize = 8;
+/// Maximum tool calls executed from a single model turn; extra calls get an error result.
+const MAX_CALLS_PER_STEP: usize = 16;
+/// How long a tool call may wait for the user's approval before it is auto-denied. Bounds
+/// the run slot a stalled prompt holds (e.g. when the webview is closed mid-approval).
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// While waiting for approval, re-check that the UI is still listening this often.
+const APPROVAL_LIVENESS_CHECK: Duration = Duration::from_secs(15);
+/// Result returned to the model for calls to a user-disabled tool.
+const DISABLED_TOOL_MSG: &str = "This tool is disabled by the user and cannot be called. \
+    Tell the user it is disabled (they can re-enable it in the Tools menu) instead of \
+    working around it with other tools.";
 
 /// Destination for run events. The host implements this over its IPC channel.
 /// Returns `false` when the receiver is gone so the run can stop emitting.
@@ -192,7 +204,7 @@ async fn stream_step<S: RunSink>(
     emitter: &mut RunEmitter<S>,
     cancel: &CancellationToken,
 ) -> Option<Step> {
-    let mut rx = match provider.stream(completion.clone(), cancel.clone()) {
+    let mut rx = match provider.stream(completion, cancel.clone()) {
         Ok(rx) => rx,
         Err(e) => {
             emitter.emit(RunEventPayload::Failed {
@@ -304,13 +316,11 @@ async fn run_loop<S: RunSink>(
     let provider = request.provider;
     let mut tools = request.tools;
     let mut completion = request.completion;
-    let mut messages = std::mem::take(&mut completion.messages);
     let mut tool_steps = 0usize;
 
     loop {
         // Re-derive the offered definitions each step: on-demand loading adds tools as
         // `find_tools` loads them, and a "always allow" decision can unblock a tool mid-run.
-        completion.messages = messages.clone();
         completion.tools = tools.as_ref().map(|t| t.specs()).unwrap_or_default();
 
         let Some(step) = stream_step(&provider, &completion, &mut emitter, &cancel).await else {
@@ -353,7 +363,7 @@ async fn run_loop<S: RunSink>(
             server: c.server.clone(),
             tool: Some(c.tool.clone()),
         }));
-        messages.push(Message {
+        completion.messages.push(Message {
             role: Role::Assistant,
             blocks,
         });
@@ -361,13 +371,31 @@ async fn run_loop<S: RunSink>(
         // Execute the calls in order; each emits ToolCall → (statuses) → ToolResult.
         let mut results = Vec::new();
         let mut first_execute = true;
-        for mut call in step.calls {
+        for (idx, mut call) in step.calls.into_iter().enumerate() {
             // Fill display routing (server name, original tool name) from the catalog.
             if let Some(e) = tools.as_ref().and_then(|t| t.entry(&call.name)) {
                 call.server = Some(e.server_name.clone());
                 call.tool = e.tool.clone();
             }
             emitter.emit(RunEventPayload::ToolCall { call: call.clone() });
+            if idx >= MAX_CALLS_PER_STEP {
+                let content = serde_json::json!([{ "type": "text", "text": format!(
+                    "Too many tool calls in one step (max {MAX_CALLS_PER_STEP}); this call was not executed."
+                )}]);
+                results.push(ContentBlock::ToolResult {
+                    call_id: call.id.clone(),
+                    content: content.clone(),
+                    is_error: true,
+                    status: Some(ToolCallStatus::Failed),
+                });
+                emitter.emit(RunEventPayload::ToolResult {
+                    call_id: call.id,
+                    content,
+                    is_error: true,
+                    status: ToolCallStatus::Failed,
+                });
+                continue;
+            }
             let end = execute_call(
                 &call,
                 &mut tools,
@@ -411,7 +439,7 @@ async fn run_loop<S: RunSink>(
                 cancel.cancel();
             }
         }
-        messages.push(Message {
+        completion.messages.push(Message {
             role: Role::Tool,
             blocks: results,
         });
@@ -436,9 +464,23 @@ async fn execute_call<S: RunSink>(
             })
         };
     }
+    // Arguments must be a JSON object. Anything else (malformed text, a bare scalar) must
+    // not reach the tool: it would be called with silently-empty arguments, possibly after
+    // the user approved a different-looking call.
     let parsed = match &call.arguments {
-        Value::String(s) if s.trim().is_empty() => Value::Null,
-        v => v.clone(),
+        Value::Null => Value::Object(serde_json::Map::new()),
+        Value::Object(_) => call.arguments.clone(),
+        Value::String(s) if s.trim().is_empty() => Value::Object(serde_json::Map::new()),
+        _ => {
+            return CallEnd::Emit {
+                content: serde_json::json!([{ "type": "text", "text": format!(
+                    "Tool `{}` was called with malformed arguments (expected a JSON object).",
+                    call.name
+                )}]),
+                is_error: true,
+                status: ToolCallStatus::Failed,
+            };
+        }
     };
 
     // The built-in search tool is read-only metadata: it never needs approval.
@@ -452,7 +494,10 @@ async fn execute_call<S: RunSink>(
             ),
         };
         return CallEnd::Emit {
-            content: cap_result(out.content),
+            content: cap_result_with(
+                out.content,
+                tools.as_ref().map(|t| t.result_cap).unwrap_or(usize::MAX),
+            ),
             is_error: out.is_error,
             status: if out.is_error {
                 ToolCallStatus::Failed
@@ -470,26 +515,37 @@ async fn execute_call<S: RunSink>(
         };
     };
     let Some(entry) = run_tools.entry(&call.name) else {
-        let msg = if run_tools.is_on_demand() {
-            format!(
-                "Tool `{}` is not loaded. Call `{FIND_TOOLS}` to find and load tools first.",
-                call.name
+        // Check disabled first: in on-demand mode a disabled tool must not send the model
+        // looking for it with `find_tools` (which can never return it).
+        let (msg, status) = if run_tools.is_disabled(&call.name) {
+            (DISABLED_TOOL_MSG.to_owned(), ToolCallStatus::Blocked)
+        } else if run_tools.is_on_demand() {
+            (
+                format!(
+                    "Tool `{}` is not loaded. Call `{FIND_TOOLS}` to find and load tools first.",
+                    call.name
+                ),
+                ToolCallStatus::Failed,
             )
         } else {
-            format!("Unknown or disabled tool `{}`.", call.name)
+            (
+                format!("Unknown tool `{}`.", call.name),
+                ToolCallStatus::Failed,
+            )
         };
         return CallEnd::Emit {
             content: serde_json::json!([{ "type": "text", "text": msg }]),
             is_error: true,
-            status: ToolCallStatus::Blocked,
+            status,
         };
     };
+    let result_cap = run_tools.result_cap;
     let host = run_tools.host.clone();
     let (server_id, tool_name) = (entry.server_id.clone(), entry.tool.clone());
     match host.policy(&server_id, &tool_name) {
         ToolPolicy::Block => {
             return CallEnd::Emit {
-                content: serde_json::json!([{ "type": "text", "text": "This tool is blocked by your permission settings." }]),
+                content: serde_json::json!([{ "type": "text", "text": DISABLED_TOOL_MSG }]),
                 is_error: true,
                 status: ToolCallStatus::Blocked,
             };
@@ -499,7 +555,11 @@ async fn execute_call<S: RunSink>(
                 phase: RunPhase::AwaitingApproval,
             });
             emit_now!(ToolCallStatus::PendingApproval);
-            let (tx, rx) = oneshot::channel::<ApprovalDecision>();
+            if emitter.is_disconnected() {
+                cancel.cancel();
+                return CallEnd::Abort;
+            }
+            let (tx, mut rx) = oneshot::channel::<ApprovalDecision>();
             approvals.lock().expect("approvals lock").insert(
                 call.id.clone(),
                 PendingApproval {
@@ -509,16 +569,51 @@ async fn execute_call<S: RunSink>(
                     tool: tool_name.clone(),
                 },
             );
-            let decision = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => {
-                    approvals.lock().expect("approvals lock").remove(&call.id);
-                    return CallEnd::Abort;
+            enum Waited {
+                Decision(ApprovalDecision),
+                TimedOut,
+                Gone,
+            }
+            let deadline = tokio::time::Instant::now() + APPROVAL_TIMEOUT;
+            let waited = loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        approvals.lock().expect("approvals lock").remove(&call.id);
+                        return CallEnd::Abort;
+                    }
+                    d = &mut rx => break match d {
+                        Ok(d) => Waited::Decision(d),
+                        Err(_) => Waited::Gone,
+                    },
+                    _ = tokio::time::sleep_until(deadline) => break Waited::TimedOut,
+                    _ = tokio::time::sleep(APPROVAL_LIVENESS_CHECK) => {
+                        if emitter.is_disconnected() {
+                            cancel.cancel();
+                            approvals.lock().expect("approvals lock").remove(&call.id);
+                            return CallEnd::Abort;
+                        }
+                    }
                 }
-                d = rx => match d {
-                    Ok(d) => d,
-                    Err(_) => return CallEnd::Abort,
-                },
+            };
+            let decision = match waited {
+                Waited::Decision(d) => d,
+                Waited::TimedOut => {
+                    approvals.lock().expect("approvals lock").remove(&call.id);
+                    emitter.emit(RunEventPayload::Notice {
+                        message: format!(
+                            "Tool call `{}` was denied: approval timed out.",
+                            call.name
+                        ),
+                    });
+                    return CallEnd::Emit {
+                        content: serde_json::json!([{ "type": "text", "text": "The user did not respond to the approval prompt in time; this call was denied." }]),
+                        is_error: true,
+                        status: ToolCallStatus::Denied,
+                    };
+                }
+                // The approval entry vanished without an answer (run torn down).
+                Waited::Gone => return CallEnd::Abort,
             };
             match decision {
                 ApprovalDecision::Deny => {
@@ -547,7 +642,7 @@ async fn execute_call<S: RunSink>(
         out = host.call(&server_id, &tool_name, parsed, cancel.clone()) => out,
     };
     CallEnd::Emit {
-        content: cap_result(out.content),
+        content: cap_result_with(out.content, result_cap),
         is_error: out.is_error,
         status: if out.is_error {
             ToolCallStatus::Failed
@@ -673,6 +768,115 @@ mod tests {
                 stop_reason: StopReason::EndTurn
             }
         );
+    }
+
+    #[tokio::test]
+    async fn malformed_arguments_never_reach_the_tool() {
+        use crate::agent::tools::tests as tool_tests;
+        let mut namer = crate::agent::tools::ToolNamer::new();
+        let catalog = vec![tool_tests::entry("fs", "read", "Read", &mut namer)];
+        let mut tools = Some(RunTools::new(
+            Arc::new(tool_tests::NoopHost),
+            catalog,
+            false,
+            5,
+            &[],
+            8192,
+        ));
+        let approvals: Approvals = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut emitter =
+            RunEmitter::new(tx, ChatId::new(), RunId::new(), EmitterConfig::default());
+        let cancel = CancellationToken::new();
+        let mut first = true;
+        let call = ToolCallInfo {
+            id: "c1".into(),
+            name: "fs__read".into(),
+            server: Some("fs".into()),
+            tool: "read".into(),
+            arguments: Value::String("this is not json".into()),
+        };
+        // A non-object argument blob must fail before policy/approval/host dispatch —
+        // otherwise the tool would run with silently-empty arguments.
+        let end = execute_call(
+            &call,
+            &mut tools,
+            &approvals,
+            &mut emitter,
+            &cancel,
+            &mut first,
+        )
+        .await;
+        assert!(matches!(
+            end,
+            CallEnd::Emit {
+                is_error: true,
+                status: ToolCallStatus::Failed,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn disabled_tools_are_reported_as_disabled_not_unknown() {
+        use crate::agent::tools::tests as tool_tests;
+        let mut namer = crate::agent::tools::ToolNamer::new();
+        let catalog = vec![tool_tests::entry("fs", "read", "Read", &mut namer)];
+        // On-demand: the "not loaded, call find_tools" hint must not apply to disabled tools.
+        let mut tools = Some(
+            RunTools::new(Arc::new(tool_tests::NoopHost), catalog, true, 5, &[], 8192)
+                .with_disabled(["fs__delete".to_owned()]),
+        );
+        let approvals: Approvals = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut emitter =
+            RunEmitter::new(tx, ChatId::new(), RunId::new(), EmitterConfig::default());
+        let cancel = CancellationToken::new();
+        let mut first = true;
+        let call = |name: &str| ToolCallInfo {
+            id: "c1".into(),
+            name: name.into(),
+            server: None,
+            tool: String::new(),
+            arguments: Value::Null,
+        };
+        let disabled = call("fs__delete");
+        match execute_call(
+            &disabled,
+            &mut tools,
+            &approvals,
+            &mut emitter,
+            &cancel,
+            &mut first,
+        )
+        .await
+        {
+            CallEnd::Emit {
+                status: ToolCallStatus::Blocked,
+                content,
+                ..
+            } => assert!(content.to_string().contains("disabled by the user")),
+            _ => panic!("disabled tool must be Blocked"),
+        }
+        // A real but not-yet-loaded tool gets the find_tools hint as a plain failure.
+        let unloaded = call("fs__read");
+        match execute_call(
+            &unloaded,
+            &mut tools,
+            &approvals,
+            &mut emitter,
+            &cancel,
+            &mut first,
+        )
+        .await
+        {
+            CallEnd::Emit {
+                status: ToolCallStatus::Failed,
+                content,
+                ..
+            } => assert!(content.to_string().contains("find_tools")),
+            _ => panic!("unloaded tool must fail with a find_tools hint"),
+        }
     }
 
     #[tokio::test]

@@ -3,7 +3,7 @@
 //! HTTP headers) live only in the `SecretStore` under `mcp/<id>/…`; the config records
 //! a `has_value` flag, never the value.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -124,6 +124,11 @@ struct StoreFile {
     servers: Vec<McpServerConfig>,
     #[serde(default)]
     settings: ToolSettings,
+    /// Definition signatures (`server_id -> tool -> sha256`) captured when a tool was
+    /// granted `AlwaysAllow`. A server that later changes the tool's description or schema
+    /// loses the grant and falls back to `Ask` until re-approved.
+    #[serde(default)]
+    signatures: HashMap<String, HashMap<String, String>>,
 }
 
 pub struct McpStore {
@@ -144,6 +149,27 @@ fn secret_ref(server_id: &str, scope: &str, name: &str) -> Result<SecretRef> {
         })
         .collect();
     SecretRef::new(format!("mcp/{server_id}/{scope}/{clean}"))
+}
+
+/// Writes the file owner-only on unix: non-secret env values can still be sensitive.
+#[cfg(unix)]
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?
+        .write_all(bytes)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    std::fs::write(path, bytes)?;
+    Ok(())
 }
 
 /// Splits a command line into program + args honoring single/double quotes and backslash
@@ -214,12 +240,12 @@ impl McpStore {
                 })
                 .collect(),
             settings: state.settings.clone(),
+            signatures: state.signatures.clone(),
         };
         let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(
-            &tmp,
-            serde_json::to_vec_pretty(&persisted).map_err(|e| Error::Internal(e.to_string()))?,
-        )?;
+        let bytes =
+            serde_json::to_vec_pretty(&persisted).map_err(|e| Error::Internal(e.to_string()))?;
+        write_private(&tmp, &bytes)?;
         std::fs::rename(&tmp, &self.path)?;
         Ok(())
     }
@@ -249,9 +275,14 @@ impl McpStore {
         self.persist(&state)
     }
 
-    /// Effective policy for a tool: explicit override → server default.
+    /// Stored policy for a tool: explicit override → server default. Does not check the
+    /// definition signature; use `effective_policy` at dispatch.
     pub fn policy_for(&self, server_id: &str, tool: &str) -> ToolPolicy {
-        self.get(server_id)
+        let state = self.state.lock().unwrap();
+        state
+            .servers
+            .iter()
+            .find(|s| s.id == server_id)
             .map(|s| {
                 s.tool_policies
                     .get(tool)
@@ -261,7 +292,63 @@ impl McpStore {
             .unwrap_or(ToolPolicy::Ask)
     }
 
-    pub fn set_tool_policy(&self, server_id: &str, tool: &str, policy: ToolPolicy) -> Result<()> {
+    /// Dispatch-time policy. `AlwaysAllow` (explicit or via the server default) is honored
+    /// only while the tool's definition signature matches the pinned one; a changed tool
+    /// falls back to `Ask`. With no pin yet (grant made while offline, server-default
+    /// allow, or a config predating signatures) the current definition is pinned on first
+    /// use. A tool with no live definition can't be verified and gets `Ask`.
+    pub fn effective_policy(
+        &self,
+        server_id: &str,
+        tool: &str,
+        current_sig: Option<&str>,
+    ) -> ToolPolicy {
+        let raw = self.policy_for(server_id, tool);
+        if raw != ToolPolicy::AlwaysAllow {
+            return raw;
+        }
+        let Some(current) = current_sig else {
+            return ToolPolicy::Ask;
+        };
+        let mut state = self.state.lock().unwrap();
+        match state.signatures.get(server_id).and_then(|m| m.get(tool)) {
+            Some(pinned) if pinned == current => ToolPolicy::AlwaysAllow,
+            Some(_) => ToolPolicy::Ask,
+            None => {
+                state
+                    .signatures
+                    .entry(server_id.to_owned())
+                    .or_default()
+                    .insert(tool.to_owned(), current.to_owned());
+                if let Err(e) = self.persist(&state) {
+                    tracing::warn!(error = %e, "failed to persist tool signature");
+                }
+                ToolPolicy::AlwaysAllow
+            }
+        }
+    }
+
+    /// Whether the tool's pinned definition signature no longer matches the live one, i.e.
+    /// an `AlwaysAllow` would currently be downgraded to `Ask` ("changed" badge in the UI).
+    pub fn grant_stale(&self, server_id: &str, tool: &str, current_sig: &str) -> bool {
+        let state = self.state.lock().unwrap();
+        state
+            .signatures
+            .get(server_id)
+            .and_then(|m| m.get(tool))
+            .is_some_and(|s| s != current_sig)
+    }
+
+    /// `signature` should be the tool's current definition signature when the server is
+    /// connected. Without one any old pin is dropped, so the definition is re-pinned on
+    /// first use instead of being compared against a stale one.
+    pub fn set_tool_policy(
+        &self,
+        server_id: &str,
+        tool: &str,
+        policy: ToolPolicy,
+        signature: Option<String>,
+    ) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         let s = state
             .servers
@@ -271,6 +358,11 @@ impl McpStore {
         // Storing an explicit entry equal to the default is harmless and survives later
         // default changes; keep it simple and always record it.
         s.tool_policies.insert(tool.to_owned(), policy);
+        let pins = state.signatures.entry(server_id.to_owned()).or_default();
+        match signature {
+            Some(sig) => pins.insert(tool.to_owned(), sig),
+            None => pins.remove(tool),
+        };
         self.persist(&state)
     }
 
@@ -310,13 +402,26 @@ impl McpStore {
                 }
             }
             McpTransport::StreamableHttp => {
-                normalize_base_url(&input.url).map_err(|e| match e {
+                let url = normalize_base_url(&input.url).map_err(|e| match e {
                     Error::InvalidInput(m) => Error::InvalidInput(format!("server URL: {m}")),
                     other => other,
                 })?;
+                let parsed = reqwest::Url::parse(&url)
+                    .map_err(|e| Error::InvalidInput(format!("server URL: {e}")))?;
+                if !parsed.username().is_empty() || parsed.password().is_some() {
+                    return Err(Error::InvalidInput(
+                        "credentials in the URL are not allowed; use headers".into(),
+                    ));
+                }
                 (String::new(), Vec::new())
             }
         };
+        const MAX_ENTRIES: usize = 64;
+        if input.env.len() > MAX_ENTRIES || input.headers.len() > MAX_ENTRIES {
+            return Err(Error::InvalidInput(format!(
+                "at most {MAX_ENTRIES} env/header entries per server"
+            )));
+        }
         for e in input.env.iter().chain(input.headers.iter()) {
             let n = e.name.trim();
             if n.is_empty() {
@@ -328,9 +433,43 @@ impl McpStore {
                 return Err(Error::InvalidInput(format!("invalid entry `{n}`")));
             }
         }
+        // Env names must be valid shell identifiers; header names/values must be legal
+        // HTTP field syntax (rejects control characters / CRLF smuggling).
+        for e in &input.env {
+            let n = e.name.trim();
+            let valid = n
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !valid {
+                return Err(Error::InvalidInput(format!(
+                    "invalid environment variable name `{n}`"
+                )));
+            }
+        }
+        for e in &input.headers {
+            let n = e.name.trim();
+            n.parse::<reqwest::header::HeaderName>()
+                .map_err(|_| Error::InvalidInput(format!("invalid header name `{n}`")))?;
+            e.value
+                .parse::<reqwest::header::HeaderValue>()
+                .map_err(|_| Error::InvalidInput(format!("invalid value for header `{n}`")))?;
+        }
 
-        let id = input.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let mut state = self.state.lock().unwrap();
+        let id = match input.id {
+            Some(id) if state.servers.iter().any(|s| s.id == id) => id,
+            Some(id) => {
+                return Err(Error::NotFound(format!("MCP server `{id}`")));
+            }
+            None => uuid::Uuid::new_v4().to_string(),
+        };
+        if state.servers.iter().any(|s| s.id != id && s.name == name) {
+            return Err(Error::InvalidInput(format!(
+                "a server named `{name}` already exists"
+            )));
+        }
         let existing = state.servers.iter().find(|s| s.id == id).cloned();
 
         let map_entries = |scope: &str,
@@ -338,10 +477,18 @@ impl McpStore {
                            old: &[KeyValueEntry]|
          -> Result<Vec<KeyValueEntry>> {
             let mut out = Vec::with_capacity(inputs.len());
+            // Two secret names that sanitize to the same keychain key would overwrite each
+            // other's stored value; reject them.
+            let mut secret_keys = HashSet::new();
             for e in inputs {
                 let name = e.name.trim().to_owned();
                 if e.secret {
                     let r = secret_ref(&id, scope, &name)?;
+                    if !secret_keys.insert(r.0.clone()) {
+                        return Err(Error::InvalidInput(format!(
+                            "secret names `{name}` collide after sanitization"
+                        )));
+                    }
                     if !e.value.is_empty() {
                         self.secrets.set(&r, e.value.trim())?;
                     }
@@ -385,6 +532,27 @@ impl McpStore {
             McpTransport::Stdio => Vec::new(),
         };
 
+        // Keychain entries for secret rows that disappeared or were unmarked; deleted only
+        // after the config persists so a failed save can't orphan a still-referenced secret.
+        let mut stale_secrets = Vec::new();
+        if let Some(old) = &existing {
+            for (scope, old_entries, new_entries) in
+                [("env", &old.env, &env), ("header", &old.headers, &headers)]
+            {
+                let kept: HashSet<&str> = new_entries
+                    .iter()
+                    .filter(|e| e.secret)
+                    .map(|e| e.name.as_str())
+                    .collect();
+                stale_secrets.extend(
+                    old_entries
+                        .iter()
+                        .filter(|e| e.secret && !kept.contains(e.name.as_str()))
+                        .filter_map(|e| secret_ref(&id, scope, &e.name).ok()),
+                );
+            }
+        }
+
         let config = McpServerConfig {
             id: id.clone(),
             name: name.to_owned(),
@@ -411,7 +579,46 @@ impl McpStore {
             None => state.servers.push(config.clone()),
         }
         self.persist(&state)?;
+        for r in stale_secrets {
+            let _ = self.secrets.delete(&r);
+        }
         Ok(config)
+    }
+
+    /// Whether saving `input` would change what a stdio server launches: a new server, or a
+    /// different command, args, cwd or environment (e.g. `NODE_OPTIONS=--require …` runs
+    /// code as surely as the command does). Such saves need explicit user confirmation.
+    pub fn launch_changed(&self, input: &McpServerInput) -> bool {
+        if input.transport != McpTransport::Stdio {
+            return false;
+        }
+        let Some(old) = input.id.as_deref().and_then(|id| self.get(id).ok()) else {
+            return true;
+        };
+        let parts = split_command(&input.command);
+        let (command, args) = parts
+            .split_first()
+            .map_or(("", &[][..]), |(c, a)| (c.as_str(), a));
+        let cwd = input
+            .cwd
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty());
+        let env_changed = input.env.len() != old.env.len()
+            || input.env.iter().any(|e| {
+                let name = e.name.trim();
+                match old.env.iter().find(|o| o.name == name) {
+                    None => true,
+                    // A secret row with an empty value keeps the stored one.
+                    Some(o) if e.secret => !o.secret || !e.value.is_empty(),
+                    Some(o) => o.secret || o.value != e.value,
+                }
+            });
+        old.transport != input.transport
+            || old.command != command
+            || old.args != args
+            || old.cwd.as_deref() != cwd
+            || env_changed
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {
@@ -424,6 +631,7 @@ impl McpStore {
             .cloned()
             .ok_or_else(|| Error::NotFound(format!("MCP server `{id}`")))?;
         state.servers.retain(|s| s.id != id);
+        state.signatures.remove(id);
         debug_assert!(state.servers.len() < before);
         for (scope, entries) in [("env", &removed.env), ("header", &removed.headers)] {
             for e in entries.iter().filter(|e| e.secret) {
@@ -442,6 +650,24 @@ impl McpStore {
             .ok_or_else(|| Error::NotFound(format!("MCP server `{id}`")))?;
         s.enabled = enabled;
         self.persist(&state)
+    }
+
+    /// The plaintext values of this server's secrets (env vars and headers), for stderr
+    /// redaction at the manager. Values shorter than 4 chars are skipped to avoid
+    /// over-redacting on trivial substrings.
+    pub fn secret_values(&self, config: &McpServerConfig) -> Vec<String> {
+        let mut out = Vec::new();
+        for (scope, entries) in [("env", &config.env), ("header", &config.headers)] {
+            for e in entries.iter().filter(|e| e.secret && e.has_value) {
+                let v = secret_ref(&config.id, scope, &e.name).and_then(|r| self.secrets.get(&r));
+                if let Ok(Some(v)) = v {
+                    if v.chars().count() >= 4 {
+                        out.push(v);
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Resolves the real env map and header map for a server, pulling secret values from the
@@ -558,7 +784,7 @@ mod tests {
     fn policies_and_settings_round_trip() {
         let (s, tmp) = store();
         let saved = s.save(input("x")).unwrap();
-        s.set_tool_policy(&saved.id, "danger", ToolPolicy::Block)
+        s.set_tool_policy(&saved.id, "danger", ToolPolicy::Block, None)
             .unwrap();
         s.set_default_policy(&saved.id, ToolPolicy::AlwaysAllow)
             .unwrap();
@@ -573,6 +799,120 @@ mod tests {
             s.settings().loading,
             crate::agent::tools::ToolLoading::OnDemand
         );
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn always_allow_pins_signature_on_first_use_and_drops_on_change() {
+        let (s, tmp) = store();
+        let id = s.save(input("x")).unwrap().id;
+        // Server-default allow with no pin yet: allowed and pinned (not silently Ask).
+        s.set_default_policy(&id, ToolPolicy::AlwaysAllow).unwrap();
+        assert_eq!(
+            s.effective_policy(&id, "t", Some("sig-a")),
+            ToolPolicy::AlwaysAllow
+        );
+        assert!(!s.grant_stale(&id, "t", "sig-a"));
+        // Definition changed behind the grant: Ask + stale badge.
+        assert_eq!(s.effective_policy(&id, "t", Some("sig-b")), ToolPolicy::Ask);
+        assert!(s.grant_stale(&id, "t", "sig-b"));
+        // Not live: unverifiable.
+        assert_eq!(s.effective_policy(&id, "t", None), ToolPolicy::Ask);
+        // Re-approval re-pins.
+        s.set_tool_policy(&id, "t", ToolPolicy::AlwaysAllow, Some("sig-b".into()))
+            .unwrap();
+        assert_eq!(
+            s.effective_policy(&id, "t", Some("sig-b")),
+            ToolPolicy::AlwaysAllow
+        );
+        // A grant made while offline drops the old pin and re-pins on next use.
+        s.set_tool_policy(&id, "t", ToolPolicy::AlwaysAllow, None)
+            .unwrap();
+        assert_eq!(
+            s.effective_policy(&id, "t", Some("sig-c")),
+            ToolPolicy::AlwaysAllow
+        );
+        // Block is never affected by signatures.
+        s.set_tool_policy(&id, "t", ToolPolicy::Block, Some("sig-c".into()))
+            .unwrap();
+        assert_eq!(
+            s.effective_policy(&id, "t", Some("sig-c")),
+            ToolPolicy::Block
+        );
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn launch_changed_covers_command_cwd_and_env() {
+        let (s, tmp) = store();
+        assert!(
+            s.launch_changed(&input("x")),
+            "new server needs confirmation"
+        );
+        let id = s.save(input("x")).unwrap().id;
+        let same = || {
+            let mut i = input("renamed");
+            i.id = Some(id.clone());
+            i.env[1].value = String::new(); // keep stored secret
+            i
+        };
+        assert!(
+            !s.launch_changed(&same()),
+            "rename / keep-secret is not a launch change"
+        );
+        let mut i = same();
+        i.command = "npx -y @scope/other".into();
+        assert!(s.launch_changed(&i));
+        let mut i = same();
+        i.cwd = Some("/tmp".into());
+        assert!(s.launch_changed(&i));
+        let mut i = same();
+        i.env.push(KeyValueInput {
+            name: "NODE_OPTIONS".into(),
+            value: "--require /tmp/x.js".into(),
+            secret: false,
+        });
+        assert!(s.launch_changed(&i));
+        let mut i = same();
+        i.env[0].value = "v2".into();
+        assert!(s.launch_changed(&i));
+        let mut i = same();
+        i.env[1].value = "new-secret".into();
+        assert!(s.launch_changed(&i));
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn removed_secret_rows_are_deleted_from_keychain() {
+        let (s, tmp) = store();
+        let saved = s.save(input("files")).unwrap();
+        let mut edit = input("files");
+        edit.id = Some(saved.id.clone());
+        edit.env.retain(|e| e.name != "TOKEN");
+        s.save(edit).unwrap();
+        let r = secret_ref(&saved.id, "env", "TOKEN").unwrap();
+        assert!(
+            s.secrets.get(&r).unwrap().is_none(),
+            "stale secret left in keychain"
+        );
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn save_rejects_bad_env_names_unknown_ids_userinfo_and_dup_names() {
+        let (s, tmp) = store();
+        let mut bad_env = input("x");
+        bad_env.env[0].name = "BAD-NAME".into();
+        assert!(s.save(bad_env).is_err());
+        let mut bad_id = input("x");
+        bad_id.id = Some("does-not-exist".into());
+        assert!(s.save(bad_id).is_err());
+        let mut userinfo = input("x");
+        userinfo.transport = McpTransport::StreamableHttp;
+        userinfo.url = "https://user:pw@example.com/mcp".into();
+        assert!(s.save(userinfo).is_err());
+        s.save(input("dup")).unwrap();
+        assert!(s.save(input("dup")).is_err());
         std::fs::remove_dir_all(tmp).unwrap();
     }
 

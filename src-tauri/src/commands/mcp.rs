@@ -4,7 +4,8 @@ use agent_core::agent::tools::ToolSettings;
 use agent_core::domain::{ApprovalDecision, RunId, ToolPolicy};
 use agent_core::mcp::{McpManager, McpServerInput, McpServerView};
 use agent_core::Error;
-use tauri::State;
+use tauri::{AppHandle, State};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
 use crate::AppState;
 
@@ -15,11 +16,47 @@ pub fn list_mcp_servers(state: State<'_, AppState>) -> Vec<McpServerView> {
 
 /// Validates and persists a server config (secrets to the keychain). If the server is
 /// enabled it (re)connects in the background — status changes arrive via `mcp-changed`.
+/// A new stdio server, or a change to what one launches (command, args, cwd, env), must be
+/// confirmed through a native dialog first: it runs arbitrary code, so it can't be driven
+/// silently by the webview.
 #[tauri::command]
 pub async fn save_mcp_server(
+    app: AppHandle,
     state: State<'_, AppState>,
     input: McpServerInput,
 ) -> Result<(), Error> {
+    // An empty command is rejected by `save` validation; don't prompt for it.
+    if !input.command.trim().is_empty() && state.mcp.store().launch_changed(&input) {
+        let env_names: Vec<&str> = input.env.iter().map(|e| e.name.trim()).collect();
+        let mut detail = input.command.trim().to_owned();
+        if let Some(cwd) = input
+            .cwd
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        {
+            detail.push_str(&format!("\n\nWorking directory: {cwd}"));
+        }
+        if !env_names.is_empty() {
+            detail.push_str(&format!("\n\nEnvironment: {}", env_names.join(", ")));
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        app.dialog()
+            .message(format!(
+                "This MCP server will run a local program:\n\n{detail}\n\nOnly allow it if you trust its source."
+            ))
+            .title("Allow MCP server?")
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "Allow".into(),
+                "Cancel".into(),
+            ))
+            .show(move |ok| {
+                let _ = tx.send(ok);
+            });
+        if !rx.await.unwrap_or(false) {
+            return Err(Error::InvalidInput("server command not confirmed".into()));
+        }
+    }
     let config = state.mcp.store().save(input)?;
     let id = config.id.clone();
     let manager: Arc<McpManager> = state.mcp.clone();
@@ -31,8 +68,11 @@ pub async fn save_mcp_server(
 
 #[tauri::command]
 pub fn delete_mcp_server(state: State<'_, AppState>, id: String) -> Result<(), Error> {
+    // Delete from the store first so `disconnect` cleans up status rather than
+    // resurrecting an `Idle` entry for a server that no longer exists.
+    state.mcp.store().delete(&id)?;
     state.mcp.disconnect(&id);
-    state.mcp.store().delete(&id)
+    Ok(())
 }
 
 /// Toggles a server for future runs; connects or disconnects it now.
@@ -70,10 +110,9 @@ pub fn set_mcp_tool_policy(
     tool: String,
     policy: ToolPolicy,
 ) -> Result<(), Error> {
-    state
-        .mcp
-        .store()
-        .set_tool_policy(&server_id, &tool, policy)?;
+    // Route through the manager so the tool's definition signature is recorded with
+    // `always_allow` grants (verified at dispatch, shown as "changed" when it drifts).
+    state.mcp.set_policy(&server_id, &tool, policy);
     Ok(())
 }
 

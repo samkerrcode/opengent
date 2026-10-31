@@ -32,6 +32,19 @@ class McpStore {
     return this.servers.reduce((n, s) => n + s.tools.length, 0);
   }
 
+  /** Tools actually offered to the model: excludes disabled (block-policy) tools and
+   * tools on disabled or non-connected servers. */
+  get activeToolCount(): number {
+    return this.servers.reduce(
+      (n, s) =>
+        n +
+        (s.enabled && s.status.kind === "connected"
+          ? s.tools.filter((t) => t.policy !== "block").length
+          : 0),
+      0,
+    );
+  }
+
   async init() {
     if (this.listening) return;
     this.listening = true;

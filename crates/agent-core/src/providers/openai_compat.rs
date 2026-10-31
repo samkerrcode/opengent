@@ -332,7 +332,15 @@ impl OpenAiCompatProvider {
                     } => Some(json!({
                         "id": id,
                         "type": "function",
-                        "function": { "name": name, "arguments": arguments.to_string() },
+                        // `arguments` must be a JSON *string*: pass raw text through as-is
+                        // (a malformed blob stays raw) and serialize only real objects.
+                        "function": {
+                            "name": name,
+                            "arguments": match arguments {
+                                Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            },
+                        },
                     })),
                     _ => None,
                 })
@@ -424,6 +432,10 @@ struct PartialCall {
     arguments: String,
 }
 
+/// A hostile or buggy server could stream a huge `index` or unbounded arguments; bound both.
+const MAX_STREAMED_CALLS: usize = 64;
+const MAX_TOOL_ARG_CHARS: usize = 512_000;
+
 /// Folds one streamed `tool_calls` fragment into `calls`. Fragments are keyed by `index`;
 /// servers that omit it are handled by treating a new `id` as a new call.
 fn merge_tool_call_delta(calls: &mut Vec<PartialCall>, d: ToolCallDelta) {
@@ -435,6 +447,9 @@ fn merge_tool_call_delta(calls: &mut Vec<PartialCall>, d: ToolCallDelta) {
             _ => calls.len() - 1,
         }
     });
+    if idx >= MAX_STREAMED_CALLS {
+        return;
+    }
     if calls.len() <= idx {
         calls.resize_with(idx + 1, PartialCall::default);
     }
@@ -451,10 +466,28 @@ fn merge_tool_call_delta(calls: &mut Vec<PartialCall>, d: ToolCallDelta) {
             }
         }
         match f.arguments {
-            Some(Value::String(s)) => call.arguments.push_str(&s),
+            Some(Value::String(s)) => {
+                let room = MAX_TOOL_ARG_CHARS.saturating_sub(call.arguments.len());
+                call.arguments.extend(s.chars().take(room));
+            }
             // Some servers send the arguments as an object rather than a JSON string.
-            Some(v @ Value::Object(_)) => call.arguments = v.to_string(),
+            Some(v @ Value::Object(_)) if call.arguments.len() < MAX_TOOL_ARG_CHARS => {
+                call.arguments = v.to_string();
+            }
             _ => {}
+        }
+    }
+}
+
+/// Gives every call a unique non-empty id: empty ids and duplicates get a generated one.
+/// Approvals, UI cards and stored call↔result pairing all key on this id, so a model that
+/// repeats or omits ids must not alias two different calls.
+fn normalize_call_ids(calls: &mut [PartialCall]) {
+    let mut seen = std::collections::HashSet::new();
+    for (i, c) in calls.iter_mut().enumerate() {
+        if c.id.is_empty() || !seen.insert(c.id.clone()) {
+            c.id = format!("call_{i}_{}", uuid::Uuid::new_v4().simple());
+            seen.insert(c.id.clone());
         }
     }
 }
@@ -530,11 +563,11 @@ impl ModelProvider for OpenAiCompatProvider {
 
     fn stream(
         &self,
-        request: CompletionRequest,
+        request: &CompletionRequest,
         cancel: CancellationToken,
     ) -> Result<mpsc::Receiver<ProviderEvent>> {
         let (tx, rx) = mpsc::channel(PROVIDER_EVENT_BUFFER);
-        let body = Self::build_body(&request, self.config.include_usage);
+        let body = Self::build_body(request, self.config.include_usage);
         let req = self
             .request(reqwest::Method::POST, "/chat/completions")
             .json(&body);
@@ -646,14 +679,11 @@ async fn run_stream(
     } else if !calls.is_empty() && (finish.is_some() || saw_done) {
         finish = Some(StopReason::ToolUse);
     }
-    for (i, c) in calls.into_iter().enumerate() {
-        let id = if c.id.is_empty() {
-            format!("call_{i}_{}", uuid::Uuid::new_v4().simple())
-        } else {
-            c.id
-        };
+    // The model owns call ids; dedupe them because approvals and result pairing key on id.
+    normalize_call_ids(&mut calls);
+    for c in calls.into_iter() {
         let ev = ProviderEvent::ToolCall {
-            id,
+            id: c.id,
             name: c.name,
             arguments: c.arguments,
         };
@@ -918,6 +948,52 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].arguments, r#"{"k":1}"#);
         assert_eq!(calls[1].arguments, "{}");
+    }
+
+    #[test]
+    fn streamed_call_index_and_arguments_are_bounded() {
+        let d = |v: Value| serde_json::from_value::<ToolCallDelta>(v).unwrap();
+        let mut calls = Vec::new();
+        // A huge index must not allocate.
+        merge_tool_call_delta(
+            &mut calls,
+            d(json!({"index": 4_000_000_000usize, "id": "x"})),
+        );
+        assert!(calls.is_empty());
+        merge_tool_call_delta(
+            &mut calls,
+            d(json!({"index": 0, "function": {"arguments": "y".repeat(MAX_TOOL_ARG_CHARS + 100)}})),
+        );
+        assert_eq!(calls[0].arguments.len(), MAX_TOOL_ARG_CHARS);
+    }
+
+    #[test]
+    fn duplicate_and_empty_call_ids_are_replaced() {
+        let mut calls = vec![
+            PartialCall {
+                id: "same".into(),
+                name: "a".into(),
+                arguments: String::new(),
+            },
+            PartialCall {
+                id: "same".into(),
+                name: "b".into(),
+                arguments: String::new(),
+            },
+            PartialCall {
+                id: String::new(),
+                name: "c".into(),
+                arguments: String::new(),
+            },
+        ];
+        normalize_call_ids(&mut calls);
+        let ids: Vec<_> = calls.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids[0], "same");
+        assert!(ids.iter().all(|i| !i.is_empty()));
+        assert_eq!(
+            ids.iter().collect::<std::collections::HashSet<_>>().len(),
+            3
+        );
     }
 
     #[test]

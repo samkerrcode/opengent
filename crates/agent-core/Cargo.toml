@@ -9,7 +9,7 @@ description = "UI-independent agent runtime: providers, MCP, policy, storage, or
 [features]
 default = ["native-secrets", "mcp"]
 native-secrets = ["dep:keyring-core", "dep:apple-native-keyring-store", "dep:windows-native-keyring-store"]
-mcp = ["dep:rmcp"]
+mcp = ["dep:rmcp", "dep:process-wrap"]
 
 [dependencies]
 serde.workspace = true
@@ -30,7 +30,15 @@ rmcp = { version = "3.6.0", default-features = false, features = [
     "client",
     "transport-child-process",
     "transport-streamable-http-client-reqwest",
-    "auth",
+    "which-command",
+], optional = true }
+# Process-group / job-object wrappers so spawned MCP servers are killed wholesale,
+# including grandchildren (`npx` -> `node`), on disconnect or app exit.
+process-wrap = { version = "=10.0.1", default-features = false, features = [
+    "tokio1",
+    "kill-on-drop",
+    "process-group",
+    "job-object",
 ], optional = true }
 base64 = "0.22.1"
 

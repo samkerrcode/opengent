@@ -75,11 +75,12 @@ impl ModelProvider for FakeProvider {
 
     fn stream(
         &self,
-        request: CompletionRequest,
+        request: &CompletionRequest,
         cancel: CancellationToken,
     ) -> Result<mpsc::Receiver<ProviderEvent>> {
         let (tx, rx) = mpsc::channel(PROVIDER_EVENT_BUFFER);
-        let reply = Self::compose_reply(&request);
+        let reply = Self::compose_reply(request);
+        let msg_count = request.messages.len();
         let delay = self.chunk_delay;
         let chunk_chars = self.chunk_chars.max(1);
 
@@ -101,7 +102,7 @@ impl ModelProvider for FakeProvider {
                 emitted += chunk.len();
             }
             let usage = Usage {
-                input_tokens: Some((request.messages.len() * 8) as u64),
+                input_tokens: Some((msg_count * 8) as u64),
                 output_tokens: Some(emitted.div_ceil(4) as u64),
                 ..Default::default()
             };
@@ -134,7 +135,7 @@ mod tests {
             chunk_chars: 7,
         };
         let mut rx = provider
-            .stream(request(), CancellationToken::new())
+            .stream(&request(), CancellationToken::new())
             .unwrap();
         let mut text = String::new();
         let mut saw_usage = false;
@@ -160,7 +161,7 @@ mod tests {
             chunk_chars: 1,
         };
         let cancel = CancellationToken::new();
-        let mut rx = provider.stream(request(), cancel.clone()).unwrap();
+        let mut rx = provider.stream(&request(), cancel.clone()).unwrap();
         let first = rx.recv().await;
         assert!(matches!(first, Some(ProviderEvent::TextDelta(_))));
         cancel.cancel();
