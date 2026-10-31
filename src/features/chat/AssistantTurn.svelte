@@ -21,6 +21,19 @@
   const live = $derived(!isTerminal(turn.phase));
   const fullText = $derived(turnText(turn));
   const thinking = $derived(turnThinking(turn));
+  // Thinking is done as soon as the model moves on to text or a tool call — collapsing
+  // then, instead of at run completion, keeps the response in view while it streams.
+  const thinkingLive = $derived(live && turn.segments.at(-1)?.kind === "thinking");
+  let thinkingEl = $state<HTMLElement>();
+  // The body is height-capped and scrolls internally; follow the tail while thinking
+  // streams, and reset to the top once it collapses so a reopened trace reads from
+  // the start.
+  $effect(() => {
+    const el = thinkingEl;
+    void thinking.length;
+    if (!el) return;
+    el.scrollTop = thinkingLive ? el.scrollHeight : 0;
+  });
   const truncated = $derived(turn.stopReason === "max_tokens");
   const usageText = $derived.by(() => {
     const u = turn.usage;
@@ -83,9 +96,9 @@
     {#if truncated}<p class="notice">Response was cut off at the output token limit.</p>{/if}
 
     {#if thinking}
-      <details class="thinking-block" open={live}>
-        <summary>{live && !fullText ? "Thinking…" : "Thinking"}</summary>
-        <div class="markdown thinking-body">{@html renderMarkdown(thinking)}</div>
+      <details class="thinking-block" open={thinkingLive}>
+        <summary>{thinkingLive ? "Thinking…" : "Thinking"}</summary>
+        <div class="markdown thinking-body" bind:this={thinkingEl}>{@html renderMarkdown(thinking)}</div>
       </details>
     {/if}
 
@@ -286,6 +299,8 @@
     padding: 2px 10px 8px;
     color: var(--fg-muted);
     border-top: 1px solid var(--border);
+    max-height: min(320px, 40vh);
+    overflow-y: auto;
   }
   @keyframes spin {
     to {

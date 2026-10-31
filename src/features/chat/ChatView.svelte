@@ -55,13 +55,23 @@
     }
     if (lastUser && lastUser.id !== seenUserId) {
       seenUserId = lastUser.id;
-      pinnedToBottom = true;
+      // Only a freshly sent message (still carrying its optimistic local- id) counts as
+      // explicit intent to follow. The later swap to the real message id — or a refetch
+      // replacing items — must not override a user who scrolled up.
+      if (lastUser.id.startsWith("local-")) pinnedToBottom = true;
     }
-    if (pinnedToBottom) tick().then(scrollToBottom);
+    // Re-check inside the callback: the scroll may resolve after the user scrolled away.
+    if (pinnedToBottom) tick().then(() => { if (pinnedToBottom) scrollToBottom(); });
   });
 
+  // Runs on chat switch only. refresh()/loadList() reassign chat.summary, so a bare
+  // `chat.summary.id` dependency would re-fire — re-pinning and snapping to the bottom —
+  // every time a run completes.
+  let viewedChatId: string | null = null;
   $effect(() => {
-    void chat.summary.id;
+    const id = chat.summary.id;
+    if (id === viewedChatId) return;
+    viewedChatId = id;
     pinnedToBottom = true;
     seenUserId = null;
     editingTitle = false;
