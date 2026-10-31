@@ -26,8 +26,8 @@
     } catch (e) {
       bootError = describeError(e);
     }
-    const first = chatStore.chats[0];
-    if (first) await chatStore.select(first.summary.id);
+    const empty = chatStore.chats.find((c) => c.summary.message_count === 0);
+    if (empty) await chatStore.select(empty.summary.id);
     else await chatStore.newChat();
   });
 

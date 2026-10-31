@@ -41,6 +41,12 @@ writeFileSync(
 );
 
 // Tauri config overlay (merged over src-tauri/tauri.conf.json via `--config`).
+// The merge is JSON Merge Patch (RFC 7396): arrays are replaced wholesale, so the
+// overlay's windows array must carry every window property, not just the overrides.
+const baseConfig = JSON.parse(readFileSync(resolve(root, "src-tauri/tauri.conf.json"), "utf8"));
+const baseWindows = baseConfig.app?.windows ?? [{ label: "main" }];
+const windows = baseWindows.map((w) => ({ ...w, title: product.displayName }));
+
 const tauriOut = resolve(root, "src-tauri/tauri.product.conf.json");
 writeFileSync(
   tauriOut,
@@ -49,7 +55,7 @@ writeFileSync(
       productName: product.displayName,
       version: product.version,
       identifier: product.identifier,
-      app: { windows: [{ label: "main", title: product.displayName }] },
+      app: { windows },
       bundle: { shortDescription: product.description },
     },
     null,
