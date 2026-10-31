@@ -17,13 +17,15 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let state = AppState::initialize()?;
+            let state = AppState::initialize(app.handle())?;
             tracing::info!(
                 product = agent_core::config::product().display_name,
                 data_root = %state.data_root.path().display(),
                 secret_backend = state.secrets.backend(),
                 "application state initialized"
             );
+            // Bring up enabled MCP servers in the background; status flows via mcp-changed.
+            state.mcp.autoconnect();
             app.manage(state);
             Ok(())
         })
@@ -47,6 +49,16 @@ pub fn run() {
             commands::pick_attachments,
             commands::attachment_data_url,
             commands::get_model_capabilities,
+            commands::list_mcp_servers,
+            commands::save_mcp_server,
+            commands::delete_mcp_server,
+            commands::set_mcp_server_enabled,
+            commands::reconnect_mcp_server,
+            commands::set_mcp_tool_policy,
+            commands::set_mcp_default_policy,
+            commands::get_tool_settings,
+            commands::set_tool_settings,
+            commands::resolve_tool_approval,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the desktop application");

@@ -6,18 +6,22 @@
   import Sidebar from "$features/history/Sidebar.svelte";
   import ChatView from "$features/chat/ChatView.svelte";
   import ProviderSettings from "$features/providers/ProviderSettings.svelte";
+  import McpSettings from "$features/mcp/McpSettings.svelte";
   import ContextMenu, { type ContextMenuItem } from "$lib/components/ContextMenu.svelte";
   import { copyText } from "$lib/clipboard";
   import { chatStore } from "$features/chat/chat-store.svelte";
   import { providerStore } from "$features/providers/provider-store.svelte";
+  import { mcpStore } from "$features/mcp/mcp-store.svelte";
 
   let appInfo = $state<AppInfo | null>(null);
   let bootError = $state<string | null>(null);
   let settingsOpen = $state(false);
+  let connectionsOpen = $state(false);
 
   onMount(async () => {
     try {
       appInfo = await commands.getAppInfo();
+      void mcpStore.init();
       await Promise.all([providerStore.load(), chatStore.loadList()]);
     } catch (e) {
       bootError = describeError(e);
@@ -89,7 +93,7 @@
 <svelte:document onclick={onClick} />
 
 <div class="shell">
-  <Sidebar {appInfo} onopensettings={() => (settingsOpen = true)} />
+  <Sidebar {appInfo} onopensettings={() => (settingsOpen = true)} onopenconnections={() => (connectionsOpen = true)} />
   <main class="canvas" aria-label="Conversation">
     {#if bootError}
       <div class="boot-error" role="alert">
@@ -97,7 +101,7 @@
         <span>{bootError}</span>
       </div>
     {:else if chatStore.active}
-      <ChatView chat={chatStore.active} onopensettings={() => (settingsOpen = true)} />
+      <ChatView chat={chatStore.active} onopensettings={() => (settingsOpen = true)} onopenconnections={() => (connectionsOpen = true)} />
     {/if}
     {#if chatStore.error}
       <div class="toast" role="alert">
@@ -110,6 +114,10 @@
 
 {#if settingsOpen}
   <ProviderSettings onclose={() => (settingsOpen = false)} />
+{/if}
+
+{#if connectionsOpen}
+  <McpSettings onclose={() => (connectionsOpen = false)} />
 {/if}
 
 {#if ctxMenu}

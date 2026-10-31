@@ -406,29 +406,12 @@ pub fn begin_assistant_message(
     Ok(id)
 }
 
-fn persisted_blocks(text: &str, thinking: &str) -> Vec<ContentBlock> {
-    let mut blocks = Vec::new();
-    if !thinking.is_empty() {
-        blocks.push(ContentBlock::Thinking {
-            text: thinking.to_owned(),
-        });
-    }
-    if !text.is_empty() {
-        blocks.push(ContentBlock::Text {
-            text: text.to_owned(),
-        });
-    }
-    blocks
-}
-
 /// Periodic checkpoint of partial assistant content while streaming.
-pub fn checkpoint_assistant_text(
+pub fn checkpoint_assistant_blocks(
     conn: &Connection,
     message_id: &str,
-    text: &str,
-    thinking: &str,
+    blocks: &[ContentBlock],
 ) -> Result<()> {
-    let blocks = persisted_blocks(text, thinking);
     conn.execute(
         "UPDATE messages SET blocks = ?2, updated_at = ?3 WHERE id = ?1 AND status = 'streaming'",
         params![message_id, json(&blocks)?, now_ms()],
@@ -440,13 +423,11 @@ pub fn checkpoint_assistant_text(
 pub fn finalize_assistant_message(
     conn: &Connection,
     message_id: &str,
-    text: &str,
-    thinking: &str,
+    blocks: &[ContentBlock],
     status: MessageStatus,
     usage: Option<Usage>,
     error: Option<&str>,
 ) -> Result<()> {
-    let blocks = persisted_blocks(text, thinking);
     conn.execute(
         "UPDATE messages SET blocks = ?2, status = ?3, usage = ?4, error = ?5, updated_at = ?6 WHERE id = ?1",
         params![message_id, json(&blocks)?, status.as_str(), usage.map(|u| json(&u)).transpose()?, error, now_ms()],
@@ -496,12 +477,25 @@ mod tests {
 
         let run = RunId::new();
         let mid = begin_assistant_message(&mut c, chat.id, run, "prov", "model-x").unwrap();
-        checkpoint_assistant_text(&c, &mid, "partial", "").unwrap();
+        checkpoint_assistant_blocks(
+            &c,
+            &mid,
+            &[ContentBlock::Text {
+                text: "partial".into(),
+            }],
+        )
+        .unwrap();
         finalize_assistant_message(
             &c,
             &mid,
-            "partial done",
-            "thinking it through",
+            &[
+                ContentBlock::Thinking {
+                    text: "thinking it through".into(),
+                },
+                ContentBlock::Text {
+                    text: "partial done".into(),
+                },
+            ],
             MessageStatus::Complete,
             Some(Usage::default()),
             None,
@@ -543,7 +537,14 @@ mod tests {
         let mut c = conn();
         let chat = create_chat(&c, "x").unwrap();
         let mid = begin_assistant_message(&mut c, chat.id, RunId::new(), "p", "m").unwrap();
-        checkpoint_assistant_text(&c, &mid, "half", "").unwrap();
+        checkpoint_assistant_blocks(
+            &c,
+            &mid,
+            &[ContentBlock::Text {
+                text: "half".into(),
+            }],
+        )
+        .unwrap();
         recover_interrupted(&c).unwrap();
         let m = &get_chat(&c, chat.id).unwrap().messages[0];
         assert_eq!(m.status, MessageStatus::Interrupted);

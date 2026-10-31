@@ -1,8 +1,9 @@
 <script lang="ts">
-  import type { AssistantTurn } from "$lib/state/run-reducer";
-  import { isTerminal } from "$lib/state/run-reducer";
+  import type { AssistantTurn, TurnSegment } from "$lib/state/run-reducer";
+  import { isTerminal, turnText, turnThinking } from "$lib/state/run-reducer";
   import { renderMarkdown } from "$lib/markdown";
   import { copyText } from "$lib/clipboard";
+  import ToolCallCard from "./ToolCallCard.svelte";
 
   let { turn, model, onretry }: { turn: AssistantTurn; model: string; onretry: () => void } = $props();
 
@@ -18,10 +19,8 @@
   };
 
   const live = $derived(!isTerminal(turn.phase));
-  // Re-rendering the whole turn per coalesced update is fine at these sizes; chunked
-  // reconciliation comes with the performance pass.
-  const html = $derived(turn.text ? renderMarkdown(turn.text) : "");
-  const thinkingHtml = $derived(turn.thinking ? renderMarkdown(turn.thinking) : "");
+  const fullText = $derived(turnText(turn));
+  const thinking = $derived(turnThinking(turn));
   const truncated = $derived(turn.stopReason === "max_tokens");
   const usageText = $derived.by(() => {
     const u = turn.usage;
@@ -38,7 +37,7 @@
 
   // Copies the raw markdown source of the response (the streamed text is markdown already).
   async function copyResponse() {
-    if (await copyText(turn.text)) {
+    if (await copyText(fullText)) {
       copied = true;
       clearTimeout(copyTimer);
       copyTimer = setTimeout(() => (copied = false), 1400);
@@ -83,19 +82,22 @@
     {/each}
     {#if truncated}<p class="notice">Response was cut off at the output token limit.</p>{/if}
 
-    {#if thinkingHtml}
+    {#if thinking}
       <details class="thinking-block" open={live}>
-        <summary>{live && !turn.text ? "Thinking…" : "Thinking"}</summary>
-        <div class="markdown thinking-body">{@html thinkingHtml}</div>
+        <summary>{live && !fullText ? "Thinking…" : "Thinking"}</summary>
+        <div class="markdown thinking-body">{@html renderMarkdown(thinking)}</div>
       </details>
     {/if}
 
     <div class="body selectable">
-      {#if html && live}
-        <div class="markdown streaming">{@html html}</div>
-      {:else if html}
-        <div class="markdown">{@html html}</div>
-      {:else if live}
+      {#each turn.segments as seg, i (i)}
+        {#if seg.kind === "text"}
+          <div class="markdown" class:streaming={live && i === turn.segments.length - 1}>{@html renderMarkdown(seg.text)}</div>
+        {:else if seg.kind === "tool"}
+          <ToolCallCard segment={seg} runId={turn.runId} />
+        {/if}
+      {/each}
+      {#if live && !fullText && turn.segments.every((s) => s.kind !== "tool")}
         <div class="thinking" aria-hidden="true"><span></span><span></span><span></span></div>
       {/if}
       {#if turn.error}
@@ -111,7 +113,7 @@
       {/if}
     </div>
 
-    {#if turn.text}
+    {#if fullText}
       <div class="actions">
         <button
           class="icon-btn"

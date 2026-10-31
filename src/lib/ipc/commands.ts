@@ -19,10 +19,22 @@ import type { RunStarted } from "$lib/generated/bindings/RunStarted";
 import type { StoredMessage } from "$lib/generated/bindings/StoredMessage";
 import type { SecretProbe } from "$lib/generated/bindings/SecretProbe";
 import type { TlsMode } from "$lib/generated/bindings/TlsMode";
+import type { ApprovalDecision } from "$lib/generated/bindings/ApprovalDecision";
+import type { KeyValueInput } from "$lib/generated/bindings/KeyValueInput";
+import type { McpServerInput } from "$lib/generated/bindings/McpServerInput";
+import type { McpServerView } from "$lib/generated/bindings/McpServerView";
+import type { McpTransport } from "$lib/generated/bindings/McpTransport";
+import type { ToolCallInfo } from "$lib/generated/bindings/ToolCallInfo";
+import type { ToolCallStatus } from "$lib/generated/bindings/ToolCallStatus";
+import type { ToolInfo } from "$lib/generated/bindings/ToolInfo";
+import type { ToolLoading } from "$lib/generated/bindings/ToolLoading";
+import type { ToolPolicy } from "$lib/generated/bindings/ToolPolicy";
+import type { ToolSettings } from "$lib/generated/bindings/ToolSettings";
 
 export type {
   ActiveSelection,
   AppInfo,
+  ApprovalDecision,
   AttachmentMeta,
   Capabilities,
   ChatDetail,
@@ -30,6 +42,10 @@ export type {
   ChatSummary,
   CoreError,
   ImageSupport,
+  KeyValueInput,
+  McpServerInput,
+  McpServerView,
+  McpTransport,
   ProviderConfig,
   ProviderInput,
   ProviderTestResult,
@@ -39,6 +55,12 @@ export type {
   SecretProbe,
   StoredMessage,
   TlsMode,
+  ToolCallInfo,
+  ToolCallStatus,
+  ToolInfo,
+  ToolLoading,
+  ToolPolicy,
+  ToolSettings,
 };
 
 export function isCoreError(value: unknown): value is CoreError {
@@ -92,4 +114,20 @@ export const commands = {
     invoke<Capabilities>("get_model_capabilities", { providerId, model }),
   getActiveSelection: () => invoke<ActiveSelection | null>("get_active_selection"),
   setActiveSelection: (selection: ActiveSelection) => invoke<void>("set_active_selection", { selection }),
+
+  // MCP connections & tool security (Phase 3).
+  listMcpServers: () => invoke<McpServerView[]>("list_mcp_servers"),
+  saveMcpServer: (input: McpServerInput) => invoke<void>("save_mcp_server", { input }),
+  deleteMcpServer: (id: string) => invoke<void>("delete_mcp_server", { id }),
+  setMcpServerEnabled: (id: string, enabled: boolean) =>
+    invoke<void>("set_mcp_server_enabled", { id, enabled }),
+  reconnectMcpServer: (id: string) => invoke<void>("reconnect_mcp_server", { id }),
+  setMcpToolPolicy: (serverId: string, tool: string, policy: ToolPolicy) =>
+    invoke<void>("set_mcp_tool_policy", { serverId, tool, policy }),
+  setMcpDefaultPolicy: (serverId: string, policy: ToolPolicy) =>
+    invoke<void>("set_mcp_default_policy", { serverId, policy }),
+  getToolSettings: () => invoke<ToolSettings>("get_tool_settings"),
+  setToolSettings: (settings: ToolSettings) => invoke<void>("set_tool_settings", { settings }),
+  resolveToolApproval: (runId: RunId, callId: string, decision: ApprovalDecision) =>
+    invoke<boolean>("resolve_tool_approval", { runId, callId, decision }),
 };

@@ -7,7 +7,7 @@
   import { product } from "$lib/generated/product";
   import { providerStore } from "$features/providers/provider-store.svelte";
 
-  let { chat, onopensettings }: { chat: Chat; onopensettings: () => void } = $props();
+  let { chat, onopensettings, onopenconnections }: { chat: Chat; onopensettings: () => void; onopenconnections: () => void } = $props();
 
   let scroller = $state<HTMLElement | null>(null);
   let composer = $state<Composer | null>(null);
@@ -43,7 +43,8 @@
   $effect(() => {
     const items = chat.items;
     const last = items[items.length - 1];
-    void (last?.kind === "assistant" ? last.turn.text.length : items.length);
+    const tail = last?.kind === "assistant" ? last.turn.segments.at(-1) : undefined;
+    void (tail && tail.kind !== "tool" ? tail.text.length : last?.kind === "assistant" ? last.turn.segments.length : items.length);
     let lastUser: TurnItem | null = null;
     for (let i = items.length - 1; i >= 0; i--) {
       const item = items[i];
@@ -173,6 +174,7 @@
   onattach={() => chatStore.pickAttachments(chat)}
   onremoveattachment={(id) => chatStore.removePending(chat, id)}
   {onopensettings}
+  {onopenconnections}
 />
 
 <style>

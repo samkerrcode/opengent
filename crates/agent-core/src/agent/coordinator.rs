@@ -1,15 +1,23 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use serde_json::Value;
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::{ChatId, RunEvent, RunEventPayload, RunId, RunPhase};
+use crate::domain::{
+    ApprovalDecision, ChatId, ContentBlock, Message, Role, RunEvent, RunEventPayload, RunId,
+    RunPhase, StopReason, ToolCallInfo, ToolCallStatus, ToolPolicy,
+};
 use crate::providers::{CompletionRequest, ModelProvider, ProviderEvent};
 use crate::{Error, Result};
 
-use super::{EmitterConfig, RunEmitter};
+use super::tools::{cap_result, RunTools, ToolOutput, FIND_TOOLS};
+use super::{EmitterConfig, RunEmitter, ToolHost};
+
+/// Maximum model↔tool round trips in one run; beyond that the run stops with a notice.
+const MAX_TOOL_STEPS: usize = 8;
 
 /// Destination for run events. The host implements this over its IPC channel.
 /// Returns `false` when the receiver is gone so the run can stop emitting.
@@ -27,13 +35,27 @@ pub struct RunRequest {
     pub chat_id: ChatId,
     pub provider: Arc<dyn ModelProvider>,
     pub completion: CompletionRequest,
+    /// Tools offered this run; `None` disables tool calling entirely.
+    pub tools: Option<RunTools>,
     /// Surfaced to the user before generation starts (e.g. "older messages were trimmed").
     pub notices: Vec<String>,
 }
 
+struct PendingApproval {
+    tx: oneshot::Sender<ApprovalDecision>,
+    /// Needed to persist an `AlwaysAllow` decision as a policy change.
+    host: Arc<dyn ToolHost>,
+    server_id: String,
+    tool: String,
+}
+
+type Approvals = Arc<Mutex<HashMap<String, PendingApproval>>>;
+
 struct ActiveRun {
     run_id: RunId,
     cancel: CancellationToken,
+    /// Tool calls paused on user approval, keyed by tool call id.
+    approvals: Approvals,
 }
 
 /// Owns all in-flight runs. Guarantees at most one active run per chat and bounds the total
@@ -72,6 +94,7 @@ impl RunCoordinator {
         sink: S,
     ) -> Result<()> {
         let cancel = CancellationToken::new();
+        let approvals: Approvals = Arc::new(Mutex::new(HashMap::new()));
         {
             let mut active = self.active.lock().expect("coordinator lock poisoned");
             if active.contains_key(&request.chat_id) {
@@ -82,6 +105,7 @@ impl RunCoordinator {
                 ActiveRun {
                     run_id,
                     cancel: cancel.clone(),
+                    approvals: approvals.clone(),
                 },
             );
         }
@@ -90,7 +114,7 @@ impl RunCoordinator {
         let emitter = RunEmitter::new(sink, request.chat_id, run_id, self.emitter_config);
         self.runtime.spawn(async move {
             let chat_id = request.chat_id;
-            run_loop(request, emitter, cancel, Arc::clone(&this.slots)).await;
+            run_loop(request, emitter, cancel, Arc::clone(&this.slots), approvals).await;
             this.active
                 .lock()
                 .expect("coordinator lock poisoned")
@@ -111,6 +135,34 @@ impl RunCoordinator {
         }
     }
 
+    /// Resolves a tool call waiting on user approval. Returns `false` when no matching
+    /// approval is pending (unknown id, already answered, or run finished). An
+    /// `AlwaysAllow` decision also writes the tool's policy before the call proceeds.
+    pub fn resolve_approval(
+        &self,
+        run_id: RunId,
+        call_id: &str,
+        decision: ApprovalDecision,
+    ) -> bool {
+        let approval = {
+            let active = self.active.lock().expect("coordinator lock poisoned");
+            active
+                .values()
+                .find(|r| r.run_id == run_id)
+                .and_then(|r| r.approvals.lock().expect("approvals lock").remove(call_id))
+        };
+        match approval {
+            Some(a) => {
+                if decision == ApprovalDecision::AlwaysAllow {
+                    a.host
+                        .set_policy(&a.server_id, &a.tool, ToolPolicy::AlwaysAllow);
+                }
+                a.tx.send(decision).is_ok()
+            }
+            None => false,
+        }
+    }
+
     pub fn active_run(&self, chat_id: ChatId) -> Option<RunId> {
         self.active
             .lock()
@@ -124,11 +176,106 @@ impl RunCoordinator {
     }
 }
 
+/// One generation step of the agent loop.
+struct Step {
+    /// Text streamed this step (may be empty for a pure tool turn).
+    text: String,
+    calls: Vec<ToolCallInfo>,
+    stop_reason: StopReason,
+}
+
+/// Streams a single completion. Returns `None` once a terminal payload has been emitted
+/// (cancel/failure), `Some(step)` when the model finished the turn — possibly with tool calls.
+async fn stream_step<S: RunSink>(
+    provider: &Arc<dyn ModelProvider>,
+    completion: &CompletionRequest,
+    emitter: &mut RunEmitter<S>,
+    cancel: &CancellationToken,
+) -> Option<Step> {
+    let mut rx = match provider.stream(completion.clone(), cancel.clone()) {
+        Ok(rx) => rx,
+        Err(e) => {
+            emitter.emit(RunEventPayload::Failed {
+                message: e.to_string(),
+            });
+            return None;
+        }
+    };
+    emitter.emit(RunEventPayload::Phase {
+        phase: RunPhase::Generating,
+    });
+
+    let mut step = Step {
+        text: String::new(),
+        calls: Vec::new(),
+        stop_reason: StopReason::EndTurn,
+    };
+    loop {
+        let flush_at = emitter.flush_deadline();
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                emitter.emit(RunEventPayload::Cancelled);
+                return None;
+            }
+            _ = async { match flush_at { Some(t) => tokio::time::sleep_until(t).await, None => std::future::pending().await } } => {
+                emitter.flush();
+            }
+            ev = rx.recv() => match ev {
+                Some(ProviderEvent::TextDelta(t)) => {
+                    step.text.push_str(&t);
+                    emitter.push_text(&t);
+                }
+                Some(ProviderEvent::ReasoningDelta(text)) => emitter.push_thinking(&text),
+                Some(ProviderEvent::Usage(usage)) => emitter.emit(RunEventPayload::Usage { usage }),
+                Some(ProviderEvent::ToolCall { id, name, arguments }) => {
+                    let arguments = serde_json::from_str::<Value>(&arguments)
+                        .unwrap_or(Value::String(arguments));
+                    step.calls.push(ToolCallInfo {
+                        id,
+                        name: name.clone(),
+                        server: None,
+                        tool: name,
+                        arguments,
+                    });
+                }
+                Some(ProviderEvent::Done(stop_reason)) => {
+                    step.stop_reason = stop_reason;
+                    return Some(step);
+                }
+                Some(ProviderEvent::Error(message)) => {
+                    emitter.emit(RunEventPayload::Phase { phase: RunPhase::Failed });
+                    emitter.emit(RunEventPayload::Failed { message });
+                    return None;
+                }
+                None => {
+                    emitter.emit(RunEventPayload::Failed { message: "provider stream ended unexpectedly".into() });
+                    return None;
+                }
+            },
+        }
+        if emitter.is_disconnected() {
+            cancel.cancel();
+        }
+    }
+}
+
+/// How one tool call ends. Every variant emits `ToolResult`; `Abort` additionally ends the run.
+enum CallEnd {
+    Emit {
+        content: Value,
+        is_error: bool,
+        status: ToolCallStatus,
+    },
+    Abort,
+}
+
 async fn run_loop<S: RunSink>(
     request: RunRequest,
     mut emitter: RunEmitter<S>,
     cancel: CancellationToken,
     slots: Arc<Semaphore>,
+    approvals: Approvals,
 ) {
     emitter.emit(RunEventPayload::Phase {
         phase: RunPhase::Queued,
@@ -153,53 +300,260 @@ async fn run_loop<S: RunSink>(
     for message in request.notices {
         emitter.emit(RunEventPayload::Notice { message });
     }
-    let mut rx = match request.provider.stream(request.completion, cancel.clone()) {
-        Ok(rx) => rx,
-        Err(e) => {
-            emitter.emit(RunEventPayload::Failed {
-                message: e.to_string(),
+
+    let provider = request.provider;
+    let mut tools = request.tools;
+    let mut completion = request.completion;
+    let mut messages = std::mem::take(&mut completion.messages);
+    let mut tool_steps = 0usize;
+
+    loop {
+        // Re-derive the offered definitions each step: on-demand loading adds tools as
+        // `find_tools` loads them, and a "always allow" decision can unblock a tool mid-run.
+        completion.messages = messages.clone();
+        completion.tools = tools.as_ref().map(|t| t.specs()).unwrap_or_default();
+
+        let Some(step) = stream_step(&provider, &completion, &mut emitter, &cancel).await else {
+            return;
+        };
+        if step.calls.is_empty() || tools.is_none() {
+            emitter.emit(RunEventPayload::Phase {
+                phase: RunPhase::Completed,
+            });
+            emitter.emit(RunEventPayload::Completed {
+                stop_reason: step.stop_reason,
             });
             return;
         }
-    };
-    emitter.emit(RunEventPayload::Phase {
-        phase: RunPhase::Generating,
-    });
+        tool_steps += 1;
+        if tool_steps > MAX_TOOL_STEPS {
+            emitter.emit(RunEventPayload::Notice {
+                message: format!(
+                    "Stopped after {MAX_TOOL_STEPS} tool steps; run the prompt again to continue."
+                ),
+            });
+            emitter.emit(RunEventPayload::Phase {
+                phase: RunPhase::Completed,
+            });
+            emitter.emit(RunEventPayload::Completed {
+                stop_reason: StopReason::EndTurn,
+            });
+            return;
+        }
 
-    loop {
-        let flush_at = emitter.flush_deadline();
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                emitter.emit(RunEventPayload::Cancelled);
-                return;
+        // Persist the assistant step (text + calls) in the working transcript.
+        let mut blocks = Vec::new();
+        if !step.text.trim().is_empty() {
+            blocks.push(ContentBlock::Text { text: step.text });
+        }
+        blocks.extend(step.calls.iter().map(|c| ContentBlock::ToolCall {
+            id: c.id.clone(),
+            name: c.name.clone(),
+            arguments: c.arguments.clone(),
+            server: c.server.clone(),
+            tool: Some(c.tool.clone()),
+        }));
+        messages.push(Message {
+            role: Role::Assistant,
+            blocks,
+        });
+
+        // Execute the calls in order; each emits ToolCall → (statuses) → ToolResult.
+        let mut results = Vec::new();
+        let mut first_execute = true;
+        for mut call in step.calls {
+            // Fill display routing (server name, original tool name) from the catalog.
+            if let Some(e) = tools.as_ref().and_then(|t| t.entry(&call.name)) {
+                call.server = Some(e.server_name.clone());
+                call.tool = e.tool.clone();
             }
-            _ = async { match flush_at { Some(t) => tokio::time::sleep_until(t).await, None => std::future::pending().await } } => {
-                emitter.flush();
+            emitter.emit(RunEventPayload::ToolCall { call: call.clone() });
+            let end = execute_call(
+                &call,
+                &mut tools,
+                &approvals,
+                &mut emitter,
+                &cancel,
+                &mut first_execute,
+            )
+            .await;
+            match end {
+                CallEnd::Abort => {
+                    emitter.emit(RunEventPayload::ToolResult {
+                        call_id: call.id,
+                        content: Value::Array(Vec::new()),
+                        is_error: true,
+                        status: ToolCallStatus::Cancelled,
+                    });
+                    emitter.emit(RunEventPayload::Cancelled);
+                    return;
+                }
+                CallEnd::Emit {
+                    content,
+                    is_error,
+                    status,
+                } => {
+                    results.push(ContentBlock::ToolResult {
+                        call_id: call.id.clone(),
+                        content: content.clone(),
+                        is_error,
+                        status: Some(status),
+                    });
+                    emitter.emit(RunEventPayload::ToolResult {
+                        call_id: call.id,
+                        content,
+                        is_error,
+                        status,
+                    });
+                }
             }
-            ev = rx.recv() => match ev {
-                Some(ProviderEvent::TextDelta(text)) => emitter.push_text(&text),
-                Some(ProviderEvent::ReasoningDelta(text)) => emitter.push_thinking(&text),
-                Some(ProviderEvent::Usage(usage)) => emitter.emit(RunEventPayload::Usage { usage }),
-                Some(ProviderEvent::Done(stop_reason)) => {
-                    emitter.emit(RunEventPayload::Phase { phase: RunPhase::Completed });
-                    emitter.emit(RunEventPayload::Completed { stop_reason });
-                    return;
-                }
-                Some(ProviderEvent::Error(message)) => {
-                    emitter.emit(RunEventPayload::Phase { phase: RunPhase::Failed });
-                    emitter.emit(RunEventPayload::Failed { message });
-                    return;
-                }
-                None => {
-                    emitter.emit(RunEventPayload::Failed { message: "provider stream ended unexpectedly".into() });
-                    return;
-                }
+            if emitter.is_disconnected() {
+                cancel.cancel();
+            }
+        }
+        messages.push(Message {
+            role: Role::Tool,
+            blocks: results,
+        });
+    }
+}
+
+/// Executes one model tool call: resolve it against the run's catalog, enforce policy,
+/// wait for approval when required, then invoke the host. Emits `ToolStatus` transitions.
+async fn execute_call<S: RunSink>(
+    call: &ToolCallInfo,
+    tools: &mut Option<RunTools>,
+    approvals: &Approvals,
+    emitter: &mut RunEmitter<S>,
+    cancel: &CancellationToken,
+    first_execute: &mut bool,
+) -> CallEnd {
+    macro_rules! emit_now {
+        ($status:expr) => {
+            emitter.emit(RunEventPayload::ToolStatus {
+                call_id: call.id.clone(),
+                status: $status,
+            })
+        };
+    }
+    let parsed = match &call.arguments {
+        Value::String(s) if s.trim().is_empty() => Value::Null,
+        v => v.clone(),
+    };
+
+    // The built-in search tool is read-only metadata: it never needs approval.
+    if call.name == FIND_TOOLS {
+        emit_now!(ToolCallStatus::Running);
+        let out = match tools {
+            Some(t) if t.is_on_demand() => t.find_tools(&parsed),
+            _ => ToolOutput::text(
+                "Tool search is not active; all tools are already available.",
+                true,
+            ),
+        };
+        return CallEnd::Emit {
+            content: cap_result(out.content),
+            is_error: out.is_error,
+            status: if out.is_error {
+                ToolCallStatus::Failed
+            } else {
+                ToolCallStatus::Completed
             },
+        };
+    }
+
+    let Some(run_tools) = tools.as_ref() else {
+        return CallEnd::Emit {
+            content: Value::Array(Vec::new()),
+            is_error: true,
+            status: ToolCallStatus::Failed,
+        };
+    };
+    let Some(entry) = run_tools.entry(&call.name) else {
+        let msg = if run_tools.is_on_demand() {
+            format!(
+                "Tool `{}` is not loaded. Call `{FIND_TOOLS}` to find and load tools first.",
+                call.name
+            )
+        } else {
+            format!("Unknown or disabled tool `{}`.", call.name)
+        };
+        return CallEnd::Emit {
+            content: serde_json::json!([{ "type": "text", "text": msg }]),
+            is_error: true,
+            status: ToolCallStatus::Blocked,
+        };
+    };
+    let host = run_tools.host.clone();
+    let (server_id, tool_name) = (entry.server_id.clone(), entry.tool.clone());
+    match host.policy(&server_id, &tool_name) {
+        ToolPolicy::Block => {
+            return CallEnd::Emit {
+                content: serde_json::json!([{ "type": "text", "text": "This tool is blocked by your permission settings." }]),
+                is_error: true,
+                status: ToolCallStatus::Blocked,
+            };
         }
-        if emitter.is_disconnected() {
-            cancel.cancel();
+        ToolPolicy::Ask => {
+            emitter.emit(RunEventPayload::Phase {
+                phase: RunPhase::AwaitingApproval,
+            });
+            emit_now!(ToolCallStatus::PendingApproval);
+            let (tx, rx) = oneshot::channel::<ApprovalDecision>();
+            approvals.lock().expect("approvals lock").insert(
+                call.id.clone(),
+                PendingApproval {
+                    tx,
+                    host: host.clone(),
+                    server_id: server_id.clone(),
+                    tool: tool_name.clone(),
+                },
+            );
+            let decision = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    approvals.lock().expect("approvals lock").remove(&call.id);
+                    return CallEnd::Abort;
+                }
+                d = rx => match d {
+                    Ok(d) => d,
+                    Err(_) => return CallEnd::Abort,
+                },
+            };
+            match decision {
+                ApprovalDecision::Deny => {
+                    return CallEnd::Emit {
+                        content: serde_json::json!([{ "type": "text", "text": "The user denied this tool call." }]),
+                        is_error: true,
+                        status: ToolCallStatus::Denied,
+                    };
+                }
+                ApprovalDecision::AllowOnce | ApprovalDecision::AlwaysAllow => {}
+            }
         }
+        ToolPolicy::AlwaysAllow => {}
+    }
+
+    if *first_execute {
+        *first_execute = false;
+        emitter.emit(RunEventPayload::Phase {
+            phase: RunPhase::CallingTools,
+        });
+    }
+    emit_now!(ToolCallStatus::Running);
+    let out = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return CallEnd::Abort,
+        out = host.call(&server_id, &tool_name, parsed, cancel.clone()) => out,
+    };
+    CallEnd::Emit {
+        content: cap_result(out.content),
+        is_error: out.is_error,
+        status: if out.is_error {
+            ToolCallStatus::Failed
+        } else {
+            ToolCallStatus::Completed
+        },
     }
 }
 
@@ -208,7 +562,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::domain::{Message, Role, StopReason};
+    use crate::domain::Message;
     use crate::providers::fake::FakeProvider;
 
     fn request(chat_id: ChatId, delay: Duration) -> RunRequest {
@@ -223,7 +577,9 @@ mod tests {
                 system: None,
                 messages: vec![Message::text(Role::User, "ping")],
                 max_output_tokens: None,
+                tools: Vec::new(),
             },
+            tools: None,
             notices: Vec::new(),
         }
     }

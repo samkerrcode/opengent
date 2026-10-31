@@ -6,6 +6,7 @@ document stays scannable as the app grows.
 
 - [Chat](#chat)
 - [Providers & models](#providers--models)
+- [Connections (MCP tools)](#connections-mcp-tools)
 - [Attachments](#attachments)
 - [History & persistence](#history--persistence)
 - [Secrets](#secrets)
@@ -24,6 +25,41 @@ provider: base URL (HTTPS required off-loopback), optional API key in the OS key
 discovery via `GET /models`, context window override, TLS verification mode (system / pinned CA
 / skip), and image-input policy. The model picker in the composer selects provider+model per
 message.
+
+## Connections (MCP tools)
+
+**What.** MCP servers give the model real tools. Add them in **Connections** (sidebar → ⚒):
+a *local command* (stdio — e.g. `npx -y @modelcontextprotocol/server-everything`, with
+optional env vars and working directory) or a *remote server* (Streamable HTTP endpoint with
+optional headers). Paste a standard `{"mcpServers": {…}}` JSON config to prefill the form.
+Secret env/header values go to the OS keychain; everything else lives in `mcp.json`.
+Servers connect in the background and can be toggled on/off from the ⚒ **Tools** chip in the
+composer; status dots and stderr tails surface failures.
+
+**Tool security.** Every tool is *Always allow*, *Ask*, or *Block* — set per tool in the
+⚒ Tools menu (each server expands into its tool list) or per server in Connections via the
+default policy. Blocked tools are never sent to the model; *Ask* pauses the run on an
+approval card (Allow once / Always allow / Deny), *Always allow* persists the choice.
+Enforcement happens in Rust at dispatch, not just in the UI.
+
+**Tool loading.** Under ⚒ Tools → *Tool loading*: **Always load all** sends every enabled
+tool's schema each request; **On-demand** sends only a `find_tools` search tool — the model
+calls it with keywords to load the matching tools, keeping prompts small when many servers
+are connected; **Auto** (default) loads all until the definitions exceed ~6k estimated
+tokens or a quarter of the context window, then switches to on-demand. Tools loaded through
+`find_tools` stay available for the rest of the conversation.
+
+**How it works.** The run loop is model → tool calls → (approval) → results → model (max 8
+steps). Calls stream in as `tool_calls` fragments, execute against the MCP connection, and
+results feed back; tool cards in the chat show status, arguments, and results. Results are
+capped (40k chars, binary parts stubbed) before persistence and replay. Key code:
+`crates/agent-core/src/mcp/` (config, stdio env, manager), `agent/tools.rs` (catalog,
+naming, search), `agent/coordinator.rs` (loop), `providers/openai_compat.rs` (tool_calls).
+
+**Limits.** Max 8 tool steps per run; calls run sequentially. Stdio children get an
+allow-listed environment plus a recovered login-shell PATH so `npx`/`uvx` resolve from GUI
+launches. MCP auth (OAuth) is Phase 4 — remote servers that need browser sign-in can't
+connect yet.
 
 ## Attachments
 

@@ -123,6 +123,7 @@ mod tests {
             system: None,
             messages: vec![Message::text(Role::User, "hello")],
             max_output_tokens: None,
+            tools: Vec::new(),
         }
     }
 
@@ -141,7 +142,7 @@ mod tests {
         while let Some(ev) = rx.recv().await {
             match ev {
                 ProviderEvent::TextDelta(t) => text.push_str(&t),
-                ProviderEvent::ReasoningDelta(_) => {}
+                ProviderEvent::ReasoningDelta(_) | ProviderEvent::ToolCall { .. } => {}
                 ProviderEvent::Usage(_) => saw_usage = true,
                 ProviderEvent::Done(r) => done = Some(r),
                 ProviderEvent::Error(e) => panic!("unexpected error {e}"),

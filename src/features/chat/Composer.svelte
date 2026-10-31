@@ -1,6 +1,8 @@
 <script lang="ts">
   import ModelPicker from "$features/providers/ModelPicker.svelte";
   import { providerStore } from "$features/providers/provider-store.svelte";
+  import ToolsMenu from "$features/mcp/ToolsMenu.svelte";
+  import { mcpStore } from "$features/mcp/mcp-store.svelte";
   import { attachmentDataUrl } from "$lib/attachments";
   import type { AttachmentMeta } from "$lib/ipc/commands";
 
@@ -12,6 +14,7 @@
     onattach,
     onremoveattachment,
     onopensettings,
+    onopenconnections,
   }: {
     busy: boolean;
     pending: AttachmentMeta[];
@@ -20,10 +23,12 @@
     onattach: () => void;
     onremoveattachment: (id: string) => void;
     onopensettings: () => void;
+    onopenconnections: () => void;
   } = $props();
 
   let value = $state("");
   let textarea = $state<HTMLTextAreaElement | null>(null);
+  let toolsOpen = $state(false);
 
   export function focus() {
     textarea?.focus();
@@ -110,7 +115,21 @@
         >
           ⌁ Attach{pending.length ? ` (${pending.length})` : ""}
         </button>
-        <span class="chip" title="MCP tools arrive in Phase 3">⚙ Tools</span>
+        <span class="tools-anchor">
+          <button
+            type="button"
+            class="chip"
+            class:accent={mcpStore.toolCount > 0 && mcpStore.connected.length > 0}
+            onclick={() => (toolsOpen = !toolsOpen)}
+            aria-expanded={toolsOpen}
+            title="MCP connections and tool permissions"
+          >
+            ⚒ Tools{mcpStore.toolCount ? ` · ${mcpStore.toolCount}` : ""}
+          </button>
+          {#if toolsOpen}
+            <ToolsMenu {onopenconnections} onclose={() => (toolsOpen = false)} />
+          {/if}
+        </span>
       </div>
       {#if busy}
         <button type="button" class="btn-outline stop" onclick={onstop} title="Stop (Esc)">
@@ -225,6 +244,10 @@
     flex-wrap: wrap;
     align-items: center;
     min-width: 0;
+  }
+  .tools-anchor {
+    position: relative;
+    display: inline-flex;
   }
   .send,
   .stop {

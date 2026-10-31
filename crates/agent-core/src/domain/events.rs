@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use super::{ChatId, RunId};
+use super::{ChatId, RunId, ToolCallInfo, ToolCallStatus};
 
 /// Bump when the wire shape of `RunEvent` changes incompatibly.
-pub const RUN_EVENT_SCHEMA_VERSION: u16 = 1;
+pub const RUN_EVENT_SCHEMA_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -77,6 +77,22 @@ pub enum RunEventPayload {
     /// Non-fatal, user-visible information about how the run was prepared (e.g. trimmed history).
     Notice {
         message: String,
+    },
+    /// The model requested a tool call. Followed by `ToolStatus` and finally `ToolResult`.
+    ToolCall {
+        call: ToolCallInfo,
+    },
+    /// Non-terminal status change (awaiting approval, running).
+    ToolStatus {
+        call_id: String,
+        status: ToolCallStatus,
+    },
+    ToolResult {
+        call_id: String,
+        #[ts(type = "unknown")]
+        content: serde_json::Value,
+        is_error: bool,
+        status: ToolCallStatus,
     },
     Completed {
         stop_reason: StopReason,

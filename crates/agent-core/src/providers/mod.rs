@@ -27,20 +27,37 @@ pub struct Capabilities {
     pub context_window: Option<u32>,
 }
 
+/// A function the model may call. `parameters` is a JSON Schema object.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
 #[derive(Debug, Clone)]
 pub struct CompletionRequest {
     pub model: String,
     pub system: Option<String>,
     pub messages: Vec<Message>,
     pub max_output_tokens: Option<u32>,
+    /// Tools offered for this request; empty = no tool calling.
+    pub tools: Vec<ToolSpec>,
 }
 
-/// Normalized streaming events. Tool-call deltas are added in Phase 3.
+/// Normalized streaming events.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProviderEvent {
     TextDelta(String),
     /// Reasoning/thinking content for models that expose it (e.g. OpenAI `reasoning_content`).
     ReasoningDelta(String),
+    /// A complete tool call, emitted once its streamed fragments are assembled (before
+    /// `Done`). `arguments` is the raw JSON text from the model and may be malformed.
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: String,
+    },
     Usage(Usage),
     Done(StopReason),
     Error(String),

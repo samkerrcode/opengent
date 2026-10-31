@@ -1,6 +1,9 @@
-//! MCP client. Phase 0 proves the official `rmcp` client compiles with the stdio and
-//! Streamable HTTP transports and exposes a minimal connect-and-list-tools probe; the
-//! connection manager, policies and OAuth arrive in Phases 3–4.
+//! MCP client: server configuration (`config`), spawned-stdio environment (`stdio`), the
+//! connection manager and tool dispatch (`manager`), plus a one-shot probe used by tests.
+
+pub mod config;
+pub mod manager;
+pub mod stdio;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -13,6 +16,12 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::{config::product, Error, Result};
+
+pub use config::{
+    split_command, KeyValueEntry, KeyValueInput, McpServerConfig, McpServerInput, McpStore,
+    McpTransport,
+};
+pub use manager::{McpManager, McpServerStatus, McpServerView, ToolInfo};
 
 /// Launch configuration for a stdio MCP server. No shell is involved: `command` is executed
 /// directly with `args`, a minimal allow-listed environment and an explicit working directory.
@@ -41,7 +50,7 @@ pub struct ServerProbe {
     pub tools: Vec<ToolSummary>,
 }
 
-fn client_config() -> ClientConfig {
+pub(crate) fn client_config() -> ClientConfig {
     ClientConfig::new(
         ClientCapabilities::default(),
         Implementation::new(product().slug, product().version).with_title(product().display_name),

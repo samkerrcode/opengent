@@ -61,12 +61,14 @@ fn request() -> CompletionRequest {
         system: Some("sys".into()),
         messages: vec![Message::text(Role::User, "hello")],
         max_output_tokens: Some(64),
+        tools: Vec::new(),
     }
 }
 
 struct Collected {
     text: String,
     thinking: String,
+    calls: Vec<(String, String, String)>,
     done: Option<StopReason>,
     err: Option<String>,
     usage: bool,
@@ -79,6 +81,7 @@ async fn collect(provider: &OpenAiCompatProvider) -> Collected {
     let mut c = Collected {
         text: String::new(),
         thinking: String::new(),
+        calls: Vec::new(),
         done: None,
         err: None,
         usage: false,
@@ -87,6 +90,11 @@ async fn collect(provider: &OpenAiCompatProvider) -> Collected {
         match ev {
             ProviderEvent::TextDelta(t) => c.text.push_str(&t),
             ProviderEvent::ReasoningDelta(t) => c.thinking.push_str(&t),
+            ProviderEvent::ToolCall {
+                id,
+                name,
+                arguments,
+            } => c.calls.push((id, name, arguments)),
             ProviderEvent::Usage(u) => c.usage = u.input_tokens.is_some(),
             ProviderEvent::Done(r) => c.done = Some(r),
             ProviderEvent::Error(e) => c.err = Some(e),
@@ -195,6 +203,72 @@ async fn cancellation_stops_the_stream() {
         rest += 1;
     }
     assert!(rest <= 2, "stream kept going after cancel: {rest} events");
+}
+
+#[tokio::test]
+async fn tool_calls_are_assembled_across_chunks() {
+    let body: &[u8] = br#"data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"Checking."},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"fs__read","arguments":""}}]},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.txt\"}"}}]},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"time__now","arguments":"{}"}}]},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+
+"#;
+    for chunk in [3usize, 4096] {
+        let base = serve_once("200 OK", body, chunk, Duration::ZERO).await;
+        let provider = OpenAiCompatProvider::new(
+            OpenAiCompatConfig::new("t", base),
+            agent_core::http::client().unwrap(),
+        );
+        let c = collect(&provider).await;
+        assert_eq!(c.err, None);
+        assert_eq!(c.text, "Checking.");
+        assert_eq!(c.done, Some(StopReason::ToolUse));
+        assert_eq!(
+            c.calls,
+            vec![
+                (
+                    "call_a".to_string(),
+                    "fs__read".to_string(),
+                    r#"{"path":"a.txt"}"#.to_string()
+                ),
+                (
+                    "call_b".to_string(),
+                    "time__now".to_string(),
+                    "{}".to_string()
+                ),
+            ]
+        );
+    }
+}
+
+#[tokio::test]
+async fn tool_calls_with_stop_finish_reason_still_report_tool_use() {
+    let body: &[u8] = br#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"function":{"name":"x","arguments":"{}"}}]},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+"#;
+    let base = serve_once("200 OK", body, 4096, Duration::ZERO).await;
+    let provider = OpenAiCompatProvider::new(
+        OpenAiCompatConfig::new("t", base),
+        agent_core::http::client().unwrap(),
+    );
+    let c = collect(&provider).await;
+    assert_eq!(c.done, Some(StopReason::ToolUse));
+    assert_eq!(c.calls.len(), 1);
+    assert!(
+        c.calls[0].0.starts_with("call_0_"),
+        "missing ids are synthesized"
+    );
 }
 
 #[tokio::test]

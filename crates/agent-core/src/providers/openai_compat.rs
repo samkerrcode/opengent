@@ -1,6 +1,6 @@
 //! OpenAI-compatible Chat Completions adapter. This is the protocol spoken by most local
-//! servers (Ollama, LM Studio, vLLM, llama.cpp) and many hosted gateways. Tool calls are
-//! parsed in Phase 3; today unknown delta fields are ignored.
+//! servers (Ollama, LM Studio, vLLM, llama.cpp) and many hosted gateways. Function tools are
+//! sent as `tools`; streamed `tool_calls` fragments are assembled into whole calls.
 
 use std::time::Duration;
 
@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::sse::SseParser;
 use super::{Capabilities, CompletionRequest, ModelProvider, ProviderEvent, PROVIDER_EVENT_BUFFER};
-use crate::domain::{ContentBlock, Role, StopReason, Usage};
+use crate::domain::{tool_result_text, ContentBlock, Role, StopReason, Usage};
 use crate::{Error, Result};
 
 #[derive(Debug, Clone)]
@@ -303,9 +303,60 @@ impl OpenAiCompatProvider {
                 Role::System => "system",
                 Role::User => "user",
                 Role::Assistant => "assistant",
-                Role::Tool => "tool",
+                Role::Tool => {
+                    // One `tool` message per result, linked to its call by id.
+                    for b in &m.blocks {
+                        if let ContentBlock::ToolResult {
+                            call_id, content, ..
+                        } = b
+                        {
+                            messages.push(json!({
+                                "role": "tool",
+                                "tool_call_id": call_id,
+                                "content": tool_result_text(content),
+                            }));
+                        }
+                    }
+                    continue;
+                }
             };
-            if m.blocks
+            let tool_calls: Vec<Value> = m
+                .blocks
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::ToolCall {
+                        id,
+                        name,
+                        arguments,
+                        ..
+                    } => Some(json!({
+                        "id": id,
+                        "type": "function",
+                        "function": { "name": name, "arguments": arguments.to_string() },
+                    })),
+                    _ => None,
+                })
+                .collect();
+            if !tool_calls.is_empty() {
+                let text: String = m
+                    .blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                // `content: null` (not "") is the canonical form for a pure tool-call turn.
+                let content = if text.is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(text)
+                };
+                messages
+                    .push(json!({ "role": role, "content": content, "tool_calls": tool_calls }));
+            } else if m
+                .blocks
                 .iter()
                 .any(|b| matches!(b, ContentBlock::Image { .. }))
             {
@@ -345,7 +396,66 @@ impl OpenAiCompatProvider {
         if let Some(max) = request.max_output_tokens {
             body["max_tokens"] = json!(max);
         }
+        if !request.tools.is_empty() {
+            body["tools"] = request
+                .tools
+                .iter()
+                .map(|t| {
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.parameters,
+                        }
+                    })
+                })
+                .collect();
+        }
         body
+    }
+}
+
+/// A tool call being assembled from streamed fragments.
+#[derive(Default)]
+struct PartialCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+/// Folds one streamed `tool_calls` fragment into `calls`. Fragments are keyed by `index`;
+/// servers that omit it are handled by treating a new `id` as a new call.
+fn merge_tool_call_delta(calls: &mut Vec<PartialCall>, d: ToolCallDelta) {
+    let idx = d.index.unwrap_or_else(|| {
+        let new_id = d.id.as_deref().filter(|s| !s.is_empty());
+        match (new_id, calls.last()) {
+            (Some(id), Some(last)) if last.id != id => calls.len(),
+            (_, None) => 0,
+            _ => calls.len() - 1,
+        }
+    });
+    if calls.len() <= idx {
+        calls.resize_with(idx + 1, PartialCall::default);
+    }
+    let call = &mut calls[idx];
+    if let Some(id) = d.id.filter(|s| !s.is_empty()) {
+        call.id = id;
+    }
+    if let Some(f) = d.function {
+        if let Some(name) = f.name.filter(|s| !s.is_empty()) {
+            if call.name.is_empty() {
+                call.name = name;
+            } else if call.name != name {
+                call.name.push_str(&name);
+            }
+        }
+        match f.arguments {
+            Some(Value::String(s)) => call.arguments.push_str(&s),
+            // Some servers send the arguments as an object rather than a JSON string.
+            Some(v @ Value::Object(_)) => call.arguments = v.to_string(),
+            _ => {}
+        }
     }
 }
 
@@ -372,6 +482,24 @@ struct Delta {
     /// Reasoning models (Qwen3, DeepSeek-R1, …) stream their chain of thought here.
     #[serde(default)]
     reasoning_content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<ToolCallDelta>>,
+}
+#[derive(Deserialize)]
+struct ToolCallDelta {
+    #[serde(default)]
+    index: Option<usize>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<FunctionDelta>,
+}
+#[derive(Deserialize)]
+struct FunctionDelta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<Value>,
 }
 #[derive(Deserialize)]
 struct ChunkUsage {
@@ -393,6 +521,8 @@ impl ModelProvider for OpenAiCompatProvider {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             streaming: true,
+            tools: true,
+            parallel_tool_calls: true,
             context_window: self.config.context_window,
             ..Default::default()
         }
@@ -445,6 +575,7 @@ async fn run_stream(
     let mut usage: Option<Usage> = None;
     let mut finish: Option<StopReason> = None;
     let mut saw_done = false;
+    let mut calls: Vec<PartialCall> = Vec::new();
 
     loop {
         let chunk = tokio::select! {
@@ -484,6 +615,9 @@ async fn run_stream(
                         return Ok(());
                     }
                 }
+                for d in choice.delta.tool_calls.into_iter().flatten() {
+                    merge_tool_call_delta(&mut calls, d);
+                }
                 if let Some(reason) = choice.finish_reason {
                     finish = Some(match reason.as_str() {
                         "length" => StopReason::MaxTokens,
@@ -503,6 +637,30 @@ async fn run_stream(
         }
     }
 
+    // Some servers (older Ollama, some vLLM templates) finish with "stop" even when they
+    // emitted tool calls, so the presence of calls decides the stop reason. Calls cut off by
+    // the output limit are dropped: their arguments are truncated JSON.
+    let mut calls: Vec<PartialCall> = calls.into_iter().filter(|c| !c.name.is_empty()).collect();
+    if finish == Some(StopReason::MaxTokens) {
+        calls.clear();
+    } else if !calls.is_empty() && (finish.is_some() || saw_done) {
+        finish = Some(StopReason::ToolUse);
+    }
+    for (i, c) in calls.into_iter().enumerate() {
+        let id = if c.id.is_empty() {
+            format!("call_{i}_{}", uuid::Uuid::new_v4().simple())
+        } else {
+            c.id
+        };
+        let ev = ProviderEvent::ToolCall {
+            id,
+            name: c.name,
+            arguments: c.arguments,
+        };
+        if tx.send(ev).await.is_err() {
+            return Ok(());
+        }
+    }
     if let Some(u) = usage {
         let _ = tx.send(ProviderEvent::Usage(u)).await;
     }
@@ -616,6 +774,7 @@ mod tests {
             system: Some("sys".into()),
             messages: vec![Message::text(Role::User, "hi")],
             max_output_tokens: Some(100),
+            tools: Vec::new(),
         };
         let body = OpenAiCompatProvider::build_body(&req, true);
         assert_eq!(body["messages"][0]["role"], "system");
@@ -643,6 +802,7 @@ mod tests {
                 ],
             }],
             max_output_tokens: None,
+            tools: Vec::new(),
         };
         let body = OpenAiCompatProvider::build_body(&req, false);
         let parts = body["messages"][0]["content"].as_array().unwrap();
@@ -658,10 +818,106 @@ mod tests {
                 system: None,
                 messages: vec![Message::text(Role::User, "hi")],
                 max_output_tokens: None,
+                tools: Vec::new(),
             },
             false,
         );
         assert_eq!(text_only["messages"][0]["content"], "hi");
+    }
+
+    #[test]
+    fn body_with_tools_tool_calls_and_tool_results() {
+        use crate::providers::ToolSpec;
+        let req = CompletionRequest {
+            model: "m".into(),
+            system: None,
+            messages: vec![
+                Message::text(Role::User, "list files"),
+                Message {
+                    role: Role::Assistant,
+                    blocks: vec![ContentBlock::ToolCall {
+                        id: "c1".into(),
+                        name: "fs__list".into(),
+                        arguments: json!({ "path": "/tmp" }),
+                        server: Some("fs".into()),
+                        tool: Some("list".into()),
+                    }],
+                },
+                Message {
+                    role: Role::Tool,
+                    blocks: vec![ContentBlock::ToolResult {
+                        call_id: "c1".into(),
+                        content: json!([{ "type": "text", "text": "a.txt" }]),
+                        is_error: false,
+                        status: None,
+                    }],
+                },
+            ],
+            max_output_tokens: None,
+            tools: vec![ToolSpec {
+                name: "fs__list".into(),
+                description: "List a directory".into(),
+                parameters: json!({ "type": "object" }),
+            }],
+        };
+        let body = OpenAiCompatProvider::build_body(&req, false);
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["function"]["name"], "fs__list");
+        let asst = &body["messages"][1];
+        assert_eq!(asst["role"], "assistant");
+        assert!(asst["content"].is_null());
+        assert_eq!(asst["tool_calls"][0]["id"], "c1");
+        assert_eq!(
+            asst["tool_calls"][0]["function"]["arguments"],
+            r#"{"path":"/tmp"}"#
+        );
+        let tool = &body["messages"][2];
+        assert_eq!(tool["role"], "tool");
+        assert_eq!(tool["tool_call_id"], "c1");
+        assert_eq!(tool["content"], "a.txt");
+        // No tools → no `tools` key (some servers reject an empty array).
+        let plain = OpenAiCompatProvider::build_body(
+            &CompletionRequest {
+                tools: Vec::new(),
+                ..req
+            },
+            false,
+        );
+        assert!(plain.get("tools").is_none());
+    }
+
+    #[test]
+    fn tool_call_fragments_merge_by_index_and_by_id() {
+        let d = |v: Value| serde_json::from_value::<ToolCallDelta>(v).unwrap();
+        let mut calls = Vec::new();
+        merge_tool_call_delta(
+            &mut calls,
+            d(json!({"index":0,"id":"a","function":{"name":"x","arguments":"{\"p\":"}})),
+        );
+        merge_tool_call_delta(
+            &mut calls,
+            d(json!({"index":1,"id":"b","function":{"name":"y","arguments":"{}"}})),
+        );
+        merge_tool_call_delta(
+            &mut calls,
+            d(json!({"index":0,"function":{"arguments":"1}"}})),
+        );
+        assert_eq!(calls.len(), 2);
+        assert_eq!((calls[0].id.as_str(), calls[0].name.as_str()), ("a", "x"));
+        assert_eq!(calls[0].arguments, r#"{"p":1}"#);
+        assert_eq!(calls[1].name, "y");
+
+        // No index: a new id starts a new call; fragments without id extend the last one.
+        let mut calls = Vec::new();
+        merge_tool_call_delta(
+            &mut calls,
+            d(json!({"id":"a","function":{"name":"x","arguments":{"k":1}}})),
+        );
+        merge_tool_call_delta(&mut calls, d(json!({"id":"b","function":{"name":"y"}})));
+        merge_tool_call_delta(&mut calls, d(json!({"function":{"arguments":"{}"}})));
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].arguments, r#"{"k":1}"#);
+        assert_eq!(calls[1].arguments, "{}");
     }
 
     #[test]

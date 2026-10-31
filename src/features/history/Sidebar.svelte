@@ -3,7 +3,7 @@
   import type { AppInfo } from "$lib/ipc/commands";
   import { chatStore } from "$features/chat/chat-store.svelte";
 
-  let { appInfo, onopensettings }: { appInfo: AppInfo | null; onopensettings: () => void } = $props();
+  let { appInfo, onopensettings, onopenconnections }: { appInfo: AppInfo | null; onopensettings: () => void; onopenconnections: () => void } = $props();
 
   const groups = $derived.by(() => {
     const now = Date.now();
@@ -69,6 +69,9 @@
   <footer class="foot">
     <button class="settings" onclick={onopensettings} title="Providers & settings (⌘,)">
       <span aria-hidden="true">⚙</span> Providers
+    </button>
+    <button class="settings" onclick={onopenconnections} title="MCP tool servers">
+      <span aria-hidden="true">⚒</span> Connections
     </button>
     {#if appInfo}
       <div class="status" title={appInfo.data_root}>

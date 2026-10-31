@@ -1,22 +1,23 @@
 //! `RunRecorder` wraps a `RunSink`, forwarding every event unchanged while persisting the
-//! assistant message: periodic text checkpoints during streaming and a final status on
-//! completion. Persistence is fire-and-forget on the database worker so it never delays the UI.
+//! assistant message: periodic checkpoints during streaming and a final status on completion.
+//! Content is kept as ordered blocks — text, thinking, tool calls and results interleaved as
+//! they happened — so a multi-step run reloads exactly as it streamed.
+//! Persistence is fire-and-forget on the database worker so it never delays the UI.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::domain::{RunEvent, RunEventPayload, Usage};
-use crate::storage::chats::{checkpoint_assistant_text, finalize_assistant_message};
+use crate::domain::{ContentBlock, RunEvent, RunEventPayload, Usage};
+use crate::storage::chats::{checkpoint_assistant_blocks, finalize_assistant_message};
 use crate::storage::{Db, MessageStatus};
 
 use super::RunSink;
 
-/// Minimum interval between partial-text checkpoints.
+/// Minimum interval between partial-content checkpoints.
 const CHECKPOINT_EVERY: Duration = Duration::from_millis(750);
 
 struct Progress {
-    text: String,
-    thinking: String,
+    blocks: Vec<ContentBlock>,
     usage: Option<Usage>,
     last_checkpoint: Instant,
     dirty: bool,
@@ -30,6 +31,30 @@ pub struct RunRecorder<S: RunSink> {
     progress: Mutex<Progress>,
 }
 
+fn append_block(blocks: &mut Vec<ContentBlock>, text: &str, thinking: bool) {
+    let matches_tail = |b: &&mut ContentBlock| match b {
+        ContentBlock::Thinking { .. } => thinking,
+        ContentBlock::Text { .. } => !thinking,
+        _ => false,
+    };
+    if let Some(last) = blocks.last_mut().filter(matches_tail) {
+        match last {
+            ContentBlock::Text { text: buf } | ContentBlock::Thinking { text: buf } => {
+                buf.push_str(text)
+            }
+            _ => unreachable!(),
+        }
+    } else if thinking {
+        blocks.push(ContentBlock::Thinking {
+            text: text.to_owned(),
+        });
+    } else {
+        blocks.push(ContentBlock::Text {
+            text: text.to_owned(),
+        });
+    }
+}
+
 impl<S: RunSink> RunRecorder<S> {
     pub fn new(inner: S, db: Db, message_id: String) -> Self {
         Self {
@@ -37,8 +62,7 @@ impl<S: RunSink> RunRecorder<S> {
             db,
             message_id,
             progress: Mutex::new(Progress {
-                text: String::new(),
-                thinking: String::new(),
+                blocks: Vec::new(),
                 usage: None,
                 last_checkpoint: Instant::now(),
                 dirty: false,
@@ -54,11 +78,35 @@ impl<S: RunSink> RunRecorder<S> {
         }
         match event {
             RunEventPayload::TextDelta { text } => {
-                p.text.push_str(text);
+                append_block(&mut p.blocks, text, false);
                 self.maybe_checkpoint(&mut p);
             }
             RunEventPayload::ThinkingDelta { text } => {
-                p.thinking.push_str(text);
+                append_block(&mut p.blocks, text, true);
+                self.maybe_checkpoint(&mut p);
+            }
+            RunEventPayload::ToolCall { call } => {
+                p.blocks.push(ContentBlock::ToolCall {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                    server: call.server.clone(),
+                    tool: Some(call.tool.clone()),
+                });
+                self.maybe_checkpoint(&mut p);
+            }
+            RunEventPayload::ToolResult {
+                call_id,
+                content,
+                is_error,
+                status,
+            } => {
+                p.blocks.push(ContentBlock::ToolResult {
+                    call_id: call_id.clone(),
+                    content: content.clone(),
+                    is_error: *is_error,
+                    status: Some(*status),
+                });
                 self.maybe_checkpoint(&mut p);
             }
             RunEventPayload::Usage { usage } => p.usage = Some(*usage),
@@ -67,7 +115,9 @@ impl<S: RunSink> RunRecorder<S> {
             RunEventPayload::Failed { message } => {
                 self.finish(&mut p, MessageStatus::Failed, Some(message.clone()))
             }
-            RunEventPayload::Phase { .. } | RunEventPayload::Notice { .. } => {}
+            RunEventPayload::Phase { .. }
+            | RunEventPayload::Notice { .. }
+            | RunEventPayload::ToolStatus { .. } => {}
         }
     }
 
@@ -78,21 +128,16 @@ impl<S: RunSink> RunRecorder<S> {
         }
         p.last_checkpoint = Instant::now();
         p.dirty = false;
-        let (id, text, thinking) = (self.message_id.clone(), p.text.clone(), p.thinking.clone());
+        let (id, blocks) = (self.message_id.clone(), p.blocks.clone());
         self.db
-            .spawn_job(move |conn| checkpoint_assistant_text(conn, &id, &text, &thinking));
+            .spawn_job(move |conn| checkpoint_assistant_blocks(conn, &id, &blocks));
     }
 
     fn finish(&self, p: &mut Progress, status: MessageStatus, error: Option<String>) {
         p.finished = true;
-        let (id, text, thinking, usage) = (
-            self.message_id.clone(),
-            p.text.clone(),
-            p.thinking.clone(),
-            p.usage,
-        );
+        let (id, blocks, usage) = (self.message_id.clone(), p.blocks.clone(), p.usage);
         self.db.spawn_job(move |conn| {
-            finalize_assistant_message(conn, &id, &text, &thinking, status, usage, error.as_deref())
+            finalize_assistant_message(conn, &id, &blocks, status, usage, error.as_deref())
         });
     }
 }
@@ -110,18 +155,12 @@ impl<S: RunSink> Drop for RunRecorder<S> {
     fn drop(&mut self) {
         let p = self.progress.get_mut().unwrap();
         if !p.finished {
-            let (id, text, thinking, usage) = (
-                self.message_id.clone(),
-                p.text.clone(),
-                p.thinking.clone(),
-                p.usage,
-            );
+            let (id, blocks, usage) = (self.message_id.clone(), p.blocks.clone(), p.usage);
             self.db.spawn_job(move |conn| {
                 finalize_assistant_message(
                     conn,
                     &id,
-                    &text,
-                    &thinking,
+                    &blocks,
                     MessageStatus::Interrupted,
                     usage,
                     None,
@@ -134,7 +173,9 @@ impl<S: RunSink> Drop for RunRecorder<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ChatId, ContentBlock, Role, RunId, StopReason, RUN_EVENT_SCHEMA_VERSION};
+    use crate::domain::{
+        ChatId, Role, RunId, StopReason, ToolCallInfo, ToolCallStatus, RUN_EVENT_SCHEMA_VERSION,
+    };
     use crate::storage::chats::{begin_assistant_message, create_chat, get_chat};
     use tokio::sync::mpsc;
 
@@ -230,5 +271,74 @@ mod tests {
                 text: "part".into()
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn tool_calls_and_results_persist_in_order() {
+        let db = Db::in_memory().unwrap();
+        let chat = db.call(|c| create_chat(c, "t")).await.unwrap();
+        let mid = db
+            .call(move |c| begin_assistant_message(c, chat.id, RunId::new(), "p", "m"))
+            .await
+            .unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let rec = RunRecorder::new(tx, db.clone(), mid);
+        rec.send(ev(
+            RunEventPayload::TextDelta {
+                text: "first".into(),
+            },
+            0,
+        ));
+        rec.send(ev(
+            RunEventPayload::ToolCall {
+                call: ToolCallInfo {
+                    id: "c1".into(),
+                    name: "fs__list".into(),
+                    server: Some("fs".into()),
+                    tool: "list".into(),
+                    arguments: serde_json::json!({ "dir": "/" }),
+                },
+            },
+            1,
+        ));
+        rec.send(ev(
+            RunEventPayload::ToolResult {
+                call_id: "c1".into(),
+                content: serde_json::json!([{ "type": "text", "text": "a" }]),
+                is_error: false,
+                status: ToolCallStatus::Completed,
+            },
+            2,
+        ));
+        rec.send(ev(
+            RunEventPayload::TextDelta {
+                text: "last".into(),
+            },
+            3,
+        ));
+        rec.send(ev(
+            RunEventPayload::Completed {
+                stop_reason: StopReason::EndTurn,
+            },
+            4,
+        ));
+        drop(rec);
+        let m = db
+            .call(move |c| get_chat(c, chat.id))
+            .await
+            .unwrap()
+            .messages
+            .remove(0);
+        assert_eq!(m.status, MessageStatus::Complete);
+        assert_eq!(m.blocks.len(), 4);
+        assert!(matches!(&m.blocks[1], ContentBlock::ToolCall { id, .. } if id == "c1"));
+        assert!(matches!(
+            &m.blocks[2],
+            ContentBlock::ToolResult {
+                status: Some(ToolCallStatus::Completed),
+                ..
+            }
+        ));
+        assert!(matches!(&m.blocks[3], ContentBlock::Text { text } if text == "last"));
     }
 }

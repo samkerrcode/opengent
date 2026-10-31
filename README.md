@@ -8,11 +8,12 @@ with per-tool permissions.
 Built with **Tauri 2** (desktop shell), **Svelte 5 + TypeScript** (interface), and **Rust** for
 everything privileged: networking, secrets, persistence, the MCP client, and the agent loop.
 
-> **Status: Phases 0, 1, and 2 complete; Phase 3 (MCP agent) is next.** You can connect any
-> OpenAI-compatible server (Ollama, LM Studio, vLLM, hosted gateways) and chat with streamed,
-> Markdown-rendered replies. Chats persist between launches in `~/.opengent`, with search,
-> rename, attachments (including images on vision-capable models), and recovery of interrupted
-> runs. MCP tooling is not wired up yet. See [Roadmap](#roadmap) and
+> **Status: Phases 0–3 complete; Phase 4 (OAuth) is next.** You can connect any
+> OpenAI-compatible server (Ollama, LM Studio, vLLM, hosted gateways), chat with streamed,
+> Markdown-rendered replies, and attach MCP servers (stdio + Streamable HTTP) whose tools the
+> model can call under per-tool Always allow / Ask / Block policies. Chats persist between
+> launches in `~/.opengent`, with search, rename, attachments (including images on
+> vision-capable models), and recovery of interrupted runs. See [Roadmap](#roadmap) and
 > [docs/features.md](docs/features.md) for the feature guide.
 
 ---
@@ -103,7 +104,7 @@ Each phase has an acceptance gate that must pass before the next begins.
 | **0 – Foundation** | Cross-platform Tauri/Svelte build, product identity, typed IPC, run coordinator with real streaming/cancellation, native keychain + rmcp feasibility, CI | ✅ Done (macOS verified; Windows via CI, not yet run) |
 | **1 – Workspace & persistence** | SQLite (WAL) chat history, search, attachments as immutable content-hashed snapshots, restart recovery, command palette, inspector panel | ✅ Done (command palette and inspector deferred) |
 | **2 – Custom/local providers** | OpenAI-compatible Chat Completions streaming, provider/model settings, capability flags, incremental sanitized Markdown, context limits. *First usable chat.* | ✅ Done |
-| **3 – MCP agent** | stdio + Streamable HTTP servers, tool discovery, Always allow / Ask / Block policies, approval UI, full loop: model → approval → tool → result → model. *Agent alpha.* | |
+| **3 – MCP agent** | stdio + Streamable HTTP servers, tool discovery, Always allow / Ask / Block policies, approval UI, full loop: model → approval → tool → result → model. *Agent alpha.* | ✅ Done |
 | **4 – OAuth** | Browser sign-in (authorization code + PKCE, U2M) and client credentials (M2M) for MCP servers; token lifecycle in the keychain | |
 | **5 – OpenAI & Anthropic native** | Responses API and Messages API adapters, provider-aware prompt caching, cross-provider context projection | |
 | **6 – Google, Bedrock, Hugging Face** | Gemini (thought signatures), Bedrock ConverseStream (feature-gated AWS SDK), HF presets | |
@@ -146,13 +147,34 @@ Each phase has an acceptance gate that must pass before the next begins.
   Markdown rendering (markdown-it with raw HTML off + DOMPurify), links opened via the OS browser,
   retry/regenerate, chat search and delete, and a theme that works on the macOS 12 WebKit baseline.
 
+### What Phase 3 delivered
+
+- MCP client (rmcp) for **stdio** (child process, allow-listed env, login-shell PATH
+  recovery, stderr tail capture) and **Streamable HTTP** (custom headers, shared TLS/pool
+  client). Config lives in `~/.opengent/mcp.json`; env/header values marked *secret* go to
+  the OS keychain. Standard `mcpServers` JSON can be pasted into the Connections dialog.
+- `McpManager`: background connect/reconnect, `tools/list_changed` refresh, disconnect
+  watchdog, and the `ToolHost` seam used by the run loop. Policies are enforced in Rust at
+  dispatch: **Always allow / Ask / Block** per tool plus a per-server default; blocked tools
+  are never advertised to the model.
+- Agent loop: model → tool calls → (approval pause) → results → model, up to 8 tool steps.
+  Streamed `tool_calls` fragments are assembled in the OpenAI-compatible adapter; assistant
+  turns persist as ordered content blocks (text, calls, results) and reload identically.
+- **Tools menu** in the composer: connection toggles, per-tool permission submenu, and the
+  **tool loading** mode — *All*, *On-demand* (`find_tools` meta-tool loads matching tools by
+  keyword), or *Auto* (all when small, on-demand past a size/context threshold). The loaded
+  set is recovered from chat history on later turns.
+- Approval UI on tool cards: Allow once / Always allow / Deny; denial and blocking are
+  reported back to the model as results. Mock servers for dev: `mock-mcp-server.mjs`
+  (stdio + `--http`, `--many N` filler tools) and the mock OpenAI server can emit tool calls.
+
 ### Known gaps
 
 - Windows build has not been executed yet (CI job exists).
 - No packaged end-to-end UI test; the webview path is verified manually via `tauri:dev`.
 - Command palette and inspector panel from the Phase 1 scope are deferred (sidebar search covers
   the primary need for now).
-- Only the OpenAI-compatible protocol is implemented; tool calls in streams are ignored until Phase 3.
+- Only the OpenAI-compatible protocol is implemented; native provider adapters arrive in Phase 5.
 - Builds are unsigned. The DMG step can fail if a previous build's image is still mounted
   (`hdiutil detach`); the `.app` itself is unaffected.
 
@@ -163,6 +185,9 @@ npm run gen:types                                  # regenerate TS bindings afte
 cargo test -p agent-core -- --ignored              # live tests (keychain; MCP needs the env var below)
 OPENGENT_TEST_MCP_COMMAND="npx -y @modelcontextprotocol/server-everything" \
   cargo test -p agent-core live_stdio_probe -- --ignored
+node scripts/dev/mock-mcp-server.mjs                 # stdio MCP server for manual testing
+node scripts/dev/mock-mcp-server.mjs --http 8788     # same server over Streamable HTTP at /mcp
+node scripts/dev/mock-mcp-server.mjs --many 50       # pad the catalog to test on-demand loading
 OPENGENT_DATA_DIR=/tmp/og ./target/release/opengent-desktop   # run against an alternate data root
 OPENGENT_LOG=debug npm run tauri:dev                          # tracing filter
 ```

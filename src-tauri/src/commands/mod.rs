@@ -2,15 +2,17 @@
 //! and returns serializable DTOs. Secrets are never returned to the webview.
 
 mod chats;
+mod mcp;
 mod providers;
 
 pub use chats::*;
+pub use mcp::*;
 pub use providers::*;
 
 use std::collections::HashMap;
 
-use agent_core::agent::context::{self, AttachmentContent};
-use agent_core::agent::{RunRecorder, RunRequest, RunSink};
+use agent_core::agent::context::{self, AttachmentContent, ToolContext};
+use agent_core::agent::{definitions_tokens, RunRecorder, RunRequest, RunSink};
 use agent_core::config::{product, ProductInfo};
 use agent_core::domain::{ChatId, ContentBlock, Role, RunEvent, RunId};
 use agent_core::secrets::SecretRef;
@@ -200,7 +202,30 @@ pub async fn start_run(
         .filter(|m| m.id != assistant_id && !m.blocks.is_empty())
         .map(StoredMessage::to_message)
         .collect();
-    let compiled = context::compile(&model, &history, context_window, &contents, caps.images);
+
+    // Tool snapshot: catalog from connected servers (skipped when the model can't call
+    // tools), the system-prompt section, and a token reservation for the definitions.
+    let mut tool_ctx = ToolContext::default();
+    let mut run_tools = None;
+    if caps.tools {
+        if let Some((tools, prompt)) = state.mcp.prepare_tools(
+            &history,
+            context_window.unwrap_or(context::DEFAULT_CONTEXT_TOKENS),
+        ) {
+            tool_ctx.definition_tokens = definitions_tokens(&tools.specs());
+            tool_ctx.prompt = prompt;
+            run_tools = Some(tools);
+        }
+    }
+
+    let compiled = context::compile(
+        &model,
+        &history,
+        context_window,
+        &contents,
+        caps.images,
+        &tool_ctx,
+    );
     let mut notices = Vec::new();
     if compiled.trimmed_messages > 0 {
         notices.push(format!(
@@ -216,6 +241,7 @@ pub async fn start_run(
             chat_id,
             provider,
             completion: compiled.request,
+            tools: run_tools,
             notices,
         },
         sink,
@@ -227,8 +253,7 @@ pub async fn start_run(
             repo::finalize_assistant_message(
                 c,
                 &id,
-                "",
-                "",
+                &[],
                 agent_core::storage::MessageStatus::Failed,
                 None,
                 Some(&msg),

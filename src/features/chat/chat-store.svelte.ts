@@ -7,7 +7,8 @@ import {
   type ChatSummary,
   type StoredMessage,
 } from "$lib/ipc/commands";
-import { applyRunEvent, emptyTurn, isTerminal, type AssistantTurn } from "$lib/state/run-reducer";
+import { applyRunEvent, emptyTurn, isTerminal, type AssistantTurn, type TurnSegment } from "$lib/state/run-reducer";
+import type { ToolCallStatus } from "$lib/ipc/commands";
 import { providerStore } from "$features/providers/provider-store.svelte";
 
 export interface UserTurn {
@@ -46,13 +47,40 @@ function fromStored(m: StoredMessage): TurnItem {
       .map((b) => ({ id: b.id, name: b.name, mime: b.mime, char_count: b.char_count }));
     return { kind: "user", id: m.id, text, attachments };
   }
-  const text = m.blocks.filter((b) => b.type === "text").map((b) => (b.type === "text" ? b.text : "")).join("");
-  const thinking = m.blocks.filter((b) => b.type === "thinking").map((b) => (b.type === "thinking" ? b.text : "")).join("");
+  const segments: TurnSegment[] = [];
+  for (const b of m.blocks) {
+    if (b.type === "text" || b.type === "thinking") {
+      const last = segments[segments.length - 1];
+      if (last && last.kind === b.type) last.text += b.text;
+      else segments.push({ kind: b.type, text: b.text });
+    } else if (b.type === "tool_call") {
+      segments.push({
+        kind: "tool",
+        call: { id: b.id, name: b.name, server: b.server ?? null, tool: b.tool ?? b.name, arguments: b.arguments },
+        // Filled in when the matching tool_result block arrives.
+        status: "completed",
+        content: null,
+        isError: false,
+      });
+    } else if (b.type === "tool_result") {
+      const seg = segments.find(
+        (s): s is Extract<TurnSegment, { kind: "tool" }> => s.kind === "tool" && s.call.id === b.call_id,
+      );
+      if (seg) {
+        seg.status = (b.status ?? (b.is_error ? "failed" : "completed")) as ToolCallStatus;
+        seg.content = b.content;
+        seg.isError = b.is_error;
+      }
+    }
+  }
+  // Calls that never produced a result (cancelled/interrupted mid-call).
+  for (const s of segments) {
+    if (s.kind === "tool" && s.content === null) s.status = "cancelled";
+  }
   const turn: AssistantTurn = {
     ...emptyTurn(),
     runId: m.run_id,
-    text,
-    thinking,
+    segments,
     usage: m.usage,
     error: m.error,
     phase:

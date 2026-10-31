@@ -40,17 +40,28 @@ pub enum ContentBlock {
         mime: String,
         data: String,
     },
+    /// A model-requested tool call. Assistant messages interleave text, calls and their
+    /// results in stream order, so one stored message holds a whole multi-step run.
     ToolCall {
         id: String,
+        /// Name exposed to the model.
         name: String,
         #[ts(type = "unknown")]
         arguments: serde_json::Value,
+        /// Display metadata: MCP server name and original tool name (absent for built-ins).
+        #[serde(default)]
+        server: Option<String>,
+        #[serde(default)]
+        tool: Option<String>,
     },
+    /// `content` is an array of MCP-style parts (`{"type":"text","text":…}`, …).
     ToolResult {
         call_id: String,
         #[ts(type = "unknown")]
         content: serde_json::Value,
         is_error: bool,
+        #[serde(default)]
+        status: Option<super::ToolCallStatus>,
     },
     ProviderOpaque {
         provider: String,

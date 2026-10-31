@@ -56,7 +56,14 @@ async fn store_builds_provider_and_run_completes() {
         Role::User,
         "Say hello in one short sentence.",
     )];
-    let compiled = context::compile(&model, &history, None, &Default::default(), false);
+    let compiled = context::compile(
+        &model,
+        &history,
+        None,
+        &Default::default(),
+        false,
+        &Default::default(),
+    );
     let coord = RunCoordinator::new(1, tokio::runtime::Handle::current());
     let (tx, mut rx) = mpsc::unbounded_channel();
     coord
@@ -65,6 +72,7 @@ async fn store_builds_provider_and_run_completes() {
                 chat_id: Default::default(),
                 provider,
                 completion: compiled.request,
+                tools: None,
                 notices: vec![],
             },
             tx,

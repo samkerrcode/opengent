@@ -22,7 +22,9 @@ Design/roadmap: see the phased plan in README.md.
 - `cargo test -p agent-core -- --ignored` – live tests: OS keychain round trip; stdio MCP probe
   (`OPENGENT_TEST_MCP_COMMAND="npx -y @modelcontextprotocol/server-everything"`); provider round trip
   (`OPENGENT_TEST_OPENAI_BASE_URL=http://localhost:8787/v1` with `node scripts/dev/mock-openai-server.mjs`).
-- `node scripts/dev/mock-openai-server.mjs` – fake OpenAI-compatible server for manual UI testing (`/v1`, models `mock-fast`, `mock-slow`; API key `bad` triggers a 401).
+- `node scripts/dev/mock-openai-server.mjs` – fake OpenAI-compatible server for manual UI testing (`/v1`, models `mock-fast`, `mock-slow`; API key `bad` triggers a 401). Send "use tool <name>" to exercise tool calling.
+- `node scripts/dev/mock-mcp-server.mjs` – fake MCP server (tools: echo, add, get_time, fail, slow).
+  Stdio by default (use `node <abs path>` as a stdio command); `--http 8788` serves Streamable HTTP at `/mcp`; `--many 50` adds filler tools for on-demand loading tests.
 
 ## Conventions
 
