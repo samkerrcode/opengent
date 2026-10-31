@@ -266,6 +266,14 @@ class ChatStore {
             if (isTerminal(item.turn.phase)) {
               chat.activeRunId = null;
               chat.summary.updated_at = Date.now();
+              // A failed run may mean the model (or server) went away — refresh the dots.
+              // Cancelled runs say nothing about health, so they leave it unchanged.
+              if (item.turn.phase === "failed") {
+                providerStore.markHealth(selection.provider_id, selection.model, false);
+                void providerStore.checkHealth(selection.provider_id);
+              } else if (item.turn.phase === "completed") {
+                providerStore.markHealth(selection.provider_id, selection.model, true);
+              }
               // Rust already persisted the final state; pull it so the view matches the
               // database even if intermediate events were missed.
               void this.refresh(chat);
@@ -282,6 +290,8 @@ class ChatStore {
       chat.summary.message_count = chat.items.length;
       if (!isTerminal(asst?.turn.phase ?? "queued")) chat.activeRunId = started.run_id;
     } catch (e) {
+      providerStore.markHealth(selection.provider_id, selection.model, false);
+      void providerStore.checkHealth(selection.provider_id);
       fail(describeError(e));
     }
   }
