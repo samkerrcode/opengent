@@ -2,6 +2,7 @@
 //! stream of normalized `ProviderEvent`s. Provider dispatch stays out of the per-token hot
 //! path: the coordinator receives events over a bounded channel.
 
+pub mod capabilities;
 pub mod fake;
 pub mod openai_compat;
 pub mod registry;

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use agent_core::agent::{context, RunCoordinator, RunRequest};
 use agent_core::config::resolve_data_root;
 use agent_core::domain::{Message, Role, RunEventPayload};
+use agent_core::providers::capabilities::ImageSupport;
 use agent_core::providers::registry::{ProviderInput, ProviderKind, ProviderStore, TlsMode};
 use agent_core::secrets::MemorySecretStore;
 use tokio::sync::mpsc;
@@ -38,6 +39,7 @@ async fn store_builds_provider_and_run_completes() {
             context_window: None,
             tls_mode: TlsMode::System,
             tls_ca_pem: None,
+            image_support: ImageSupport::Auto,
         })
         .unwrap();
 
@@ -54,7 +56,7 @@ async fn store_builds_provider_and_run_completes() {
         Role::User,
         "Say hello in one short sentence.",
     )];
-    let compiled = context::compile(&model, &history, None, &Default::default());
+    let compiled = context::compile(&model, &history, None, &Default::default(), false);
     let coord = RunCoordinator::new(1, tokio::runtime::Handle::current());
     let (tx, mut rx) = mpsc::unbounded_channel();
     coord

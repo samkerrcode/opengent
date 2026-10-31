@@ -45,6 +45,8 @@ pub fn run() {
             commands::rename_chat,
             commands::delete_chat,
             commands::pick_attachments,
+            commands::attachment_data_url,
+            commands::get_model_capabilities,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the desktop application");

@@ -48,6 +48,54 @@ pub struct OpenAiCompatProvider {
     http: reqwest::Client,
 }
 
+/// `scheme://host[:port]` of a base URL — where Ollama's `/api/*` and LM Studio's
+/// `/api/v0/*` endpoints live relative to the `/v1` API root.
+fn server_origin(base_url: &str) -> Option<String> {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .map(|u| u.origin().ascii_serialization())
+}
+
+/// Extracts the ids of models a `/models` document flags as accepting image input.
+/// Returns `None` when the document carries no capability metadata at all. Covers
+/// OpenRouter-style `architecture.modality` (`"text+image->text"`), LM Studio-style
+/// `type: "vlm"`, and generic `input_modalities`/`modalities` string arrays.
+pub fn vision_flags_from_models(doc: &Value) -> Option<Vec<String>> {
+    let data = doc.get("data")?.as_array()?;
+    let mut saw_metadata = false;
+    let mut vision = Vec::new();
+    for m in data {
+        let accepts_image = m
+            .get("architecture")
+            .and_then(|a| a.get("modality"))
+            .and_then(Value::as_str)
+            .map(|modality| modality.split("->").next().unwrap_or("").contains("image"))
+            .or_else(|| {
+                m.get("type")
+                    .and_then(Value::as_str)
+                    .map(|t| t == "vlm" || t == "vision")
+            })
+            .or_else(|| {
+                ["input_modalities", "modalities"].iter().find_map(|key| {
+                    m.get(*key).and_then(Value::as_array).map(|modes| {
+                        modes
+                            .iter()
+                            .any(|v| v.as_str().is_some_and(|s| s.contains("image")))
+                    })
+                })
+            });
+        if let Some(true) = accepts_image {
+            saw_metadata = true;
+            if let Some(id) = m.get("id").and_then(Value::as_str) {
+                vision.push(id.to_owned());
+            }
+        } else if accepts_image.is_some() {
+            saw_metadata = true;
+        }
+    }
+    saw_metadata.then_some(vision)
+}
+
 /// Validates and normalizes a base URL: http(s) only, plain HTTP only for loopback hosts.
 pub fn normalize_base_url(raw: &str) -> Result<String> {
     let url = reqwest::Url::parse(raw.trim())
@@ -86,8 +134,24 @@ impl OpenAiCompatProvider {
         req
     }
 
-    /// `GET /models`. Best effort: many compatible servers implement it, some do not.
-    pub async fn list_models(&self) -> Result<Vec<String>> {
+    /// Request against an absolute URL outside the `/v1` API root (server-flavor probes).
+    /// Same host as the configured endpoint, so bearer auth still applies.
+    fn probe_request(
+        &self,
+        method: reqwest::Method,
+        url: String,
+        timeout: Duration,
+    ) -> reqwest::RequestBuilder {
+        let mut req = self.http.request(method, url).timeout(timeout);
+        if let Some(key) = &self.config.api_key {
+            req = req.bearer_auth(key);
+        }
+        req
+    }
+
+    /// `GET /models`, returning the raw document so capability hints can be inspected.
+    /// Best effort: many compatible servers implement it, some do not.
+    async fn fetch_models_doc(&self) -> Result<Value> {
         let resp = self
             .request(reqwest::Method::GET, "/models")
             .send()
@@ -98,21 +162,127 @@ impl OpenAiCompatProvider {
             let body = resp.text().await.unwrap_or_default();
             return Err(map_status(status, &body));
         }
-        #[derive(Deserialize)]
-        struct ModelsResponse {
-            data: Vec<ModelEntry>,
-        }
-        #[derive(Deserialize)]
-        struct ModelEntry {
-            id: String,
-        }
-        let parsed: ModelsResponse = resp
-            .json()
+        resp.json()
             .await
-            .map_err(|e| Error::Provider(format!("unexpected /models response: {e}")))?;
-        let mut ids: Vec<String> = parsed.data.into_iter().map(|m| m.id).collect();
+            .map_err(|e| Error::Provider(format!("unexpected /models response: {e}")))
+    }
+
+    pub async fn list_models(&self) -> Result<Vec<String>> {
+        Ok(self.discover().await?.0)
+    }
+
+    /// `GET /models` plus a best-effort vision probe. Returns the model ids and, when the
+    /// server exposes capability metadata, the subset that accepts image input (`None` =
+    /// undetectable, callers keep any previously cached result).
+    pub async fn discover(&self) -> Result<(Vec<String>, Option<Vec<String>>)> {
+        let doc = self.fetch_models_doc().await?;
+        let mut ids: Vec<String> = doc
+            .get("data")
+            .and_then(Value::as_array)
+            .map(|d| {
+                d.iter()
+                    .filter_map(|m| m.get("id").and_then(Value::as_str).map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
         ids.sort();
-        Ok(ids)
+        let vision = self.detect_vision(&doc, &ids).await;
+        Ok((ids, vision))
+    }
+
+    /// Detection order: hints inside the `/models` document (OpenRouter `architecture.
+    /// modality`, LM Studio `type`, generic `*_modalities` fields), then an Ollama probe
+    /// (`/api/show` per model), then LM Studio's `/api/v0/models`. Probes hit the server
+    /// root, so they only run against servers that actually answer them.
+    async fn detect_vision(&self, doc: &Value, listed: &[String]) -> Option<Vec<String>> {
+        if let Some(ids) = vision_flags_from_models(doc) {
+            return Some(ids);
+        }
+        let origin = server_origin(&self.config.base_url)?;
+        if let Some(ids) = self.probe_ollama(&origin, listed).await {
+            return Some(ids);
+        }
+        self.probe_lm_studio(&origin).await
+    }
+
+    /// Ollama exposes `GET /api/version`; per-model `POST /api/show` reports a
+    /// `capabilities` array that includes `"vision"`. Returns `None` if the server is not
+    /// Ollama; per-model failures are ignored (that model simply isn't flagged).
+    async fn probe_ollama(&self, origin: &str, listed: &[String]) -> Option<Vec<String>> {
+        let resp = self
+            .probe_request(
+                reqwest::Method::GET,
+                format!("{origin}/api/version"),
+                Duration::from_secs(5),
+            )
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        // Ollama answers with {"version": "…"}; a bare 200 from something else is not enough
+        // to justify a /api/show request per model.
+        let looks_ollama = resp
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("version").and_then(Value::as_str).map(str::to_owned))
+            .is_some();
+        if !looks_ollama {
+            return None;
+        }
+        let mut vision = Vec::new();
+        for model in listed {
+            let Ok(resp) = self
+                .probe_request(
+                    reqwest::Method::POST,
+                    format!("{origin}/api/show"),
+                    Duration::from_secs(10),
+                )
+                .json(&json!({ "model": model }))
+                .send()
+                .await
+            else {
+                continue;
+            };
+            let Ok(doc) = resp.json::<Value>().await else {
+                continue;
+            };
+            let is_vision = doc
+                .get("capabilities")
+                .and_then(Value::as_array)
+                .is_some_and(|caps| caps.iter().any(|c| c.as_str() == Some("vision")));
+            if is_vision {
+                vision.push(model.clone());
+            }
+        }
+        Some(vision)
+    }
+
+    /// LM Studio's REST API lists `type` per model (`llm` / `vlm` / `embeddings`).
+    async fn probe_lm_studio(&self, origin: &str) -> Option<Vec<String>> {
+        let resp = self
+            .probe_request(
+                reqwest::Method::GET,
+                format!("{origin}/api/v0/models"),
+                Duration::from_secs(5),
+            )
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let doc: Value = resp.json().await.ok()?;
+        let vision: Vec<String> = doc
+            .get("data")
+            .and_then(Value::as_array)?
+            .iter()
+            .filter(|m| m.get("type").and_then(Value::as_str) == Some("vlm"))
+            .filter_map(|m| m.get("id").and_then(Value::as_str).map(str::to_owned))
+            .collect();
+        Some(vision)
     }
 
     fn build_body(request: &CompletionRequest, include_usage: bool) -> Value {
@@ -127,16 +297,38 @@ impl OpenAiCompatProvider {
                 Role::Assistant => "assistant",
                 Role::Tool => "tool",
             };
-            let text: String = m
-                .blocks
+            if m.blocks
                 .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            messages.push(json!({ "role": role, "content": text }));
+                .any(|b| matches!(b, ContentBlock::Image { .. }))
+            {
+                // Multimodal form: content is a parts array with text + data-URL images.
+                let parts: Vec<Value> = m
+                    .blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => {
+                            Some(json!({ "type": "text", "text": text }))
+                        }
+                        ContentBlock::Image { mime, data } => Some(json!({
+                            "type": "image_url",
+                            "image_url": { "url": format!("data:{mime};base64,{data}") }
+                        })),
+                        _ => None,
+                    })
+                    .collect();
+                messages.push(json!({ "role": role, "content": parts }));
+            } else {
+                let text: String = m
+                    .blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                messages.push(json!({ "role": role, "content": text }));
+            }
         }
         let mut body = json!({ "model": request.model, "messages": messages, "stream": true });
         if include_usage {
@@ -423,6 +615,65 @@ mod tests {
         assert_eq!(body["stream"], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
         assert_eq!(body["max_tokens"], 100);
+    }
+
+    #[test]
+    fn body_with_image_uses_parts_array() {
+        let req = CompletionRequest {
+            model: "m".into(),
+            system: None,
+            messages: vec![Message {
+                role: Role::User,
+                blocks: vec![
+                    ContentBlock::Text {
+                        text: "what is this?".into(),
+                    },
+                    ContentBlock::Image {
+                        mime: "image/png".into(),
+                        data: "aGk=".into(),
+                    },
+                ],
+            }],
+            max_output_tokens: None,
+        };
+        let body = OpenAiCompatProvider::build_body(&req, false);
+        let parts = body["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(parts[0], json!({ "type": "text", "text": "what is this?" }));
+        assert_eq!(
+            parts[1],
+            json!({ "type": "image_url", "image_url": { "url": "data:image/png;base64,aGk=" } })
+        );
+        // Text-only messages keep the plain string form for maximum compatibility.
+        let text_only = OpenAiCompatProvider::build_body(
+            &CompletionRequest {
+                model: "m".into(),
+                system: None,
+                messages: vec![Message::text(Role::User, "hi")],
+                max_output_tokens: None,
+            },
+            false,
+        );
+        assert_eq!(text_only["messages"][0]["content"], "hi");
+    }
+
+    #[test]
+    fn vision_flags_parse_openrouter_modality() {
+        let doc = json!({
+            "data": [
+                { "id": "openai/gpt-4o", "architecture": { "modality": "text+image->text" } },
+                { "id": "meta/llama-3.1", "architecture": { "modality": "text->text" } },
+                { "id": "no-meta" }
+            ]
+        });
+        assert_eq!(
+            vision_flags_from_models(&doc),
+            Some(vec!["openai/gpt-4o".to_string()])
+        );
+        assert_eq!(
+            vision_flags_from_models(&json!({"data":[{"id":"m"}]})),
+            None
+        );
+        assert_eq!(vision_flags_from_models(&json!({})), None);
     }
 
     #[test]

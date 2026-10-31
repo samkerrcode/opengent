@@ -64,17 +64,22 @@ pub async fn delete_chat(state: State<'_, AppState>, id: ChatId) -> Result<(), E
 
 /// Opens the native file picker and imports the chosen files as immutable attachment
 /// snapshots. Paths never come from the webview; the dialog result stays in Rust.
+/// `include_images` reflects the active model's image capability — image files picked
+/// anyway are rejected with a clear error.
 #[tauri::command]
 pub async fn pick_attachments(
     app: AppHandle,
     state: State<'_, AppState>,
+    include_images: bool,
 ) -> Result<Vec<AttachmentMeta>, Error> {
     let picked = tauri::async_runtime::spawn_blocking(move || {
-        app.dialog()
-            .file()
-            .set_title("Attach files")
-            .blocking_pick_files()
-            .unwrap_or_default()
+        let mut dialog = app.dialog().file().set_title("Attach files");
+        if include_images {
+            dialog = dialog
+                .add_filter("Images and text", &["png", "jpg", "jpeg", "gif", "webp"])
+                .add_filter("All files", &["*"]);
+        }
+        dialog.blocking_pick_files().unwrap_or_default()
     })
     .await
     .map_err(|e| Error::Internal(e.to_string()))?;
@@ -93,11 +98,39 @@ pub async fn pick_attachments(
             let mut out = Vec::with_capacity(paths.len());
             for path in &paths {
                 match store.import_file(conn, path) {
+                    Ok(meta) if meta.mime.starts_with("image/") && !include_images => {
+                        return Err(Error::InvalidInput(format!(
+                            "{}: the selected model does not accept image attachments",
+                            path.display()
+                        )));
+                    }
                     Ok(meta) => out.push(meta),
                     Err(e) => return Err(Error::InvalidInput(format!("{}: {e}", path.display()))),
                 }
             }
             Ok(out)
+        })
+        .await
+}
+
+/// Returns a `data:` URL for an image attachment so the webview can render thumbnails
+/// without any file access (CSP allows `img-src data:`).
+#[tauri::command]
+pub async fn attachment_data_url(
+    state: State<'_, AppState>,
+    attachment_id: String,
+) -> Result<String, Error> {
+    let store = state.attachments.clone();
+    state
+        .db
+        .call(move |conn| {
+            let meta = store
+                .get(conn, &attachment_id)?
+                .ok_or_else(|| Error::NotFound(format!("attachment {attachment_id}")))?;
+            if !meta.mime.starts_with("image/") {
+                return Err(Error::InvalidInput("attachment is not an image".into()));
+            }
+            store.read_data_url(&meta)
         })
         .await
 }

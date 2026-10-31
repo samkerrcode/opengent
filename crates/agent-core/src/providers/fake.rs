@@ -27,11 +27,8 @@ impl Default for FakeProvider {
 
 impl FakeProvider {
     fn compose_reply(request: &CompletionRequest) -> String {
-        let last_user = request
-            .messages
-            .iter()
-            .rev()
-            .find(|m| m.role == Role::User)
+        let last_user = request.messages.iter().rev().find(|m| m.role == Role::User);
+        let text = last_user
             .and_then(|m| {
                 m.blocks.iter().find_map(|b| match b {
                     ContentBlock::Text { text } => Some(text.as_str()),
@@ -39,12 +36,26 @@ impl FakeProvider {
                 })
             })
             .unwrap_or("");
+        let image_count = last_user
+            .map(|m| {
+                m.blocks
+                    .iter()
+                    .filter(|b| matches!(b, ContentBlock::Image { .. }))
+                    .count()
+            })
+            .unwrap_or(0);
+        let images_note = if image_count > 0 {
+            format!("\n\nI also received {image_count} image(s) with your message.")
+        } else {
+            String::new()
+        };
         format!(
-            "This is a simulated response from the `{}` model.\n\nYou wrote:\n\n> {}\n\n\
+            "This is a simulated response from the `{}` model.\n\nYou wrote:\n\n> {}{}\n\n\
              The streaming pipeline, cancellation, and event ordering you see here are real; \
              only the text is synthetic. Configure a provider to talk to a live model.",
             request.model,
-            last_user.replace('\n', "\n> ")
+            text.replace('\n', "\n> "),
+            images_note,
         )
     }
 }
@@ -57,6 +68,7 @@ impl ModelProvider for FakeProvider {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             streaming: true,
+            images: true,
             ..Default::default()
         }
     }

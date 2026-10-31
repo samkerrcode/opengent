@@ -14,7 +14,7 @@ export interface UserTurn {
   kind: "user";
   id: string;
   text: string;
-  attachments: { id: string; name: string; char_count: number }[];
+  attachments: { id: string; name: string; mime: string; char_count: number }[];
 }
 export interface AssistantTurnItem {
   kind: "assistant";
@@ -43,7 +43,7 @@ function fromStored(m: StoredMessage): TurnItem {
       .join("\n");
     const attachments = m.blocks
       .filter((b): b is Extract<typeof b, { type: "attachment" }> => b.type === "attachment")
-      .map((b) => ({ id: b.id, name: b.name, char_count: b.char_count }));
+      .map((b) => ({ id: b.id, name: b.name, mime: b.mime, char_count: b.char_count }));
     return { kind: "user", id: m.id, text, attachments };
   }
   const text = m.blocks.filter((b) => b.type === "text").map((b) => (b.type === "text" ? b.text : "")).join("");
@@ -173,7 +173,7 @@ class ChatStore {
 
   async pickAttachments(chat: Chat) {
     try {
-      const picked = await commands.pickAttachments();
+      const picked = await commands.pickAttachments(providerStore.supportsImages);
       for (const a of picked) if (!chat.pending.some((p) => p.id === a.id)) chat.pending.push(a);
     } catch (e) {
       this.error = describeError(e);
@@ -199,7 +199,7 @@ class ChatStore {
         kind: "user",
         id: `local-${crypto.randomUUID()}`,
         text,
-        attachments: chat.pending.map((a) => ({ id: a.id, name: a.name, char_count: a.char_count })),
+        attachments: chat.pending.map((a) => ({ id: a.id, name: a.name, mime: a.mime, char_count: a.char_count })),
       },
       { kind: "assistant", id: `local-${crypto.randomUUID()}`, model: selection?.model ?? "", turn: emptyTurn() },
     );
@@ -278,7 +278,7 @@ class ChatStore {
     if (!last || last.kind !== "assistant" || !prev || prev.kind !== "user" || chat.activeRunId) return;
     const replaceFrom = prev.id.startsWith("local-") ? null : prev.id;
     chat.items.splice(-2, 2);
-    chat.pending = prev.attachments.map((a) => ({ id: a.id, name: a.name, char_count: a.char_count, sha256: "", mime: "", size_bytes: 0 }));
+    chat.pending = prev.attachments.map((a) => ({ id: a.id, name: a.name, char_count: a.char_count, sha256: "", mime: a.mime, size_bytes: 0 }));
     await this.send(chat, prev.text, replaceFrom);
   }
 

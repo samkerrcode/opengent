@@ -33,11 +33,28 @@ pub fn estimate_tokens(text: &str) -> u32 {
     (text.chars().count() as u32).div_ceil(3)
 }
 
-/// Attachment texts keyed by attachment id, supplied by the host from the attachment store.
-pub type AttachmentTexts = HashMap<String, String>;
+/// Payload for one attachment, keyed by attachment id and supplied by the host from the
+/// attachment store. Images carry their mime and base64-encoded bytes.
+#[derive(Debug, Clone)]
+pub enum AttachmentContent {
+    Text(String),
+    Image { mime: String, data_base64: String },
+}
 
-fn expand_attachment(id: &str, name: &str, mime: &str, texts: &AttachmentTexts) -> String {
-    let Some(text) = texts.get(id) else {
+impl AttachmentContent {
+    pub fn image(mime: String, bytes: &[u8]) -> Self {
+        use base64::Engine;
+        Self::Image {
+            mime,
+            data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        }
+    }
+}
+
+pub type AttachmentContents = HashMap<String, AttachmentContent>;
+
+fn expand_attachment(id: &str, name: &str, mime: &str, contents: &AttachmentContents) -> String {
+    let Some(AttachmentContent::Text(text)) = contents.get(id) else {
         return format!(
             "<attachment name=\"{}\" status=\"unavailable\" />",
             escape(name)
@@ -73,17 +90,36 @@ fn escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// Flattens a message to the text form sent to the provider (attachments expanded).
-pub fn render_message(m: &Message, texts: &AttachmentTexts) -> Message {
+/// Flattens a message for the request path: text attachments expand to labeled excerpts,
+/// image attachments become `Image` blocks when the model accepts them and a labeled
+/// placeholder otherwise (so old image turns degrade gracefully on text-only models).
+pub fn render_message(
+    m: &Message,
+    contents: &AttachmentContents,
+    images_supported: bool,
+) -> Message {
     let mut text_parts = Vec::new();
     let mut attachments = Vec::new();
+    let mut images = Vec::new();
     let mut other = Vec::new();
     for b in &m.blocks {
         match b {
             ContentBlock::Text { text } => text_parts.push(text.clone()),
-            ContentBlock::Attachment { id, name, mime, .. } => {
-                attachments.push(expand_attachment(id, name, mime, texts))
-            }
+            ContentBlock::Attachment { id, name, mime, .. } => match contents.get(id) {
+                Some(AttachmentContent::Image { mime, data_base64 }) if images_supported => {
+                    images.push(ContentBlock::Image {
+                        mime: mime.clone(),
+                        data: data_base64.clone(),
+                    });
+                }
+                Some(AttachmentContent::Image { .. }) => attachments.push(format!(
+                    "<attachment name=\"{}\" type=\"{}\" status=\"omitted\" \
+                     reason=\"the selected model cannot process images\" />",
+                    escape(name),
+                    escape(mime)
+                )),
+                _ => attachments.push(expand_attachment(id, name, mime, contents)),
+            },
             // Reasoning is displayed in the UI but must never be replayed to the model:
             // OpenAI-compatible APIs reject or waste context on reasoning_content in history.
             ContentBlock::Thinking { .. } => {}
@@ -98,6 +134,7 @@ pub fn render_message(m: &Message, texts: &AttachmentTexts) -> Message {
             text: combined.join("\n\n"),
         });
     }
+    blocks.extend(images);
     blocks.extend(other);
     Message {
         role: m.role,
@@ -111,6 +148,9 @@ fn message_tokens(m: &Message) -> u32 {
         .iter()
         .map(|b| match b {
             ContentBlock::Text { text } => estimate_tokens(text),
+            // Vision token cost is roughly flat per image; counting the base64 string would
+            // overestimate by orders of magnitude.
+            ContentBlock::Image { .. } => 1_500,
             other => estimate_tokens(&serde_json::to_string(other).unwrap_or_default()),
         })
         .sum::<u32>()
@@ -130,7 +170,8 @@ pub fn compile(
     model: &str,
     history: &[Message],
     context_window: Option<u32>,
-    texts: &AttachmentTexts,
+    contents: &AttachmentContents,
+    images_supported: bool,
 ) -> CompiledContext {
     let window = context_window.unwrap_or(DEFAULT_CONTEXT_TOKENS);
     let system = system_prompt();
@@ -140,7 +181,7 @@ pub fn compile(
     let mut kept = Vec::new();
     let mut processed = 0usize;
     for m in history.iter().rev() {
-        let rendered = render_message(m, texts);
+        let rendered = render_message(m, contents, images_supported);
         // Drop messages that render to nothing (e.g. an assistant turn that contains only
         // reasoning after Thinking blocks are excluded) — empty content confuses providers.
         if rendered.blocks.is_empty() {
@@ -200,7 +241,7 @@ mod tests {
 
     #[test]
     fn keeps_everything_when_it_fits() {
-        let c = compile("m", &turns(4, 20), Some(8192), &HashMap::new());
+        let c = compile("m", &turns(4, 20), Some(8192), &HashMap::new(), false);
         assert_eq!(c.trimmed_messages, 0);
         assert_eq!(c.request.messages.len(), 4);
         assert!(c
@@ -213,7 +254,7 @@ mod tests {
 
     #[test]
     fn trims_oldest_and_starts_on_user_turn() {
-        let c = compile("m", &turns(9, 3000), Some(4000), &HashMap::new());
+        let c = compile("m", &turns(9, 3000), Some(4000), &HashMap::new(), false);
         assert!(c.trimmed_messages >= 6, "trimmed {}", c.trimmed_messages);
         assert_eq!(c.request.messages.first().unwrap().role, Role::User);
         assert_eq!(c.request.messages.last().unwrap().role, Role::User);
@@ -221,7 +262,7 @@ mod tests {
 
     #[test]
     fn always_keeps_the_last_message_even_if_oversized() {
-        let c = compile("m", &turns(1, 100_000), Some(1000), &HashMap::new());
+        let c = compile("m", &turns(1, 100_000), Some(1000), &HashMap::new(), false);
         assert_eq!(c.request.messages.len(), 1);
         assert_eq!(c.trimmed_messages, 0);
     }
@@ -229,7 +270,10 @@ mod tests {
     #[test]
     fn attachments_are_expanded_with_labels_and_escaped() {
         let mut texts = HashMap::new();
-        texts.insert("a1".to_string(), "fn main() {}".to_string());
+        texts.insert(
+            "a1".to_string(),
+            AttachmentContent::Text("fn main() {}".to_string()),
+        );
         let msg = Message {
             role: Role::User,
             blocks: vec![
@@ -250,7 +294,7 @@ mod tests {
                 },
             ],
         };
-        let r = render_message(&msg, &texts);
+        let r = render_message(&msg, &texts, false);
         let ContentBlock::Text { text } = &r.blocks[0] else {
             panic!()
         };
@@ -262,7 +306,10 @@ mod tests {
     #[test]
     fn oversized_attachment_is_truncated_with_note() {
         let mut texts = HashMap::new();
-        texts.insert("a".to_string(), "y".repeat(MAX_ATTACHMENT_CHARS + 10));
+        texts.insert(
+            "a".to_string(),
+            AttachmentContent::Text("y".repeat(MAX_ATTACHMENT_CHARS + 10)),
+        );
         let msg = Message {
             role: Role::User,
             blocks: vec![ContentBlock::Attachment {
@@ -272,9 +319,53 @@ mod tests {
                 char_count: 0,
             }],
         };
-        let ContentBlock::Text { text } = &render_message(&msg, &texts).blocks[0] else {
+        let ContentBlock::Text { text } = &render_message(&msg, &texts, false).blocks[0] else {
             panic!()
         };
         assert!(text.contains("truncated: showing"));
+    }
+
+    #[test]
+    fn image_attachment_becomes_image_block_or_placeholder() {
+        let mut contents = HashMap::new();
+        contents.insert(
+            "i1".to_string(),
+            AttachmentContent::Image {
+                mime: "image/png".into(),
+                data_base64: "aGk=".into(),
+            },
+        );
+        let msg = Message {
+            role: Role::User,
+            blocks: vec![
+                ContentBlock::Text {
+                    text: "what is this?".into(),
+                },
+                ContentBlock::Attachment {
+                    id: "i1".into(),
+                    name: "shot.png".into(),
+                    mime: "image/png".into(),
+                    char_count: 0,
+                },
+            ],
+        };
+
+        let r = render_message(&msg, &contents, true);
+        assert!(r.blocks.iter().any(|b| matches!(
+            b,
+            ContentBlock::Image { mime, data } if mime == "image/png" && data == "aGk="
+        )));
+
+        // Text-only model: the image degrades to a labeled placeholder instead of vanishing.
+        let r = render_message(&msg, &contents, false);
+        assert!(!r
+            .blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Image { .. })));
+        let ContentBlock::Text { text } = &r.blocks[0] else {
+            panic!()
+        };
+        assert!(text.contains("shot.png"));
+        assert!(text.contains("cannot process images"));
     }
 }

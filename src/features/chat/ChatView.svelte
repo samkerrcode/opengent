@@ -3,6 +3,7 @@
   import { chatStore, type Chat, type TurnItem } from "./chat-store.svelte";
   import Composer from "./Composer.svelte";
   import AssistantTurnView from "./AssistantTurn.svelte";
+  import { attachmentDataUrl } from "$lib/attachments";
   import { product } from "$lib/generated/product";
   import { providerStore } from "$features/providers/provider-store.svelte";
 
@@ -136,7 +137,17 @@
           {#if item.attachments.length}
             <ul class="user-files">
               {#each item.attachments as a (a.id)}
-                <li title="{a.char_count} characters">▤ {a.name}</li>
+                {#if a.mime.startsWith("image/")}
+                  {#await attachmentDataUrl(a.id) then url}
+                    {#if url}
+                      <li class="user-image"><img src={url} alt={a.name} title={a.name} /></li>
+                    {:else}
+                      <li title={a.name}>▤ {a.name}</li>
+                    {/if}
+                  {/await}
+                {:else}
+                  <li title="{a.char_count} characters">▤ {a.name}</li>
+                {/if}
               {/each}
             </ul>
           {/if}
@@ -290,6 +301,18 @@
     padding: 2px 8px;
     border-radius: 999px;
     background: var(--bg-elevated);
+    border: 1px solid var(--border);
+  }
+  .user-files .user-image {
+    padding: 0;
+    border: none;
+    background: transparent;
+  }
+  .user-image img {
+    display: block;
+    max-width: 240px;
+    max-height: 180px;
+    border-radius: var(--radius-lg);
     border: 1px solid var(--border);
   }
   .jump {

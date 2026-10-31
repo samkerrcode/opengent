@@ -1,7 +1,13 @@
 <script lang="ts">
   import { providerStore } from "./provider-store.svelte";
+  import type { ProviderConfig } from "$lib/ipc/commands";
 
   let { onopensettings }: { onopensettings: () => void } = $props();
+
+  /** Marker shown for models the provider knows accept images (auto-detected or forced). */
+  function isVision(p: ProviderConfig, model: string) {
+    return p.image_support === "always" || (p.image_support === "auto" && p.vision_models.includes(model));
+  }
 
   // Option value encodes provider + model so a single native <select> covers both.
   const SEP = "\u0000";
@@ -37,7 +43,7 @@
     {#each groups as g (g.provider.id)}
       <optgroup label={g.provider.name}>
         {#each g.models as m (m)}
-          <option value={`${g.provider.id}${SEP}${m}`}>{m}</option>
+          <option value={`${g.provider.id}${SEP}${m}`}>{m}{isVision(g.provider, m) ? " · vision" : ""}</option>
         {/each}
       </optgroup>
     {/each}

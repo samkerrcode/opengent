@@ -1,6 +1,6 @@
 <script lang="ts">
   import { providerStore } from "./provider-store.svelte";
-  import { describeError, type ProviderConfig, type ProviderInput, type ProviderTestResult, type TlsMode } from "$lib/ipc/commands";
+  import { describeError, type ImageSupport, type ProviderConfig, type ProviderInput, type ProviderTestResult, type TlsMode } from "$lib/ipc/commands";
 
   let { onclose }: { onclose: () => void } = $props();
 
@@ -16,6 +16,7 @@
     tls_mode: TlsMode;
     tls_ca_pem: string;
     ca_touched: boolean;
+    image_support: ImageSupport;
   };
 
   const presets = [
@@ -32,7 +33,7 @@
   let dialog = $state<HTMLElement | null>(null);
 
   function blankForm(): Form {
-    return { id: null, name: "", base_url: "", default_model: "", api_key: "", key_touched: false, include_usage: true, context_window: "", tls_mode: "system", tls_ca_pem: "", ca_touched: false };
+    return { id: null, name: "", base_url: "", default_model: "", api_key: "", key_touched: false, include_usage: true, context_window: "", tls_mode: "system", tls_ca_pem: "", ca_touched: false, image_support: "auto" };
   }
 
   function startNew() {
@@ -54,6 +55,7 @@
       tls_mode: p.tls_mode,
       tls_ca_pem: p.tls_ca_pem ?? "",
       ca_touched: false,
+      image_support: p.image_support,
     };
     notice = null;
     testResult = null;
@@ -81,6 +83,7 @@
       tls_mode: f.tls_mode,
       // Rust semantics: null = keep existing PEM, "" = clear, value = replace.
       tls_ca_pem: f.ca_touched || !f.id ? f.tls_ca_pem : null,
+      image_support: f.image_support,
     };
   }
 
@@ -216,6 +219,14 @@
               <span>Request token usage</span>
             </label>
           </div>
+          <label>
+            <span>Image input <small>(whether models can see attached images)</small></span>
+            <select bind:value={editing.image_support}>
+              <option value="auto">Auto-detect — server reports it, or known vision model names</option>
+              <option value="always">Supported — every model on this provider accepts images</option>
+              <option value="never">Not supported — image attachments are rejected</option>
+            </select>
+          </label>
           {#if editing.base_url.trim().startsWith("https://")}
             <label>
               <span>TLS certificate</span>

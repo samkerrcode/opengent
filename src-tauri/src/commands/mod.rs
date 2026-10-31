@@ -9,7 +9,8 @@ pub use providers::*;
 
 use std::collections::HashMap;
 
-use agent_core::agent::{context, RunRecorder, RunRequest, RunSink};
+use agent_core::agent::context::{self, AttachmentContent};
+use agent_core::agent::{RunRecorder, RunRequest, RunSink};
 use agent_core::config::{product, ProductInfo};
 use agent_core::domain::{ChatId, ContentBlock, Role, RunEvent, RunId};
 use agent_core::secrets::SecretRef;
@@ -103,6 +104,7 @@ pub async fn start_run(
 
     let config = state.providers.get(&provider_id)?;
     let provider = state.providers.build(&provider_id)?;
+    let caps = state.providers.capabilities_for(&provider_id, &model)?;
     let context_window = config
         .context_window
         .or(provider.capabilities().context_window);
@@ -112,6 +114,7 @@ pub async fn start_run(
     // and load everything needed to compile the request.
     let store = state.attachments.clone();
     let (pid, mdl) = (provider_id.clone(), model.clone());
+    let allow_images = caps.images;
     let prepared = state
         .db
         .call(move |conn| {
@@ -119,12 +122,26 @@ pub async fn start_run(
                 repo::truncate_from(conn, chat_id, &from)?;
             }
             let mut blocks = Vec::new();
-            let mut texts = HashMap::new();
+            let mut contents = HashMap::new();
             for id in &attachment_ids {
                 let meta = store
                     .get(conn, id)?
                     .ok_or_else(|| Error::NotFound(format!("attachment {id}")))?;
-                texts.insert(meta.id.clone(), store.read_text(&meta)?);
+                let is_image = meta.mime.starts_with("image/");
+                if is_image && !allow_images {
+                    return Err(Error::InvalidInput(format!(
+                        "{}: the selected model does not accept image attachments",
+                        meta.name
+                    )));
+                }
+                contents.insert(
+                    meta.id.clone(),
+                    if is_image {
+                        AttachmentContent::image(meta.mime.clone(), &store.read_bytes(&meta)?)
+                    } else {
+                        AttachmentContent::Text(store.read_text(&meta)?)
+                    },
+                );
                 blocks.push(ContentBlock::Attachment {
                     id: meta.id,
                     name: meta.name,
@@ -139,24 +156,32 @@ pub async fn start_run(
                 repo::append_message(conn, chat_id, Role::User, &blocks, &attachment_ids)?;
             let assistant_id = repo::begin_assistant_message(conn, chat_id, run_id, &pid, &mdl)?;
             let messages = repo::list_messages(conn, chat_id)?;
-            // Attachment texts for earlier turns too, so history stays coherent.
+            // Attachment payloads for earlier turns too, so history stays coherent.
             for m in &messages {
                 for b in &m.blocks {
                     if let ContentBlock::Attachment { id, .. } = b {
-                        if !texts.contains_key(id) {
+                        if !contents.contains_key(id) {
                             if let Some(meta) = store.get(conn, id)? {
-                                if let Ok(t) = store.read_text(&meta) {
-                                    texts.insert(id.clone(), t);
+                                let content = if meta.mime.starts_with("image/") {
+                                    store
+                                        .read_bytes(&meta)
+                                        .ok()
+                                        .map(|b| AttachmentContent::image(meta.mime.clone(), &b))
+                                } else {
+                                    store.read_text(&meta).ok().map(AttachmentContent::Text)
+                                };
+                                if let Some(c) = content {
+                                    contents.insert(id.clone(), c);
                                 }
                             }
                         }
                     }
                 }
             }
-            Ok((user_id, assistant_id, messages, texts))
+            Ok((user_id, assistant_id, messages, contents))
         })
         .await?;
-    let (user_id, assistant_id, messages, texts) = prepared;
+    let (user_id, assistant_id, messages, contents) = prepared;
 
     let user_message = messages
         .iter()
@@ -175,7 +200,7 @@ pub async fn start_run(
         .filter(|m| m.id != assistant_id && !m.blocks.is_empty())
         .map(StoredMessage::to_message)
         .collect();
-    let compiled = context::compile(&model, &history, context_window, &texts);
+    let compiled = context::compile(&model, &history, context_window, &contents, caps.images);
     let mut notices = Vec::new();
     if compiled.trimmed_messages > 0 {
         notices.push(format!(

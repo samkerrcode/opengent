@@ -11,9 +11,10 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use super::capabilities::{looks_like_vision_model, ImageSupport};
 use super::fake::FakeProvider;
 use super::openai_compat::{normalize_base_url, OpenAiCompatConfig, OpenAiCompatProvider};
-use super::ModelProvider;
+use super::{Capabilities, ModelProvider};
 use crate::config::DataRoot;
 use crate::secrets::{SecretRef, SecretStore};
 use crate::{Error, Result};
@@ -66,6 +67,13 @@ pub struct ProviderConfig {
     /// PEM certificate to trust when `tls_mode` is `custom_ca`. Not a secret.
     #[serde(default)]
     pub tls_ca_pem: Option<String>,
+    /// Whether models on this provider accept image input. `auto` combines server-reported
+    /// `vision_models` with a name heuristic; `always`/`never` are user overrides.
+    #[serde(default)]
+    pub image_support: ImageSupport,
+    /// Models the server reported as vision-capable during the last discovery (cache).
+    #[serde(default)]
+    pub vision_models: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -90,6 +98,8 @@ pub struct ProviderInput {
     pub tls_mode: TlsMode,
     /// `Some("")` clears a stored PEM; `None` leaves it unchanged.
     pub tls_ca_pem: Option<String>,
+    #[serde(default)]
+    pub image_support: ImageSupport,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -132,6 +142,8 @@ fn simulated_config() -> ProviderConfig {
         context_window: Some(8192),
         tls_mode: TlsMode::System,
         tls_ca_pem: None,
+        image_support: ImageSupport::Always,
+        vision_models: Vec::new(),
     }
 }
 
@@ -272,8 +284,10 @@ impl ProviderStore {
             tls_ca_pem: match input.tls_ca_pem.as_deref() {
                 Some("") => None,
                 Some(pem) => Some(pem.trim().to_owned()),
-                None => existing.and_then(|p| p.tls_ca_pem),
+                None => existing.as_ref().and_then(|p| p.tls_ca_pem.clone()),
             },
+            image_support: input.image_support,
+            vision_models: existing.map(|p| p.vision_models).unwrap_or_default(),
         };
         match state.providers.iter_mut().find(|p| p.id == id) {
             Some(slot) => *slot = config.clone(),
@@ -313,6 +327,17 @@ impl ProviderStore {
         self.persist(&state)
     }
 
+    pub fn update_vision_models(&self, id: &str, vision_models: Vec<String>) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        let p = state
+            .providers
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| Error::NotFound(format!("provider `{id}`")))?;
+        p.vision_models = vision_models;
+        self.persist(&state)
+    }
+
     /// Instantiates a live adapter, resolving the API key from the secret store.
     pub fn build(&self, id: &str) -> Result<Arc<dyn ModelProvider>> {
         let config = self.get(id)?;
@@ -344,16 +369,36 @@ impl ProviderStore {
         Ok(OpenAiCompatProvider::new(c, http))
     }
 
-    /// Discovers models where the protocol supports it and caches them on the config.
-    pub async fn discover_models(&self, id: &str) -> Result<Vec<String>> {
-        let config = self.get(id)?;
-        let models = match config.kind {
-            ProviderKind::Simulated => config.models.clone(),
-            ProviderKind::OpenAiCompatible => {
-                self.build_openai_compat(&config)?.list_models().await?
+    /// Effective capabilities for a provider+model pair: adapter-level flags plus the
+    /// model-level `images` resolution (explicit tri-state → server report → heuristic).
+    pub fn capabilities_for(&self, provider_id: &str, model: &str) -> Result<Capabilities> {
+        let config = self.get(provider_id)?;
+        let mut caps = match config.kind {
+            ProviderKind::Simulated => FakeProvider::default().capabilities(),
+            ProviderKind::OpenAiCompatible => self.build_openai_compat(&config)?.capabilities(),
+        };
+        caps.images = match config.image_support {
+            ImageSupport::Always => true,
+            ImageSupport::Never => false,
+            ImageSupport::Auto => {
+                config.vision_models.iter().any(|m| m == model) || looks_like_vision_model(model)
             }
         };
+        Ok(caps)
+    }
+
+    /// Discovers models where the protocol supports it and caches them on the config.
+    /// Also refreshes `vision_models` when the server exposes capability metadata.
+    pub async fn discover_models(&self, id: &str) -> Result<Vec<String>> {
+        let config = self.get(id)?;
+        let (models, vision) = match config.kind {
+            ProviderKind::Simulated => (config.models.clone(), None),
+            ProviderKind::OpenAiCompatible => self.build_openai_compat(&config)?.discover().await?,
+        };
         self.update_models(id, models.clone())?;
+        if let Some(vision) = vision {
+            self.update_vision_models(id, vision)?;
+        }
         Ok(models)
     }
 
@@ -396,6 +441,7 @@ mod tests {
             context_window: None,
             tls_mode: TlsMode::System,
             tls_ca_pem: None,
+            image_support: ImageSupport::Auto,
         }
     }
 
@@ -436,6 +482,58 @@ mod tests {
         assert!(s.save(edit.clone()).unwrap().has_api_key);
         edit.api_key = Some(String::new());
         assert!(!s.save(edit).unwrap().has_api_key);
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn capabilities_for_respects_tri_state_detection_and_heuristic() {
+        let (s, tmp) = store();
+        assert!(
+            s.capabilities_for(SIMULATED_PROVIDER_ID, "simulated-1")
+                .unwrap()
+                .images
+        );
+        let p = s.save(input("X")).unwrap();
+        let images = |model: &str| s.capabilities_for(&p.id, model).unwrap().images;
+        assert!(images("llava:7b"), "heuristic should match");
+        assert!(!images("llama3.1"));
+        s.update_vision_models(&p.id, vec!["custom-model".into()])
+            .unwrap();
+        assert!(images("custom-model"), "server-reported should match");
+
+        let mut e = input("X");
+        e.id = Some(p.id.clone());
+        e.image_support = ImageSupport::Always;
+        s.save(e).unwrap();
+        assert!(images("llama3.1"));
+        let mut e = input("X");
+        e.id = Some(p.id.clone());
+        e.image_support = ImageSupport::Never;
+        s.save(e).unwrap();
+        assert!(!images("llava:7b"));
+        assert!(!images("custom-model"));
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn old_providers_json_loads_with_defaults() {
+        let tmp = std::env::temp_dir().join(format!("opengent-prov-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("providers.json"),
+            r#"{"version":1,"providers":[{"id":"p1","name":"P","kind":"open_ai_compatible","base_url":"http://localhost:11434/v1","has_api_key":false}],"active":null}"#,
+        )
+        .unwrap();
+        let root = resolve_data_root(Some(&tmp)).unwrap();
+        let s = ProviderStore::load(
+            &root,
+            Arc::new(MemorySecretStore::default()),
+            crate::http::client().unwrap(),
+        )
+        .unwrap();
+        let p = s.get("p1").unwrap();
+        assert_eq!(p.image_support, ImageSupport::Auto);
+        assert!(p.vision_models.is_empty());
         std::fs::remove_dir_all(tmp).unwrap();
     }
 

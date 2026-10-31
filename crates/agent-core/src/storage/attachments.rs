@@ -1,6 +1,7 @@
 //! Immutable, content-addressed attachment snapshots. Bytes live at
-//! `<data_root>/attachments/<sha256>`; metadata lives in SQLite. Only bounded text-like files
-//! are accepted in this phase; images/PDFs come with capable providers and explicit parsers.
+//! `<data_root>/attachments/<sha256>`; metadata lives in SQLite. Text-like files are stored
+//! after UTF-8 validation; images are sniffed by magic bytes and stored raw so they can be
+//! sent to vision-capable models as base64.
 
 use std::path::{Path, PathBuf};
 
@@ -33,6 +34,23 @@ pub struct AttachmentStore {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Sniffs the magic bytes of common raster image formats. Returns the canonical mime when
+/// the prefix matches, so a `.png` rename of arbitrary binary data is not accepted as an
+/// image (it falls through to the UTF-8 text check and is rejected as binary).
+fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
 }
 
 fn guess_mime(name: &str) -> &'static str {
@@ -82,37 +100,61 @@ impl AttachmentStore {
             )));
         }
         let bytes = std::fs::read(path)?;
-        let text = std::str::from_utf8(&bytes).map_err(|_| {
-            Error::InvalidInput("only UTF-8 text files are supported in this version".into())
-        })?;
-        if text.contains('\0') {
-            return Err(Error::InvalidInput("file appears to be binary".into()));
-        }
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("attachment")
             .to_owned();
-        self.import_text(conn, &name, text)
+        // Text first: real image blobs always fail UTF-8 validation, while a text file that
+        // merely starts with "GIF89a" must not be imported as an image.
+        if let Ok(text) = std::str::from_utf8(&bytes) {
+            if !text.contains('\0') {
+                return self.import_text(conn, &name, text);
+            }
+        }
+        if let Some(mime) = sniff_image(&bytes) {
+            return self.import_bytes(conn, &name, &bytes, mime, 0);
+        }
+        Err(Error::InvalidInput(
+            "only UTF-8 text and PNG/JPEG/GIF/WebP images are supported".into(),
+        ))
     }
 
     pub fn import_text(&self, conn: &Connection, name: &str, text: &str) -> Result<AttachmentMeta> {
-        let sha256 = hex(&Sha256::digest(text.as_bytes()));
+        self.import_bytes(
+            conn,
+            name,
+            text.as_bytes(),
+            guess_mime(name),
+            text.chars().count() as i64,
+        )
+    }
+
+    /// Content-addressed insert shared by the text and image import paths.
+    fn import_bytes(
+        &self,
+        conn: &Connection,
+        name: &str,
+        bytes: &[u8],
+        mime: &str,
+        char_count: i64,
+    ) -> Result<AttachmentMeta> {
+        let sha256 = hex(&Sha256::digest(bytes));
         if let Some(existing) = self.get_by_hash(conn, &sha256)? {
             return Ok(existing);
         }
         std::fs::create_dir_all(&self.dir)?;
         let tmp = self.dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
-        std::fs::write(&tmp, text.as_bytes())?;
+        std::fs::write(&tmp, bytes)?;
         std::fs::rename(&tmp, self.blob_path(&sha256))?;
 
         let record = AttachmentMeta {
             id: uuid::Uuid::new_v4().to_string(),
             sha256,
             name: name.chars().take(255).collect(),
-            mime: guess_mime(name).to_owned(),
-            size_bytes: text.len() as i64,
-            char_count: text.chars().count() as i64,
+            mime: mime.to_owned(),
+            size_bytes: bytes.len() as i64,
+            char_count,
         };
         conn.execute(
             "INSERT INTO attachments (id, sha256, name, mime, size_bytes, char_count, created_at)
@@ -166,6 +208,12 @@ impl AttachmentStore {
 
     /// Loads the stored text. The blob is immutable, so the hash is the integrity check.
     pub fn read_text(&self, meta: &AttachmentMeta) -> Result<String> {
+        String::from_utf8(self.read_bytes(meta)?)
+            .map_err(|_| Error::Io("attachment is not valid UTF-8".into()))
+    }
+
+    /// Loads raw blob bytes (images and other non-text payloads) with the same integrity check.
+    pub fn read_bytes(&self, meta: &AttachmentMeta) -> Result<Vec<u8>> {
         let bytes = std::fs::read(self.blob_path(&meta.sha256))?;
         if hex(&Sha256::digest(&bytes)) != meta.sha256 {
             return Err(Error::Io(format!(
@@ -173,7 +221,17 @@ impl AttachmentStore {
                 meta.name
             )));
         }
-        String::from_utf8(bytes).map_err(|_| Error::Io("attachment is not valid UTF-8".into()))
+        Ok(bytes)
+    }
+
+    /// `data:{mime};base64,…` URL for rendering the blob in a webview (`<img src>`).
+    pub fn read_data_url(&self, meta: &AttachmentMeta) -> Result<String> {
+        use base64::Engine;
+        Ok(format!(
+            "data:{};base64,{}",
+            meta.mime,
+            base64::engine::general_purpose::STANDARD.encode(self.read_bytes(meta)?)
+        ))
     }
 }
 
@@ -211,6 +269,28 @@ mod tests {
         assert_eq!(a.mime, "text/markdown");
         assert_eq!(a.char_count, "# hello\nworld → ✓".chars().count() as i64);
         assert_eq!(store.read_text(&a).unwrap(), "# hello\nworld → ✓");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn imports_images_by_magic_bytes_not_extension() {
+        let (c, store, dir) = setup();
+        std::fs::create_dir_all(&dir).unwrap();
+        // Minimal PNG header + payload; extension deliberately wrong to prove sniffing wins.
+        let png = dir.join("mystery.dat");
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.extend_from_slice(&[0u8; 64]);
+        std::fs::write(&png, &bytes).unwrap();
+        let a = store.import_file(&c, &png).unwrap();
+        assert_eq!(a.mime, "image/png");
+        assert_eq!(a.char_count, 0);
+        assert_eq!(store.read_bytes(&a).unwrap(), bytes);
+
+        // Text that happens to start with GIF magic stays text.
+        let fake_gif = dir.join("note.txt");
+        std::fs::write(&fake_gif, "GIF89a is a format I am writing about").unwrap();
+        let t = store.import_file(&c, &fake_gif).unwrap();
+        assert_eq!(t.mime, "text/plain");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

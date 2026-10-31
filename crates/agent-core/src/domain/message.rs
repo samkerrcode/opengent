@@ -34,6 +34,12 @@ pub enum ContentBlock {
         #[ts(type = "number")]
         char_count: i64,
     },
+    /// An image ready to send to a vision-capable provider (`data` is base64). Produced by
+    /// context compilation for the request path only — never persisted in message blocks.
+    Image {
+        mime: String,
+        data: String,
+    },
     ToolCall {
         id: String,
         name: String,

@@ -4,10 +4,12 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import type { ActiveSelection } from "$lib/generated/bindings/ActiveSelection";
 import type { AppInfo } from "$lib/generated/bindings/AppInfo";
 import type { AttachmentMeta } from "$lib/generated/bindings/AttachmentMeta";
+import type { Capabilities } from "$lib/generated/bindings/Capabilities";
 import type { ChatDetail } from "$lib/generated/bindings/ChatDetail";
 import type { ChatSummary } from "$lib/generated/bindings/ChatSummary";
 import type { ChatId } from "$lib/generated/bindings/ChatId";
 import type { Error as CoreError } from "$lib/generated/bindings/Error";
+import type { ImageSupport } from "$lib/generated/bindings/ImageSupport";
 import type { ProviderConfig } from "$lib/generated/bindings/ProviderConfig";
 import type { ProviderInput } from "$lib/generated/bindings/ProviderInput";
 import type { ProviderTestResult } from "$lib/generated/bindings/ProviderTestResult";
@@ -22,10 +24,12 @@ export type {
   ActiveSelection,
   AppInfo,
   AttachmentMeta,
+  Capabilities,
   ChatDetail,
   ChatId,
   ChatSummary,
   CoreError,
+  ImageSupport,
   ProviderConfig,
   ProviderInput,
   ProviderTestResult,
@@ -71,7 +75,10 @@ export const commands = {
   getChat: (id: ChatId) => invoke<ChatDetail>("get_chat", { id }),
   renameChat: (id: ChatId, title: string) => invoke<void>("rename_chat", { id, title }),
   deleteChat: (id: ChatId) => invoke<void>("delete_chat", { id }),
-  pickAttachments: () => invoke<AttachmentMeta[]>("pick_attachments"),
+  pickAttachments: (includeImages: boolean) =>
+    invoke<AttachmentMeta[]>("pick_attachments", { includeImages }),
+  attachmentDataUrl: (attachmentId: string) =>
+    invoke<string>("attachment_data_url", { attachmentId }),
 
   cancelRun: (runId: RunId) => invoke<boolean>("cancel_run", { runId }),
 
@@ -81,6 +88,8 @@ export const commands = {
   saveProvider: (input: ProviderInput) => invoke<ProviderConfig>("save_provider", { input }),
   deleteProvider: (id: string) => invoke<void>("delete_provider", { id }),
   testProvider: (id: string) => invoke<ProviderTestResult>("test_provider", { id }),
+  getModelCapabilities: (providerId: string, model: string) =>
+    invoke<Capabilities>("get_model_capabilities", { providerId, model }),
   getActiveSelection: () => invoke<ActiveSelection | null>("get_active_selection"),
   setActiveSelection: (selection: ActiveSelection) => invoke<void>("set_active_selection", { selection }),
 };

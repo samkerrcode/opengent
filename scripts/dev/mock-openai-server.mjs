@@ -4,7 +4,7 @@
 import { createServer } from "node:http";
 
 const port = Number(process.argv[2] ?? 8787);
-const models = ["mock-fast", "mock-slow"];
+const models = ["mock-fast", "mock-slow", "mock-vision"];
 
 createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://localhost:${port}`);
@@ -22,9 +22,16 @@ createServer(async (req, res) => {
       res.end(JSON.stringify({ error: { message: "Incorrect API key provided", type: "invalid_request_error" } }));
       return;
     }
-    const last = [...parsed.messages].reverse().find((m) => m.role === "user")?.content ?? "";
+    const content = [...parsed.messages].reverse().find((m) => m.role === "user")?.content ?? "";
+    // Multimodal requests send content as a parts array; plain ones send a string.
+    const parts = Array.isArray(content) ? content : [{ type: "text", text: content }];
+    const last = parts.filter((p) => p.type === "text").map((p) => p.text).join("\n");
+    const images = parts
+      .filter((p) => p.type === "image_url")
+      .map((p) => /^data:([^;]+);base64,/.exec(p.image_url?.url ?? "")?.[1] ?? "image/?");
+    const imageNote = images.length ? `\n\nI received ${images.length} image(s): ${images.join(", ")}.` : "";
     const reply =
-      `## Mock reply from \`${parsed.model}\`\n\nYou said:\n\n> ${last}\n\n` +
+      `## Mock reply from \`${parsed.model}\`\n\nYou said:\n\n> ${last}${imageNote}\n\n` +
       "Here is a code block:\n\n```ts\nconst answer = 42;\n```\n\n" +
       "And a [link](https://example.com). *Streaming* **works**.";
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });

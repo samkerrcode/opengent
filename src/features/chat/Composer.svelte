@@ -1,5 +1,7 @@
 <script lang="ts">
   import ModelPicker from "$features/providers/ModelPicker.svelte";
+  import { providerStore } from "$features/providers/provider-store.svelte";
+  import { attachmentDataUrl } from "$lib/attachments";
   import type { AttachmentMeta } from "$lib/ipc/commands";
 
   let {
@@ -48,6 +50,12 @@
     return n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k chars` : `${n} chars`;
   }
 
+  function fmtMeta(a: AttachmentMeta) {
+    return a.mime.startsWith("image/")
+      ? `${Math.max(1, Math.round(a.size_bytes / 1024))} KiB`
+      : fmtChars(a.char_count);
+  }
+
   $effect(() => {
     void value;
     if (textarea) {
@@ -63,9 +71,15 @@
       <ul class="pending" aria-label="Attachments for this message">
         {#each pending as a (a.id)}
           <li class="file">
-            <span class="file-icon" aria-hidden="true">▤</span>
+            {#if a.mime.startsWith("image/")}
+              {#await attachmentDataUrl(a.id) then url}
+                {#if url}<img class="file-thumb" src={url} alt="" />{/if}
+              {/await}
+            {:else}
+              <span class="file-icon" aria-hidden="true">▤</span>
+            {/if}
             <span class="file-name" title={a.name}>{a.name}</span>
-            <span class="file-meta">{fmtChars(a.char_count)}</span>
+            <span class="file-meta">{fmtMeta(a)}</span>
             <button type="button" class="file-remove" aria-label="Remove {a.name}" onclick={() => onremoveattachment(a.id)}>✕</button>
           </li>
         {/each}
@@ -85,7 +99,15 @@
     <div class="row">
       <div class="context">
         <ModelPicker {onopensettings} />
-        <button type="button" class="chip" onclick={onattach} disabled={busy} title="Attach text files (up to 2 MiB each)">
+        <button
+          type="button"
+          class="chip"
+          onclick={onattach}
+          disabled={busy}
+          title={providerStore.supportsImages
+            ? "Attach files or images (up to 2 MiB each)"
+            : "Attach text files (up to 2 MiB each) — the selected model does not accept images"}
+        >
           ⌁ Attach{pending.length ? ` (${pending.length})` : ""}
         </button>
         <span class="chip" title="MCP tools arrive in Phase 3">⚙ Tools</span>
@@ -146,6 +168,13 @@
   }
   .file-icon {
     color: var(--accent);
+  }
+  .file-thumb {
+    width: 22px;
+    height: 22px;
+    object-fit: cover;
+    border-radius: var(--radius-sm);
+    flex: none;
   }
   .file-name {
     overflow: hidden;
