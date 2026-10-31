@@ -59,14 +59,16 @@ fn server_origin(base_url: &str) -> Option<String> {
 /// Extracts the ids of models a `/models` document flags as accepting image input.
 /// Returns `None` when the document carries no capability metadata at all. Covers
 /// OpenRouter-style `architecture.modality` (`"text+image->text"`), LM Studio-style
-/// `type: "vlm"`, and generic `input_modalities`/`modalities` string arrays.
+/// `type: "vlm"`, and generic `input_modalities`/`modalities` string arrays — llama.cpp
+/// nests these under `architecture` (`architecture.input_modalities`), most servers put
+/// them at the model's top level.
 pub fn vision_flags_from_models(doc: &Value) -> Option<Vec<String>> {
     let data = doc.get("data")?.as_array()?;
     let mut saw_metadata = false;
     let mut vision = Vec::new();
     for m in data {
-        let accepts_image = m
-            .get("architecture")
+        let arch = m.get("architecture");
+        let accepts_image = arch
             .and_then(|a| a.get("modality"))
             .and_then(Value::as_str)
             .map(|modality| modality.split("->").next().unwrap_or("").contains("image"))
@@ -77,11 +79,16 @@ pub fn vision_flags_from_models(doc: &Value) -> Option<Vec<String>> {
             })
             .or_else(|| {
                 ["input_modalities", "modalities"].iter().find_map(|key| {
-                    m.get(*key).and_then(Value::as_array).map(|modes| {
-                        modes
-                            .iter()
-                            .any(|v| v.as_str().is_some_and(|s| s.contains("image")))
-                    })
+                    [m.get(*key), arch.and_then(|a| a.get(*key))]
+                        .into_iter()
+                        .flatten()
+                        .find_map(|v| {
+                            v.as_array().map(|modes| {
+                                modes
+                                    .iter()
+                                    .any(|x| x.as_str().is_some_and(|s| s.contains("image")))
+                            })
+                        })
                 })
             });
         if let Some(true) = accepts_image {
@@ -191,9 +198,10 @@ impl OpenAiCompatProvider {
     }
 
     /// Detection order: hints inside the `/models` document (OpenRouter `architecture.
-    /// modality`, LM Studio `type`, generic `*_modalities` fields), then an Ollama probe
-    /// (`/api/show` per model), then LM Studio's `/api/v0/models`. Probes hit the server
-    /// root, so they only run against servers that actually answer them.
+    /// modality`, LM Studio `type`, generic `*_modalities` fields — top-level or nested
+    /// under `architecture` as llama.cpp does), then an Ollama probe (`/api/show` per
+    /// model), then LM Studio's `/api/v0/models`. Probes hit the server root, so they
+    /// only run against servers that actually answer them.
     async fn detect_vision(&self, doc: &Value, listed: &[String]) -> Option<Vec<String>> {
         if let Some(ids) = vision_flags_from_models(doc) {
             return Some(ids);
@@ -674,6 +682,39 @@ mod tests {
             None
         );
         assert_eq!(vision_flags_from_models(&json!({})), None);
+    }
+
+    #[test]
+    fn vision_flags_parse_llamacpp_architecture_modalities() {
+        // llama.cpp's /v1/models nests modalities inside `architecture`, with no
+        // `modality` string or top-level `type` field.
+        let doc = json!({
+            "data": [
+                {
+                    "id": "ggml-org/gemma-4-26B-A4B-it-GGUF:Q4_0",
+                    "object": "model",
+                    "owned_by": "llamacpp",
+                    "architecture": {
+                        "input_modalities": ["text", "image", "video"],
+                        "output_modalities": ["text"]
+                    }
+                },
+                {
+                    "id": "unsloth/GLM-4.7-Flash-GGUF:Q4_K_M",
+                    "object": "model",
+                    "owned_by": "llamacpp",
+                    "architecture": {
+                        "input_modalities": ["text"],
+                        "output_modalities": ["text"]
+                    }
+                }
+            ],
+            "object": "list"
+        });
+        assert_eq!(
+            vision_flags_from_models(&doc),
+            Some(vec!["ggml-org/gemma-4-26B-A4B-it-GGUF:Q4_0".to_string()])
+        );
     }
 
     #[test]
