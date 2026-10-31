@@ -7,7 +7,12 @@ export type ProviderConfig = { id: string, name: string, kind: ProviderKind, bas
 /**
  * Models discovered via the provider's listing endpoint (cache; may be empty).
  */
-models: Array<string>, has_api_key: boolean, include_usage: boolean, context_window: number | null, tls_mode: TlsMode, 
+models: Array<string>, has_api_key: boolean, include_usage: boolean, context_window: number | null, 
+/**
+ * Per-model context window overrides (tokens); wins over `context_window` when the
+ * named model is selected. Empty = every model uses the provider default.
+ */
+model_context_windows: { [key in string]: number }, tls_mode: TlsMode, 
 /**
  * PEM certificate to trust when `tls_mode` is `custom_ca`. Not a secret.
  */

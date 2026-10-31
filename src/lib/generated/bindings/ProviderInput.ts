@@ -7,7 +7,7 @@ import type { TlsMode } from "./TlsMode";
  * Input from the UI when creating or editing a provider. `api_key: Some("")` clears the key;
  * `None` leaves it unchanged.
  */
-export type ProviderInput = { id: string | null, name: string, kind: ProviderKind, base_url: string, default_model: string | null, api_key: string | null, include_usage: boolean, context_window: number | null, tls_mode: TlsMode, 
+export type ProviderInput = { id: string | null, name: string, kind: ProviderKind, base_url: string, default_model: string | null, api_key: string | null, include_usage: boolean, context_window: number | null, model_context_windows: { [key in string]: number }, tls_mode: TlsMode, 
 /**
  * `Some("")` clears a stored PEM; `None` leaves it unchanged.
  */

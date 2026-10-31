@@ -13,11 +13,18 @@
     key_touched: boolean;
     include_usage: boolean;
     context_window: string;
+    /** Per-model context window overrides; select values, "" = provider default. */
+    model_context: Record<string, string>;
     tls_mode: TlsMode;
     tls_ca_pem: string;
     ca_touched: boolean;
     image_support: ImageSupport;
   };
+
+  // Common context sizes offered when the server can't report them. Doubling steps keep the
+  // list short; the provider default covers models without an override.
+  const CONTEXT_SIZES = [4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576];
+  const fmtCtx = (n: number) => (n >= 1048576 ? `${n / 1048576}M` : `${n / 1024}K`);
 
   const presets = [
     { label: "Ollama", base_url: "http://localhost:11434/v1", model: "llama3.1" },
@@ -32,8 +39,21 @@
   let testResult = $state<ProviderTestResult | null>(null);
   let dialog = $state<HTMLElement | null>(null);
 
+  // Models a context window can be set on: discovered by the last test, cached on the
+  // saved provider, the typed default, or already carrying an override.
+  const ctxModels = $derived.by(() => {
+    if (!editing) return [] as string[];
+    const names = new Set<string>();
+    for (const m of testResult?.models ?? []) names.add(m);
+    for (const m of providerStore.providers.find((p) => p.id === editing?.id)?.models ?? []) names.add(m);
+    const d = editing.default_model.trim();
+    if (d) names.add(d);
+    for (const m of Object.keys(editing.model_context)) names.add(m);
+    return [...names];
+  });
+
   function blankForm(): Form {
-    return { id: null, name: "", base_url: "", default_model: "", api_key: "", key_touched: false, include_usage: true, context_window: "", tls_mode: "system", tls_ca_pem: "", ca_touched: false, image_support: "auto" };
+    return { id: null, name: "", base_url: "", default_model: "", api_key: "", key_touched: false, include_usage: true, context_window: "", model_context: {}, tls_mode: "system", tls_ca_pem: "", ca_touched: false, image_support: "auto" };
   }
 
   function startNew() {
@@ -52,6 +72,7 @@
       key_touched: false,
       include_usage: p.include_usage,
       context_window: p.context_window?.toString() ?? "",
+      model_context: Object.fromEntries(Object.entries(p.model_context_windows).map(([m, w]) => [m, String(w)])),
       tls_mode: p.tls_mode,
       tls_ca_pem: p.tls_ca_pem ?? "",
       ca_touched: false,
@@ -80,6 +101,11 @@
       api_key: f.key_touched ? f.api_key : null,
       include_usage: f.include_usage,
       context_window: Number.isFinite(ctx) && ctx !== null && ctx > 0 ? ctx : null,
+      model_context_windows: Object.fromEntries(
+        Object.entries(f.model_context)
+          .map(([m, w]) => [m.trim(), Number.parseInt(w, 10)] as const)
+          .filter(([m, w]) => m && Number.isFinite(w) && w > 0),
+      ),
       tls_mode: f.tls_mode,
       // Rust semantics: null = keep existing PEM, "" = clear, value = replace.
       tls_ca_pem: f.ca_touched || !f.id ? f.tls_ca_pem : null,
@@ -184,7 +210,7 @@
             <input type="url" bind:value={editing.base_url} placeholder="http://localhost:11434/v1" />
           </label>
           <label>
-            <span>Model</span>
+            <span>Default model</span>
             {#if testResult?.models.length}
               <select bind:value={editing.default_model}>
                 <option value="">— choose —</option>
@@ -211,14 +237,35 @@
           </label>
           <div class="row2">
             <label>
-              <span>Context window <small>(tokens, optional)</small></span>
-              <input type="text" inputmode="numeric" bind:value={editing.context_window} placeholder="8192" />
+              <span>Context window <small>(optional)</small></span>
+              <select bind:value={editing.context_window}>
+                <option value="">Assume 8K tokens</option>
+                {#each CONTEXT_SIZES as n (n)}<option value={String(n)}>{fmtCtx(n)} tokens</option>{/each}
+              </select>
+              <small class="field-help">
+                Caps how much of the conversation is sent each turn. Servers don't report
+                this — when unset, OpenGent assumes 8K tokens.
+              </small>
             </label>
             <label class="check">
               <input type="checkbox" bind:checked={editing.include_usage} />
               <span>Request token usage</span>
             </label>
           </div>
+          {#if ctxModels.length}
+            <div class="ctx-overrides">
+              <span>Per-model context window <small>(overrides the provider default)</small></span>
+              {#each ctxModels as m (m)}
+                <div class="ctx-row">
+                  <span class="ctx-name" title={m}>{m}</span>
+                  <select bind:value={editing.model_context[m]}>
+                    <option value="">Provider default</option>
+                    {#each CONTEXT_SIZES as n (n)}<option value={String(n)}>{fmtCtx(n)} tokens</option>{/each}
+                  </select>
+                </div>
+              {/each}
+            </div>
+          {/if}
           <label>
             <span>Image input <small>(whether models can see attached images)</small></span>
             <select bind:value={editing.image_support}>
@@ -391,6 +438,31 @@
     grid-template-columns: 1fr 1fr;
     gap: var(--space-3);
     align-items: end;
+  }
+  .field-help {
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  .ctx-overrides {
+    display: grid;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--fg-muted);
+  }
+  .ctx-overrides > span small {
+    color: var(--fg-faint);
+    font-weight: normal;
+  }
+  .ctx-row {
+    display: grid;
+    grid-template-columns: 1fr 150px;
+    gap: var(--space-2);
+    align-items: center;
+  }
+  .ctx-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .check {
     grid-template-columns: auto 1fr;

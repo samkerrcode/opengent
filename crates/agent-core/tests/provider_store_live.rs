@@ -37,6 +37,7 @@ async fn store_builds_provider_and_run_completes() {
             api_key: std::env::var("OPENGENT_TEST_OPENAI_KEY").ok(),
             include_usage: true,
             context_window: None,
+            model_context_windows: std::collections::HashMap::new(),
             tls_mode: TlsMode::System,
             tls_ca_pem: None,
             image_support: ImageSupport::Auto,

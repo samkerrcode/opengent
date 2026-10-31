@@ -62,6 +62,10 @@ pub struct ProviderConfig {
     #[serde(default = "default_true")]
     pub include_usage: bool,
     pub context_window: Option<u32>,
+    /// Per-model context window overrides (tokens); wins over `context_window` when the
+    /// named model is selected. Empty = every model uses the provider default.
+    #[serde(default)]
+    pub model_context_windows: HashMap<String, u32>,
     #[serde(default)]
     pub tls_mode: TlsMode,
     /// PEM certificate to trust when `tls_mode` is `custom_ca`. Not a secret.
@@ -94,6 +98,8 @@ pub struct ProviderInput {
     #[serde(default = "default_true")]
     pub include_usage: bool,
     pub context_window: Option<u32>,
+    #[serde(default)]
+    pub model_context_windows: HashMap<String, u32>,
     #[serde(default)]
     pub tls_mode: TlsMode,
     /// `Some("")` clears a stored PEM; `None` leaves it unchanged.
@@ -140,6 +146,7 @@ fn simulated_config() -> ProviderConfig {
         has_api_key: false,
         include_usage: true,
         context_window: Some(8192),
+        model_context_windows: HashMap::new(),
         tls_mode: TlsMode::System,
         tls_ca_pem: None,
         image_support: ImageSupport::Always,
@@ -280,6 +287,12 @@ impl ProviderStore {
             has_api_key,
             include_usage: input.include_usage,
             context_window: input.context_window,
+            model_context_windows: input
+                .model_context_windows
+                .into_iter()
+                .map(|(m, w)| (m.trim().to_owned(), w))
+                .filter(|(m, w)| !m.is_empty() && *w > 0)
+                .collect(),
             tls_mode: input.tls_mode,
             tls_ca_pem: match input.tls_ca_pem.as_deref() {
                 Some("") => None,
@@ -377,6 +390,13 @@ impl ProviderStore {
             ProviderKind::Simulated => FakeProvider::default().capabilities(),
             ProviderKind::OpenAiCompatible => self.build_openai_compat(&config)?.capabilities(),
         };
+        // Context window resolution: per-model override → provider default → adapter-declared.
+        caps.context_window = config
+            .model_context_windows
+            .get(model)
+            .copied()
+            .or(config.context_window)
+            .or(caps.context_window);
         caps.images = match config.image_support {
             ImageSupport::Always => true,
             ImageSupport::Never => false,
@@ -439,6 +459,7 @@ mod tests {
             api_key: Some("sk-test".into()),
             include_usage: true,
             context_window: None,
+            model_context_windows: HashMap::new(),
             tls_mode: TlsMode::System,
             tls_ca_pem: None,
             image_support: ImageSupport::Auto,

@@ -104,12 +104,11 @@ pub async fn start_run(
         return Err(Error::RunBusy);
     }
 
-    let config = state.providers.get(&provider_id)?;
     let provider = state.providers.build(&provider_id)?;
+    // capabilities_for resolves the context window per provider+model:
+    // per-model override → provider default → adapter-declared.
     let caps = state.providers.capabilities_for(&provider_id, &model)?;
-    let context_window = config
-        .context_window
-        .or(provider.capabilities().context_window);
+    let context_window = caps.context_window;
     let run_id = RunId::new();
 
     // One database round trip: truncate (retry), persist the user turn, create the placeholder,
