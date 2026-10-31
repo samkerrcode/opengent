@@ -1,7 +1,7 @@
 # OpenGent – contributor notes
 
-Model-agnostic desktop agent. Tauri 2 host + Svelte 5 UI; all agent logic in Rust (`crates/agent-core`).
-Design/roadmap: see the phased plan (Phase 0 = foundation, currently implemented).
+Frontier quality model-agnostic desktop agent and harness. Tauri 2 host + Svelte 5 UI; all agent logic in Rust (`crates/agent-core`).
+Design/roadmap: see the phased plan in README.md.
 
 ## Layout
 

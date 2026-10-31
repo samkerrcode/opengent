@@ -1,6 +1,6 @@
 # OpenGent
 
-A model-agnostic desktop agent for macOS and Windows. OpenGent talks to whichever LLM provider you
+A frontier quality model-agnostic desktop agent for macOS and Windows. OpenGent talks to whichever LLM provider you
 configure (OpenAI, Anthropic, Google, AWS Bedrock, Hugging Face, or any custom/local endpoint),
 streams responses token by token, and takes actions only through explicitly configured MCP servers
 with per-tool permissions.
