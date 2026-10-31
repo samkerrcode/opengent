@@ -11,8 +11,9 @@ everything privileged: networking, secrets, persistence, the MCP client, and the
 > **Status: Phases 0, 1, and 2 complete; Phase 3 (MCP agent) is next.** You can connect any
 > OpenAI-compatible server (Ollama, LM Studio, vLLM, hosted gateways) and chat with streamed,
 > Markdown-rendered replies. Chats persist between launches in `~/.opengent`, with search,
-> rename, attachments, and recovery of interrupted runs. MCP tooling is not wired up yet.
-> See [Roadmap](#roadmap).
+> rename, attachments (including images on vision-capable models), and recovery of interrupted
+> runs. MCP tooling is not wired up yet. See [Roadmap](#roadmap) and
+> [docs/features.md](docs/features.md) for the feature guide.
 
 ---
 
