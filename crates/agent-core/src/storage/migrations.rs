@@ -48,6 +48,36 @@ const MIGRATIONS: &[&str] = &[
         attachment_id TEXT NOT NULL REFERENCES attachments(id),
         PRIMARY KEY (message_id, attachment_id)
     );",
+    // v2: user-configured agents, their schedules, and agent/schedule links on chats.
+    // Deleting an agent removes its schedules but keeps its chats (as plain chats).
+    "CREATE TABLE agents (
+        id          TEXT PRIMARY KEY,
+        name        TEXT NOT NULL,
+        config      TEXT NOT NULL,
+        created_at  INTEGER NOT NULL,
+        updated_at  INTEGER NOT NULL
+    );
+
+    CREATE TABLE agent_schedules (
+        id            TEXT PRIMARY KEY,
+        agent_id      TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        prompt        TEXT NOT NULL,
+        recurrence    TEXT NOT NULL,
+        missed_policy TEXT NOT NULL,
+        enabled       INTEGER NOT NULL,
+        next_run_at   INTEGER,
+        last_run_at   INTEGER,
+        last_outcome  TEXT,
+        last_chat_id  TEXT,
+        created_at    INTEGER NOT NULL,
+        updated_at    INTEGER NOT NULL
+    );
+    CREATE INDEX agent_schedules_due ON agent_schedules(enabled, next_run_at);
+    CREATE INDEX agent_schedules_agent ON agent_schedules(agent_id);
+
+    ALTER TABLE chats ADD COLUMN agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL;
+    ALTER TABLE chats ADD COLUMN schedule_id TEXT;
+    CREATE INDEX chats_agent ON chats(agent_id);",
 ];
 
 pub fn apply(conn: &mut Connection) -> Result<()> {

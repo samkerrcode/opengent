@@ -40,3 +40,5 @@ macro_rules! id_type {
 
 id_type!(ChatId);
 id_type!(RunId);
+id_type!(AgentId);
+id_type!(ScheduleId);

@@ -1,15 +1,20 @@
 // Chat state cached from Rust (SQLite is authoritative). Streaming events are applied to the
 // in-memory copy of the assistant message; Rust persists them independently via RunRecorder.
+import { listen } from "@tauri-apps/api/event";
 import {
   commands,
   describeError,
+  type Agent,
   type AttachmentMeta,
   type ChatSummary,
+  type RunEvent,
+  type RunStarted,
   type StoredMessage,
 } from "$lib/ipc/commands";
 import { applyRunEvent, emptyTurn, isTerminal, type AssistantTurn, type TurnSegment } from "$lib/state/run-reducer";
 import type { ToolCallStatus } from "$lib/ipc/commands";
 import { providerStore } from "$features/providers/provider-store.svelte";
+import { agentStore } from "$features/agents/agent-store.svelte";
 
 export interface UserTurn {
   kind: "user";
@@ -100,9 +105,53 @@ class ChatStore {
   query = $state("");
   error = $state<string | null>(null);
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
+  private listening = false;
 
   get active(): Chat | null {
     return this.chats.find((c) => c.summary.id === this.activeId) ?? null;
+  }
+
+  /** The agent a chat belongs to (null for plain chats or a deleted agent). */
+  agentFor(chat: Chat): Agent | null {
+    return agentStore.byId(chat.summary.agent_id);
+  }
+
+  /** Whether the model that will answer in this chat accepts images. */
+  supportsImages(chat: Chat): boolean {
+    const agent = this.agentFor(chat);
+    return agent
+      ? providerStore.supportsImagesFor(agent.default_model.provider_id, agent.default_model.model)
+      : providerStore.supportsImages;
+  }
+
+  /** Scheduled runs stream through app events rather than a per-call channel. */
+  async initBackground() {
+    if (this.listening) return;
+    this.listening = true;
+    await listen<RunStarted>("background-run-started", (e) => {
+      const started = e.payload;
+      const chat = this.upsert(started.chat);
+      chat.items = [
+        fromStored(started.user_message),
+        { kind: "assistant", id: started.assistant_message.id, model: started.assistant_message.model ?? "", turn: emptyTurn() },
+      ];
+      chat.loaded = true;
+      chat.activeRunId = started.run_id;
+    });
+    await listen<RunEvent>("background-run-event", (e) => {
+      const event = e.payload;
+      const chat = this.chats.find((c) => c.summary.id === event.chat_id);
+      if (!chat || chat.activeRunId !== event.run_id) return;
+      const idx = chat.items.length - 1;
+      const item = chat.items[idx];
+      if (item?.kind !== "assistant") return;
+      item.turn = applyRunEvent(item.turn, event);
+      if (isTerminal(item.turn.phase)) {
+        chat.activeRunId = null;
+        chat.summary.updated_at = Date.now();
+        void this.refresh(chat);
+      }
+    });
   }
 
   private upsert(summary: ChatSummary): Chat {
@@ -154,11 +203,12 @@ class ChatStore {
     }
   }
 
-  async newChat(): Promise<Chat | null> {
+  /** Opens an empty chat (reusing the current one if it is empty and of the same kind). */
+  async newChat(agentId: string | null = null): Promise<Chat | null> {
     const current = this.active;
-    if (current && current.loaded && current.items.length === 0) return current;
+    if (current && current.loaded && current.items.length === 0 && (current.summary.agent_id ?? null) === agentId) return current;
     try {
-      const summary = await commands.createChat();
+      const summary = await commands.createChat(agentId);
       const chat = this.upsert(summary);
       chat.loaded = true;
       this.activeId = chat.summary.id;
@@ -173,6 +223,8 @@ class ChatStore {
     this.activeId = id;
     const chat = this.active;
     if (chat) await this.ensureLoaded(chat);
+    const agent = chat ? this.agentFor(chat) : null;
+    if (agent) void providerStore.ensureCapabilities(agent.default_model.provider_id, agent.default_model.model);
   }
 
   async rename(chat: Chat, title: string) {
@@ -201,7 +253,7 @@ class ChatStore {
 
   async pickAttachments(chat: Chat) {
     try {
-      const picked = await commands.pickAttachments(providerStore.supportsImages);
+      const picked = await commands.pickAttachments(this.supportsImages(chat));
       for (const a of picked) if (!chat.pending.some((p) => p.id === a.id)) chat.pending.push(a);
     } catch (e) {
       this.error = describeError(e);
@@ -215,7 +267,9 @@ class ChatStore {
   async send(chat: Chat, prompt: string, replaceFrom: string | null = null) {
     const text = prompt.trim();
     if ((!text && chat.pending.length === 0) || chat.activeRunId) return;
-    const selection = providerStore.active;
+    // Agent chats answer with the agent's models (Rust resolves them); plain chats use the picker.
+    const agent = this.agentFor(chat);
+    const selection = agent ? agent.default_model : providerStore.active;
     const attachmentIds = chat.pending.map((a) => a.id);
 
     // Optimistic local turns; replaced by the stored copies once Rust confirms.
@@ -245,7 +299,7 @@ class ChatStore {
     };
 
     if (!selection) {
-      fail("Choose a provider and model first (⌘, / Ctrl+,).");
+      fail(chat.summary.agent_id && !agent ? "This chat's agent was deleted." : "Choose a provider and model first (⌘, / Ctrl+,).");
       return;
     }
 
@@ -253,8 +307,8 @@ class ChatStore {
     try {
       const started = await commands.startRun(
         chat.summary.id,
-        selection.provider_id,
-        selection.model,
+        agent ? null : selection.provider_id,
+        agent ? null : selection.model,
         text,
         attachmentIds,
         replaceFrom,
@@ -287,6 +341,7 @@ class ChatStore {
       const asst = assistantItem();
       if (user?.kind === "user") user.id = started.user_message.id;
       if (asst) asst.id = started.assistant_message.id;
+      chat.summary = started.chat;
       chat.summary.message_count = chat.items.length;
       if (!isTerminal(asst?.turn.phase ?? "queued")) chat.activeRunId = started.run_id;
     } catch (e) {

@@ -2,6 +2,7 @@
 //! closures over a bounded queue and await the result, so database work never blocks Tokio's
 //! worker threads and writes are naturally serialized.
 
+pub mod agents;
 pub mod attachments;
 pub mod chats;
 mod db;

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::db::{now_ms, sql_err};
-use crate::domain::{ChatId, ContentBlock, Message, Role, RunId, Usage};
+use crate::domain::{AgentId, ChatId, ContentBlock, Message, Role, RunId, ScheduleId, Usage};
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -52,6 +52,11 @@ pub struct ChatSummary {
     pub model: Option<String>,
     #[ts(type = "number")]
     pub message_count: i64,
+    /// Set for chats with a user-configured agent; `agent_name` is its current name.
+    pub agent_id: Option<AgentId>,
+    pub agent_name: Option<String>,
+    /// Set for chats created by a schedule run.
+    pub schedule_id: Option<ScheduleId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -105,10 +110,10 @@ fn parse_role(s: &str) -> Role {
     }
 }
 
-fn json<T: Serialize>(v: &T) -> Result<String> {
+pub(super) fn json<T: Serialize>(v: &T) -> Result<String> {
     serde_json::to_string(v).map_err(|e| Error::Internal(e.to_string()))
 }
-fn parse_id<T: std::str::FromStr>(s: String, what: &str) -> Result<T> {
+pub(super) fn parse_id<T: std::str::FromStr>(s: String, what: &str) -> Result<T> {
     s.parse()
         .map_err(|_| Error::Internal(format!("corrupt {what} id `{s}`")))
 }
@@ -121,6 +126,9 @@ type SummaryRow = (
     Option<String>,
     Option<String>,
     i64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
 );
 
 fn summary_from_row(r: &Row<'_>) -> rusqlite::Result<SummaryRow> {
@@ -132,6 +140,9 @@ fn summary_from_row(r: &Row<'_>) -> rusqlite::Result<SummaryRow> {
         r.get(4)?,
         r.get(5)?,
         r.get(6)?,
+        r.get(7)?,
+        r.get(8)?,
+        r.get(9)?,
     ))
 }
 fn to_summary(t: SummaryRow) -> Result<ChatSummary> {
@@ -143,12 +154,16 @@ fn to_summary(t: SummaryRow) -> Result<ChatSummary> {
         provider_id: t.4,
         model: t.5,
         message_count: t.6,
+        agent_id: t.7.map(|s| parse_id(s, "agent")).transpose()?,
+        agent_name: t.8,
+        schedule_id: t.9.map(|s| parse_id(s, "schedule")).transpose()?,
     })
 }
 
 const SUMMARY_SELECT: &str =
     "SELECT c.id, c.title, c.created_at, c.updated_at, c.provider_id, c.model,
-    (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) FROM chats c";
+    (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id), c.agent_id, a.name, c.schedule_id
+    FROM chats c LEFT JOIN agents a ON a.id = c.agent_id";
 
 /// Marks messages left in `streaming` state by a previous process as interrupted.
 pub(crate) fn recover_interrupted(conn: &Connection) -> Result<()> {
@@ -168,22 +183,46 @@ pub(crate) fn recover_interrupted(conn: &Connection) -> Result<()> {
 }
 
 pub fn create_chat(conn: &Connection, title: &str) -> Result<ChatSummary> {
+    create_chat_with(conn, title, None, None)
+}
+
+/// Creates a chat, optionally bound to an agent (and the schedule that started it).
+pub fn create_chat_with(
+    conn: &Connection,
+    title: &str,
+    agent_id: Option<AgentId>,
+    schedule_id: Option<ScheduleId>,
+) -> Result<ChatSummary> {
+    if let Some(agent) = agent_id {
+        super::agents::get_agent(conn, agent)?;
+    }
     let id = ChatId::new();
     let now = now_ms();
     conn.execute(
-        "INSERT INTO chats (id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
-        params![id.to_string(), title, now],
+        "INSERT INTO chats (id, title, created_at, updated_at, agent_id, schedule_id)
+         VALUES (?1, ?2, ?3, ?3, ?4, ?5)",
+        params![
+            id.to_string(),
+            title,
+            now,
+            agent_id.map(|a| a.to_string()),
+            schedule_id.map(|s| s.to_string())
+        ],
     )
     .map_err(sql_err)?;
-    Ok(ChatSummary {
-        id,
-        title: title.to_owned(),
-        created_at: now,
-        updated_at: now,
-        provider_id: None,
-        model: None,
-        message_count: 0,
-    })
+    get_summary(conn, id)
+}
+
+pub fn get_summary(conn: &Connection, id: ChatId) -> Result<ChatSummary> {
+    conn.query_row(
+        &format!("{SUMMARY_SELECT} WHERE c.id = ?1"),
+        params![id.to_string()],
+        summary_from_row,
+    )
+    .optional()
+    .map_err(sql_err)?
+    .ok_or_else(|| Error::NotFound(format!("chat {id}")))
+    .and_then(to_summary)
 }
 
 pub fn list_chats(conn: &Connection, limit: usize) -> Result<Vec<ChatSummary>> {
@@ -217,16 +256,7 @@ pub fn search_chats(conn: &Connection, query: &str, limit: usize) -> Result<Vec<
 }
 
 pub fn get_chat(conn: &Connection, id: ChatId) -> Result<ChatDetail> {
-    let chat = conn
-        .query_row(
-            &format!("{SUMMARY_SELECT} WHERE c.id = ?1"),
-            params![id.to_string()],
-            summary_from_row,
-        )
-        .optional()
-        .map_err(sql_err)?
-        .ok_or_else(|| Error::NotFound(format!("chat {id}")))
-        .and_then(to_summary)?;
+    let chat = get_summary(conn, id)?;
     Ok(ChatDetail {
         chat,
         messages: list_messages(conn, id)?,
@@ -431,6 +461,16 @@ pub fn finalize_assistant_message(
     conn.execute(
         "UPDATE messages SET blocks = ?2, status = ?3, usage = ?4, error = ?5, updated_at = ?6 WHERE id = ?1",
         params![message_id, json(&blocks)?, status.as_str(), usage.map(|u| json(&u)).transpose()?, error, now_ms()],
+    )
+    .map_err(sql_err)?;
+    Ok(())
+}
+
+/// Records the model that actually produced a message (after a fallback switch).
+pub fn set_message_model(conn: &Connection, message_id: &str, model: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE messages SET model = ?2 WHERE id = ?1",
+        params![message_id, model],
     )
     .map_err(sql_err)?;
     Ok(())

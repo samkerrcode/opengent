@@ -12,6 +12,10 @@
   import { chatStore } from "$features/chat/chat-store.svelte";
   import { providerStore } from "$features/providers/provider-store.svelte";
   import { mcpStore } from "$features/mcp/mcp-store.svelte";
+  import { agentStore } from "$features/agents/agent-store.svelte";
+  import AgentsView from "$features/agents/AgentsView.svelte";
+  import AgentEditor from "$features/agents/AgentEditor.svelte";
+  import { nav } from "$lib/state/nav.svelte";
 
   let appInfo = $state<AppInfo | null>(null);
   let bootError = $state<string | null>(null);
@@ -22,11 +26,12 @@
     try {
       appInfo = await commands.getAppInfo();
       void mcpStore.init();
-      await Promise.all([providerStore.load(), chatStore.loadList()]);
+      void chatStore.initBackground();
+      await Promise.all([providerStore.load(), chatStore.loadList(), agentStore.init()]);
     } catch (e) {
       bootError = describeError(e);
     }
-    const empty = chatStore.chats.find((c) => c.summary.message_count === 0);
+    const empty = chatStore.chats.find((c) => c.summary.message_count === 0 && !c.summary.agent_id);
     if (empty) await chatStore.select(empty.summary.id);
     else await chatStore.newChat();
   });
@@ -36,6 +41,7 @@
     if (!mod) return;
     if (e.key.toLowerCase() === "n") {
       e.preventDefault();
+      nav.showChat();
       void chatStore.newChat();
     } else if (e.key === ",") {
       e.preventDefault();
@@ -100,10 +106,16 @@
         <strong>{product.displayName} could not start.</strong>
         <span>{bootError}</span>
       </div>
+    {:else if nav.view.kind === "agents"}
+      <AgentsView />
+    {:else if nav.view.kind === "agent"}
+      {#key nav.view.agentId}
+        <AgentEditor agentId={nav.view.agentId} onopenconnections={() => (connectionsOpen = true)} />
+      {/key}
     {:else if chatStore.active}
       <ChatView chat={chatStore.active} onopensettings={() => (settingsOpen = true)} onopenconnections={() => (connectionsOpen = true)} />
     {/if}
-    {#if chatStore.error}
+    {#if chatStore.error && nav.view.kind === "chat"}
       <div class="toast" role="alert">
         <span>{chatStore.error}</span>
         <button class="btn-ghost btn-sm" onclick={() => (chatStore.error = null)} aria-label="Dismiss">✕</button>

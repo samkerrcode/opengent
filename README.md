@@ -13,7 +13,9 @@ everything privileged: networking, secrets, persistence, the MCP client, and the
 > Markdown-rendered replies, and attach MCP servers (stdio + Streamable HTTP) whose tools the
 > model can call under per-tool Always allow / Ask / Block policies. Chats persist between
 > launches in `~/.opengent`, with search, rename, attachments (including images on
-> vision-capable models), and recovery of interrupted runs. See [Roadmap](#roadmap) and
+> vision-capable models), and recovery of interrupted runs. **Agents** bundle a role, default +
+> fallback models, instructions and a tool selection, and can run on schedules (with run-once or
+> skip handling for runs missed while the app was closed). See [Roadmap](#roadmap) and
 > [docs/features.md](docs/features.md) for the feature guide.
 
 ---
@@ -60,6 +62,7 @@ Svelte UI  ──typed commands / ordered Channel──▶  Tauri host (src-taur
                                              ├── config      product identity, data root
                                              ├── domain      ids, messages, run events
                                              ├── agent       run coordinator, event emitter
+                                             ├── agents      user agents, schedule math
                                              ├── providers   ModelProvider trait + adapters
                                              ├── secrets     SecretStore (Keychain / Cred. Manager)
                                              └── mcp         rmcp client (stdio, Streamable HTTP)
@@ -177,6 +180,16 @@ Each phase has an acceptance gate that must pass before the next begins.
   `mcp.json` is owner-only (0600); remote connections never follow redirects; cancelled
   calls send `notifications/cancelled`. Mock servers for dev: `mock-mcp-server.mjs`
   (stdio + `--http`, `--many N` filler tools) and the mock OpenAI server can emit tool calls.
+
+### Agents & schedules (beyond the phase plan)
+
+- **Agents** sidebar area: intro page, agent cards, editor for name, description, default and
+  fallback model, instructions (appended to a built-in agent system prompt), and per-server MCP
+  tool selection. Agent chats reuse the chat UI with the agent's name and models.
+- **Fallback model**: switches once per run when the default fails before any output.
+- **Schedules**: once / interval / weekdays-at-time; missed runs (app closed, machine asleep)
+  are run once on return or skipped, per schedule. Runs stream live and accept approvals when
+  the chat is open. See [docs/features.md](docs/features.md#agents).
 
 ### Known gaps
 

@@ -8,7 +8,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::domain::{ContentBlock, RunEvent, RunEventPayload, Usage};
-use crate::storage::chats::{checkpoint_assistant_blocks, finalize_assistant_message};
+use crate::storage::chats::{
+    checkpoint_assistant_blocks, finalize_assistant_message, set_message_model,
+};
 use crate::storage::{Db, MessageStatus};
 
 use super::RunSink;
@@ -112,6 +114,12 @@ impl<S: RunSink> RunRecorder<S> {
                 self.maybe_checkpoint(&mut p, true);
             }
             RunEventPayload::Usage { usage } => p.usage = Some(*usage),
+            // Attribute the message to the model that actually answered.
+            RunEventPayload::ModelSwitched { model, .. } => {
+                let (id, model) = (self.message_id.clone(), model.clone());
+                self.db
+                    .spawn_job(move |conn| set_message_model(conn, &id, &model));
+            }
             RunEventPayload::Completed { .. } => self.finish(&mut p, MessageStatus::Complete, None),
             RunEventPayload::Cancelled => self.finish(&mut p, MessageStatus::Cancelled, None),
             RunEventPayload::Failed { message } => {

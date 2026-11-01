@@ -14,6 +14,12 @@ const MAX_CONCURRENT_RUNS: usize = 4;
 /// App event emitted whenever MCP connection status, tool catalogs or policies change;
 /// the UI refetches `list_mcp_servers` on it.
 pub const MCP_CHANGED_EVENT: &str = "mcp-changed";
+/// Emitted when the scheduler updates schedules (next due time, last outcome).
+pub const AGENTS_CHANGED_EVENT: &str = "agents-changed";
+/// A scheduled run started (payload: `RunStarted`); its events follow as `BACKGROUND_RUN_EVENT`.
+pub const BACKGROUND_RUN_STARTED_EVENT: &str = "background-run-started";
+/// One `RunEvent` of a scheduled run (interactive runs use their own channel instead).
+pub const BACKGROUND_RUN_EVENT: &str = "background-run-event";
 
 pub struct AppState {
     pub data_root: DataRoot,

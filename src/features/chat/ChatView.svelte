@@ -6,6 +6,7 @@
   import { attachmentDataUrl } from "$lib/attachments";
   import { product } from "$lib/generated/product";
   import { providerStore } from "$features/providers/provider-store.svelte";
+  import { nav } from "$lib/state/nav.svelte";
 
   let { chat, onopensettings, onopenconnections }: { chat: Chat; onopensettings: () => void; onopenconnections: () => void } = $props();
 
@@ -17,6 +18,8 @@
   let expectedTop: number | null = null;
   let editingTitle = $state(false);
   let titleDraft = $state("");
+
+  const agent = $derived(chatStore.agentFor(chat));
 
   const suggestions = [
     "Explain the difference between threads and async tasks",
@@ -111,6 +114,12 @@
   {:else}
     <button class="title" onclick={startRename} title="Rename">{chat.summary.title}</button>
   {/if}
+  {#if agent}
+    <button class="agent-badge" onclick={() => nav.editAgent(agent.id)} title="Configure {agent.name}">
+      <span class="agent-dot" aria-hidden="true">{agent.name.slice(0, 1).toUpperCase()}</span>{agent.name}
+    </button>
+    {#if chat.summary.schedule_id}<span class="topbar-meta" title="Started by a schedule">⏱ scheduled</span>{/if}
+  {/if}
   {#if chat.summary.model}<span class="topbar-meta">{chat.summary.model}</span>{/if}
 </header>
 
@@ -118,6 +127,17 @@
   <div class="column">
     {#if !chat.loaded}
       <p class="loading">Loading…</p>
+    {:else if chat.items.length === 0 && agent}
+      <section class="empty">
+        <div class="mark agent-mark" aria-hidden="true">{agent.name.slice(0, 1).toUpperCase()}</div>
+        <h1>{agent.name}</h1>
+        {#if agent.description}<p>{agent.description}</p>{/if}
+        <p class="agent-meta">
+          Answers with <strong>{agent.default_model.model}</strong>{#if agent.fallback_model}, falling back to <strong>{agent.fallback_model.model}</strong>{/if}
+          · {agent.servers.length ? `${agent.servers.length} tool server${agent.servers.length === 1 ? "" : "s"}` : "no tools"}
+        </p>
+        <button class="btn-ghost btn-sm" onclick={() => nav.editAgent(agent.id)}>Configure agent</button>
+      </section>
     {:else if chat.items.length === 0}
       <section class="empty">
         <div class="mark" aria-hidden="true"></div>
@@ -165,7 +185,7 @@
           {#if item.text}<p>{item.text}</p>{/if}
         </article>
       {:else}
-        <AssistantTurnView turn={item.turn} model={item.model} onretry={() => chatStore.retry(chat)} />
+        <AssistantTurnView turn={item.turn} model={item.turn.switchedModel ?? item.model} onretry={() => chatStore.retry(chat)} />
       {/if}
     {/each}
   </div>
@@ -179,6 +199,9 @@
   bind:this={composer}
   busy={chat.activeRunId !== null}
   pending={chat.pending}
+  {agent}
+  supportsImages={chatStore.supportsImages(chat)}
+  onopenagent={() => agent && nav.editAgent(agent.id)}
   onsend={(text) => chatStore.send(chat, text)}
   onstop={() => chatStore.stop(chat)}
   onattach={() => chatStore.pickAttachments(chat)}
@@ -214,6 +237,42 @@
     padding: 4px 8px;
     margin-left: -8px;
     font-weight: 600;
+  }
+  .agent-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 10px 2px 3px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    font-size: 12.5px;
+    font-weight: 500;
+    flex: none;
+  }
+  .agent-badge:hover {
+    border-color: var(--accent);
+  }
+  .agent-dot {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--accent-fg);
+    font-size: 10.5px;
+    font-weight: 700;
+    display: grid;
+    place-items: center;
+  }
+  .agent-mark {
+    display: grid;
+    place-items: center;
+    background: var(--accent);
+    color: var(--accent-fg);
+    font-weight: 700;
+    font-size: 18px;
+  }
+  .agent-meta {
+    font-size: 13px;
   }
   .topbar-meta {
     font-size: 12px;

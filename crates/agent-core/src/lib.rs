@@ -6,6 +6,7 @@
 //! services through the small traits defined here.
 
 pub mod agent;
+pub mod agents;
 pub mod config;
 pub mod domain;
 pub mod error;

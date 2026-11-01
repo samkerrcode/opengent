@@ -64,6 +64,7 @@ async fn store_builds_provider_and_run_completes() {
         &Default::default(),
         false,
         &Default::default(),
+        &Default::default(),
     );
     let coord = RunCoordinator::new(1, tokio::runtime::Handle::current());
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -75,6 +76,7 @@ async fn store_builds_provider_and_run_completes() {
                 completion: compiled.request,
                 tools: None,
                 notices: vec![],
+                fallback: None,
             },
             tx,
         )

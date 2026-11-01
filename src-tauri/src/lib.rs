@@ -3,6 +3,7 @@
 //! `agent-core`, never in the frontend.
 
 mod commands;
+mod scheduler;
 mod state;
 
 use tauri::Manager;
@@ -27,6 +28,8 @@ pub fn run() {
             // Bring up enabled MCP servers in the background; status flows via mcp-changed.
             state.mcp.autoconnect();
             app.manage(state);
+            // Agent schedules: catch up on runs missed while closed/asleep, then keep ticking.
+            scheduler::spawn(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -59,6 +62,14 @@ pub fn run() {
             commands::get_tool_settings,
             commands::set_tool_settings,
             commands::resolve_tool_approval,
+            commands::list_agents,
+            commands::save_agent,
+            commands::delete_agent,
+            commands::list_schedules,
+            commands::save_schedule,
+            commands::set_schedule_enabled,
+            commands::delete_schedule,
+            commands::run_schedule_now,
         ])
         .build(tauri::generate_context!())
         .expect("error while building the desktop application")

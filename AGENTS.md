@@ -8,8 +8,10 @@ Design/roadmap: see the phased plan in README.md.
 - `product.json` – single source of product identity (display name, slug, data dir, bundle id, version).
   `scripts/product.mjs` generates `src/lib/generated/product.ts` and `src-tauri/tauri.product.conf.json`;
   `crates/agent-core/build.rs` exposes the same fields to Rust as `PRODUCT_*` env vars.
-- `crates/agent-core` – UI-independent runtime (config, domain, agent loop, providers, secrets, mcp). No Tauri deps.
-- `src-tauri` – Tauri host: `AppState`, IPC commands, capabilities, CSP.
+- `crates/agent-core` – UI-independent runtime (config, domain, agent loop, providers, secrets, mcp, `agents` =
+  user-configured agents + schedule math). No Tauri deps. SQLite migrations are append-only (`storage/migrations.rs`).
+- `src-tauri` – Tauri host: `AppState`, IPC commands, capabilities, CSP. `commands::launch_run` is the single
+  run entry point (interactive chats and `scheduler.rs` background runs).
 - `src` – Svelte frontend. `src/lib/generated/bindings` are ts-rs outputs from Rust DTOs (committed; CI checks drift).
 
 ## Commands

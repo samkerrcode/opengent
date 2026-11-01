@@ -1,10 +1,9 @@
 <script lang="ts">
   import ModelPicker from "$features/providers/ModelPicker.svelte";
-  import { providerStore } from "$features/providers/provider-store.svelte";
   import ToolsMenu from "$features/mcp/ToolsMenu.svelte";
   import { mcpStore } from "$features/mcp/mcp-store.svelte";
   import { attachmentDataUrl } from "$lib/attachments";
-  import type { AttachmentMeta } from "$lib/ipc/commands";
+  import type { Agent, AttachmentMeta } from "$lib/ipc/commands";
 
   let {
     busy,
@@ -15,9 +14,15 @@
     onremoveattachment,
     onopensettings,
     onopenconnections,
+    agent = null,
+    supportsImages,
+    onopenagent,
   }: {
     busy: boolean;
     pending: AttachmentMeta[];
+    agent?: Agent | null;
+    supportsImages: boolean;
+    onopenagent?: () => void;
     onsend: (text: string) => void;
     onstop: () => void;
     onattach: () => void;
@@ -103,13 +108,25 @@
     ></textarea>
     <div class="row">
       <div class="context">
-        <ModelPicker {onopensettings} />
+        {#if agent}
+          <!-- Agent chats always answer with the agent's configured models. -->
+          <button
+            type="button"
+            class="chip accent agent-chip"
+            onclick={onopenagent}
+            title={`${agent.name} answers with ${agent.default_model.model}${agent.fallback_model ? ` (fallback: ${agent.fallback_model.model})` : ""}. Click to configure.`}
+          >
+            ◆ {agent.name} · {agent.default_model.model}
+          </button>
+        {:else}
+          <ModelPicker {onopensettings} />
+        {/if}
         <button
           type="button"
           class="chip"
           onclick={onattach}
           disabled={busy}
-          title={providerStore.supportsImages
+          title={supportsImages
             ? "Attach files or images (up to 2 MiB each)"
             : "Attach text files (up to 2 MiB each) — the selected model does not accept images"}
         >
@@ -244,6 +261,11 @@
     flex-wrap: wrap;
     align-items: center;
     min-width: 0;
+  }
+  .agent-chip {
+    max-width: 280px;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .tools-anchor {
     position: relative;

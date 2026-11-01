@@ -30,8 +30,26 @@ import type { ToolInfo } from "$lib/generated/bindings/ToolInfo";
 import type { ToolLoading } from "$lib/generated/bindings/ToolLoading";
 import type { ToolPolicy } from "$lib/generated/bindings/ToolPolicy";
 import type { ToolSettings } from "$lib/generated/bindings/ToolSettings";
+import type { Agent } from "$lib/generated/bindings/Agent";
+import type { AgentInput } from "$lib/generated/bindings/AgentInput";
+import type { AgentSchedule } from "$lib/generated/bindings/AgentSchedule";
+import type { AgentServerAccess } from "$lib/generated/bindings/AgentServerAccess";
+import type { MissedRunPolicy } from "$lib/generated/bindings/MissedRunPolicy";
+import type { ModelRef } from "$lib/generated/bindings/ModelRef";
+import type { Recurrence } from "$lib/generated/bindings/Recurrence";
+import type { ScheduleInput } from "$lib/generated/bindings/ScheduleInput";
+import type { ScheduleOutcome } from "$lib/generated/bindings/ScheduleOutcome";
 
 export type {
+  Agent,
+  AgentInput,
+  AgentSchedule,
+  AgentServerAccess,
+  MissedRunPolicy,
+  ModelRef,
+  Recurrence,
+  ScheduleInput,
+  ScheduleOutcome,
   ActiveSelection,
   AppInfo,
   ApprovalDecision,
@@ -77,10 +95,11 @@ export function describeError(error: unknown): string {
 export const commands = {
   getAppInfo: () => invoke<AppInfo>("get_app_info"),
 
+  /** `providerId`/`model` are ignored (pass null) for agent chats: Rust uses the agent's. */
   startRun(
     chatId: ChatId,
-    providerId: string,
-    model: string,
+    providerId: string | null,
+    model: string | null,
     prompt: string,
     attachmentIds: string[],
     replaceFrom: string | null,
@@ -93,7 +112,7 @@ export const commands = {
 
   listChats: () => invoke<ChatSummary[]>("list_chats"),
   searchChats: (query: string) => invoke<ChatSummary[]>("search_chats", { query }),
-  createChat: () => invoke<ChatSummary>("create_chat"),
+  createChat: (agentId: string | null = null) => invoke<ChatSummary>("create_chat", { agentId }),
   getChat: (id: ChatId) => invoke<ChatDetail>("get_chat", { id }),
   renameChat: (id: ChatId, title: string) => invoke<void>("rename_chat", { id, title }),
   deleteChat: (id: ChatId) => invoke<void>("delete_chat", { id }),
@@ -130,4 +149,15 @@ export const commands = {
   setToolSettings: (settings: ToolSettings) => invoke<void>("set_tool_settings", { settings }),
   resolveToolApproval: (runId: RunId, callId: string, decision: ApprovalDecision) =>
     invoke<boolean>("resolve_tool_approval", { runId, callId, decision }),
+
+  // User-configured agents and schedules.
+  listAgents: () => invoke<Agent[]>("list_agents"),
+  saveAgent: (input: AgentInput) => invoke<Agent>("save_agent", { input }),
+  deleteAgent: (id: string) => invoke<void>("delete_agent", { id }),
+  listSchedules: (agentId: string | null = null) => invoke<AgentSchedule[]>("list_schedules", { agentId }),
+  saveSchedule: (input: ScheduleInput) => invoke<AgentSchedule>("save_schedule", { input }),
+  setScheduleEnabled: (id: string, enabled: boolean) =>
+    invoke<AgentSchedule>("set_schedule_enabled", { id, enabled }),
+  deleteSchedule: (id: string) => invoke<void>("delete_schedule", { id }),
+  runScheduleNow: (id: string) => invoke<ChatSummary>("run_schedule_now", { id }),
 };

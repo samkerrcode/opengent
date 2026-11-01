@@ -26,7 +26,7 @@ use super::config::{McpServerConfig, McpStore, McpTransport};
 use super::{client_config, StdioServerSpec};
 use crate::agent::context::{estimate_tokens, tools_prompt, ServerBrief};
 use crate::agent::tools::{
-    resolve_on_demand, RunTools, ToolEntry, ToolFuture, ToolHost, ToolNamer, ToolOutput,
+    resolve_on_demand, RunTools, ToolEntry, ToolFilter, ToolFuture, ToolHost, ToolNamer, ToolOutput,
 };
 use crate::domain::{Message, ToolPolicy};
 use crate::providers::ToolSpec;
@@ -251,6 +251,23 @@ impl McpManager {
             tracing::warn!(error = %e, "failed to persist tool policy");
         }
         self.notify();
+    }
+
+    /// Enabled servers whose first connection attempt hasn't settled (connected or failed).
+    /// The scheduler waits for this to reach zero at startup so catch-up runs see tools.
+    pub fn pending_connections(&self) -> usize {
+        let inner = self.inner.lock().expect("mcp lock");
+        self.store
+            .list()
+            .iter()
+            .filter(|c| c.enabled)
+            .filter(|c| {
+                !matches!(
+                    inner.status.get(&c.id),
+                    Some(McpServerStatus::Connected { .. } | McpServerStatus::Failed { .. })
+                )
+            })
+            .count()
     }
 
     /// Cancels every session; called at app exit. Process-group kill-on-drop guarantees
@@ -678,12 +695,17 @@ impl McpManager {
 
     /// The run-facing snapshot: a catalog of non-blocked tools from connected, enabled
     /// servers plus the system-prompt addition and the estimated definition cost.
-    /// `history` restores the on-demand loaded set. Returns `None` when nothing is callable.
+    /// `history` restores the on-demand loaded set. `filter` (agents) restricts the catalog
+    /// to some servers/tools. Returns `None` when nothing is callable.
     pub fn prepare_tools(
         self: &Arc<Self>,
         history: &[Message],
         context_window: u32,
+        filter: Option<&ToolFilter>,
     ) -> Option<(RunTools, String, u32)> {
+        if filter.is_some_and(ToolFilter::is_empty) {
+            return None;
+        }
         let settings = self.store.settings();
         let mut catalog = Vec::new();
         let mut briefs = Vec::new();
@@ -698,6 +720,14 @@ impl McpManager {
                 let Some(live) = inner.live.get(&config.id) else {
                     continue;
                 };
+                let in_filter = |tool: &str| filter.is_none_or(|f| f.allows_tool(&config.id, tool));
+                if filter.is_some_and(|f| !f.allows_server(&config.id)) {
+                    // Still feed the namer so exposed names match unfiltered runs.
+                    for t in live.tools.lock().expect("tools lock").iter() {
+                        namer.name(&config.name, &t.name);
+                    }
+                    continue;
+                }
                 let mut count = 0usize;
                 let mut skipped = 0usize;
                 let mut disabled = Vec::new();
@@ -706,6 +736,9 @@ impl McpManager {
                     // Name every tool in list order so exposed names stay stable when tools
                     // are disabled or skipped.
                     let exposed = namer.name(&config.name, &t.name);
+                    if !in_filter(&t.name) {
+                        continue;
+                    }
                     if self.store.policy_for(&config.id, &t.name) == ToolPolicy::Block {
                         // Named but never defined: the model can explain it's disabled.
                         if disabled.len() < MAX_DISABLED_LISTED {
@@ -752,6 +785,9 @@ impl McpManager {
                 }
                 if skipped > 0 {
                     tracing::warn!(server = %config.name, skipped, "skipped tools with oversized schemas");
+                }
+                if count == 0 && disabled.is_empty() && disabled_extra == 0 && filter.is_some() {
+                    continue;
                 }
                 briefs.push(ServerBrief {
                     name: config.name.clone(),

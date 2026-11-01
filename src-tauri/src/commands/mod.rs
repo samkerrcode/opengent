@@ -1,23 +1,29 @@
 //! IPC boundary. Every command validates its input, touches state only through `AppState`,
 //! and returns serializable DTOs. Secrets are never returned to the webview.
 
+mod agents;
 mod chats;
 mod mcp;
 mod providers;
 
+pub use agents::*;
 pub use chats::*;
 pub use mcp::*;
 pub use providers::*;
 
 use std::collections::HashMap;
 
-use agent_core::agent::context::{self, AttachmentContent, ToolContext};
-use agent_core::agent::{RunRecorder, RunRequest, RunSink};
+use agent_core::agent::context::{
+    self, AgentPrompt, AttachmentContent, PromptProfile, ToolContext,
+};
+use agent_core::agent::{FallbackModel, RunRecorder, RunRequest, RunSink};
+use agent_core::agents::Agent;
 use agent_core::config::{product, ProductInfo};
 use agent_core::domain::{ChatId, ContentBlock, Role, RunEvent, RunId};
 use agent_core::secrets::SecretRef;
+use agent_core::storage::agents as agents_repo;
 use agent_core::storage::chats as repo;
-use agent_core::storage::StoredMessage;
+use agent_core::storage::{ChatSummary, StoredMessage};
 use agent_core::Error;
 use serde::Serialize;
 use tauri::ipc::Channel;
@@ -65,30 +71,74 @@ impl RunSink for ChannelSink {
 #[ts(export)]
 pub struct RunStarted {
     pub run_id: RunId,
+    /// The chat after the user turn was stored (title, agent, counts).
+    pub chat: ChatSummary,
     pub user_message: StoredMessage,
     pub assistant_message: StoredMessage,
 }
 
 /// Persists the user turn, creates the assistant placeholder, compiles context from stored
 /// history and starts streaming. If `replace_from` is set (retry), that message and everything
-/// after it is removed first.
+/// after it is removed first. Agent chats ignore `provider_id`/`model`: their models, tools
+/// and prompt come from the stored agent.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn start_run(
     state: State<'_, AppState>,
     chat_id: ChatId,
-    provider_id: String,
-    model: String,
+    provider_id: Option<String>,
+    model: Option<String>,
     prompt: String,
     attachment_ids: Vec<String>,
     replace_from: Option<String>,
     on_event: Channel<RunEvent>,
 ) -> Result<RunStarted, Error> {
-    let model = model.trim().to_owned();
+    launch_run(
+        &state,
+        RunParams {
+            chat_id,
+            selection: provider_id.zip(model),
+            prompt,
+            attachment_ids,
+            replace_from,
+            unattended: false,
+        },
+        ChannelSink(on_event),
+        |_| {},
+    )
+    .await
+}
+
+/// Inputs to `launch_run`.
+pub(crate) struct RunParams {
+    pub chat_id: ChatId,
+    /// Provider + model for plain chats; ignored for agent chats.
+    pub selection: Option<(String, String)>,
+    pub prompt: String,
+    pub attachment_ids: Vec<String>,
+    pub replace_from: Option<String>,
+    /// Started by a schedule (nobody is watching).
+    pub unattended: bool,
+}
+
+/// Shared by interactive chats and scheduled runs. `on_prepared` runs after the turn is
+/// stored and right before streaming starts (the scheduler announces the run there so the
+/// UI sees it before its first event).
+pub(crate) async fn launch_run<S: RunSink>(
+    state: &AppState,
+    params: RunParams,
+    sink: S,
+    on_prepared: impl FnOnce(&RunStarted) + Send,
+) -> Result<RunStarted, Error> {
+    let RunParams {
+        chat_id,
+        selection,
+        prompt,
+        attachment_ids,
+        replace_from,
+        unattended,
+    } = params;
     let prompt = prompt.trim().to_owned();
-    if model.is_empty() {
-        return Err(Error::InvalidInput("choose a model first".into()));
-    }
     if prompt.is_empty() && attachment_ids.is_empty() {
         return Err(Error::InvalidInput("prompt is empty".into()));
     }
@@ -104,11 +154,82 @@ pub async fn start_run(
         return Err(Error::RunBusy);
     }
 
-    let provider = state.providers.build(&provider_id)?;
+    // Rust owns agent configuration: an agent chat's models, tools and prompt are read from
+    // the database, never taken from the webview.
+    let agent = state
+        .db
+        .call(move |c| {
+            repo::get_summary(c, chat_id)?
+                .agent_id
+                .map(|a| agents_repo::get_agent(c, a))
+                .transpose()
+        })
+        .await?;
+    let (provider_id, model) = match &agent {
+        Some(a) => (
+            a.default_model.provider_id.clone(),
+            a.default_model.model.clone(),
+        ),
+        None => selection
+            .map(|(p, m)| (p, m.trim().to_owned()))
+            .filter(|(_, m)| !m.is_empty())
+            .ok_or_else(|| Error::InvalidInput("choose a model first".into()))?,
+    };
+    let missing_provider = |e: Error| {
+        match (&agent, e) {
+        (Some(a), Error::NotFound(_)) => Error::InvalidInput(format!(
+            "the model provider for agent \"{}\" was removed — edit the agent to choose another model",
+            a.name
+        )),
+        (_, e) => e,
+    }
+    };
+
+    let provider = state
+        .providers
+        .build(&provider_id)
+        .map_err(missing_provider)?;
     // capabilities_for resolves the context window per provider+model:
     // per-model override → provider default → adapter-declared.
-    let caps = state.providers.capabilities_for(&provider_id, &model)?;
-    let context_window = caps.context_window;
+    let caps = state
+        .providers
+        .capabilities_for(&provider_id, &model)
+        .map_err(missing_provider)?;
+    let mut context_window = caps.context_window;
+    let mut notices = Vec::new();
+
+    // Agent fallback: resolved up front so a broken fallback is reported, not discovered
+    // mid-failure. The request is compiled to fit the smaller of the two windows.
+    let mut fallback = None;
+    if let Some(fb) = agent.as_ref().and_then(|a| a.fallback_model.clone()) {
+        let resolved = state.providers.build(&fb.provider_id).and_then(|p| {
+            Ok((
+                p,
+                state
+                    .providers
+                    .capabilities_for(&fb.provider_id, &fb.model)?,
+            ))
+        });
+        match resolved {
+            Ok((p, fb_caps)) => {
+                context_window = Some(
+                    context_window
+                        .unwrap_or(context::DEFAULT_CONTEXT_TOKENS)
+                        .min(
+                            fb_caps
+                                .context_window
+                                .unwrap_or(context::DEFAULT_CONTEXT_TOKENS),
+                        ),
+                );
+                fallback = Some(FallbackModel {
+                    provider: p,
+                    provider_id: fb.provider_id,
+                    model: fb.model,
+                });
+            }
+            Err(e) => notices.push(format!("The fallback model is unavailable ({e}).")),
+        }
+    }
     let run_id = RunId::new();
 
     // One database round trip: truncate (retry), persist the user turn, create the placeholder,
@@ -179,10 +300,11 @@ pub async fn start_run(
                     }
                 }
             }
-            Ok((user_id, assistant_id, messages, contents))
+            let chat = repo::get_summary(conn, chat_id)?;
+            Ok((user_id, assistant_id, messages, contents, chat))
         })
         .await?;
-    let (user_id, assistant_id, messages, contents) = prepared;
+    let (user_id, assistant_id, messages, contents, chat) = prepared;
 
     let user_message = messages
         .iter()
@@ -204,12 +326,15 @@ pub async fn start_run(
 
     // Tool snapshot: catalog from connected servers (skipped when the model can't call
     // tools), the system-prompt section, and a token reservation for the definitions.
+    // Agents only see the servers/tools they were configured with.
     let mut tool_ctx = ToolContext::default();
     let mut run_tools = None;
+    let filter = agent.as_ref().map(Agent::tool_filter);
     if caps.tools {
         if let Some((tools, prompt, def_tokens)) = state.mcp.prepare_tools(
             &history,
             context_window.unwrap_or(context::DEFAULT_CONTEXT_TOKENS),
+            filter.as_ref(),
         ) {
             tool_ctx.definition_tokens = def_tokens;
             tool_ctx.prompt = prompt;
@@ -217,6 +342,15 @@ pub async fn start_run(
         }
     }
 
+    let profile = match &agent {
+        Some(a) => PromptProfile::Agent(AgentPrompt {
+            name: a.name.clone(),
+            description: a.description.clone(),
+            instructions: a.system_prompt.clone(),
+            unattended,
+        }),
+        None => PromptProfile::Default,
+    };
     let compiled = context::compile(
         &model,
         &history,
@@ -224,8 +358,8 @@ pub async fn start_run(
         &contents,
         caps.images,
         &tool_ctx,
+        &profile,
     );
-    let mut notices = Vec::new();
     if compiled.trimmed_messages > 0 {
         notices.push(format!(
             "Older messages were left out to fit the model's context window ({} omitted).",
@@ -233,8 +367,15 @@ pub async fn start_run(
         ));
     }
 
-    let sink = RunRecorder::new(ChannelSink(on_event), state.db.clone(), assistant_id);
-    let started = state.coordinator.start_with_id(
+    let started = RunStarted {
+        run_id,
+        chat,
+        user_message,
+        assistant_message,
+    };
+    on_prepared(&started);
+    let sink = RunRecorder::new(sink, state.db.clone(), assistant_id);
+    let result = state.coordinator.start_with_id(
         run_id,
         RunRequest {
             chat_id,
@@ -242,11 +383,12 @@ pub async fn start_run(
             completion: compiled.request,
             tools: run_tools,
             notices,
+            fallback,
         },
         sink,
     );
-    if let Err(e) = started {
-        let id = assistant_message.id.clone();
+    if let Err(e) = result {
+        let id = started.assistant_message.id.clone();
         let msg = e.to_string();
         state.db.spawn_job(move |c| {
             repo::finalize_assistant_message(
@@ -260,11 +402,7 @@ pub async fn start_run(
         });
         return Err(e);
     }
-    Ok(RunStarted {
-        run_id,
-        user_message,
-        assistant_message,
-    })
+    Ok(started)
 }
 
 #[tauri::command]

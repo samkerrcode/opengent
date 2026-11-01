@@ -78,6 +78,13 @@ pub enum RunEventPayload {
     Notice {
         message: String,
     },
+    /// The model failed before producing output and the run continues on a fallback model
+    /// (agents with a configured fallback). `reason` is the primary model's error.
+    ModelSwitched {
+        provider_id: String,
+        model: String,
+        reason: String,
+    },
     /// The model requested a tool call. Followed by `ToolStatus` and finally `ToolResult`.
     ToolCall {
         call: ToolCallInfo,

@@ -7,6 +7,8 @@ document stays scannable as the app grows.
 - [Chat](#chat)
 - [Providers & models](#providers--models)
 - [Connections (MCP tools)](#connections-mcp-tools)
+- [Agents](#agents)
+- [Scheduled agent runs](#scheduled-agent-runs)
 - [Attachments](#attachments)
 - [History & persistence](#history--persistence)
 - [Secrets](#secrets)
@@ -77,6 +79,63 @@ a recovered login-shell PATH so `npx`/`uvx` resolve from GUI launches. Server-su
 metadata (descriptions, schemas) is treated as untrusted and bounded before it reaches the
 model. MCP auth (OAuth) is Phase 4 — remote servers that need browser sign-in can't
 connect yet.
+
+## Agents
+
+**What it does.** Reusable assistants with their own name, description, default model,
+optional fallback model, instructions, and a restricted set of MCP servers/tools. Agent chats
+use the regular chat interface, labeled with the agent's name.
+
+**How to use it.** Click **Agents** in the sidebar. With no agents you get an intro page and a
+*Create your first agent* button. The editor has four sections: *Identity* (name, description),
+*Models* (default + optional fallback), *Instructions* (your system prompt), and *Tools* (tick
+MCP servers; per server choose *All tools* — including ones the server adds later — or
+*Selected tools*). **Save & start chat** opens a new chat with the agent; the composer shows
+the agent chip instead of the model picker. Agent cards also offer **Chat** and **Configure**.
+
+**How it works.** Agents are stored in SQLite (`agents` table; config as JSON). Chats carry an
+`agent_id`, and Rust resolves the agent's models, tools and prompt at run time — the webview
+never supplies them for agent chats. The system prompt is a built-in agent prompt
+(`agent_system_prompt` in `agent/context.rs`: identity, operating rules, untrusted-data
+handling, and an unattended-run section for schedules), then the tools section, then your
+instructions appended verbatim under *Agent instructions*. Tools outside the agent's selection
+are neither offered nor named (`ToolFilter` in `agent/tools.rs`, applied in
+`McpManager::prepare_tools`); global Always allow / Ask / Block policies still apply to the
+rest. The fallback model is used once per run when the default fails **before producing any
+output** (connection/auth/model errors); the turn shows a notice and is attributed to the
+fallback model (`ModelSwitched` run event). Context is budgeted for the smaller of the two
+models' windows.
+
+**Limits.** The fallback does not engage after partial output (it would duplicate text).
+Image attachments are gated on the default model's capabilities. Deleting an agent removes its
+schedules; its chats remain as plain chats.
+
+## Scheduled agent runs
+
+**What it does.** Runs an agent with a preset prompt once, every N minutes/hours/days, or on
+chosen weekdays at a local time. Each run opens a new chat (marked ⏱ in the sidebar).
+
+**How to use it.** In a saved agent's editor, **Add schedule**: prompt, repeat rule, what to do
+with missed runs, enabled. Each schedule shows its next run, last outcome (with a link to the
+chat), a pause toggle, **Run now**, Edit and Delete.
+
+**Missed runs.** If the app was closed or the computer asleep at the scheduled time, the
+schedule's policy decides: **Run it once when the app is back** (several missed occurrences
+coalesce into one catch-up run) or **Skip it** and wait for the next time. A run counts as
+missed when first seen more than 2 minutes after it was due.
+
+**How it works.** `agents/schedule.rs` holds the pure logic (`next_after`, `plan_due`,
+DST-aware weekday times via chrono in the OS time zone). `src-tauri/src/scheduler.rs` ticks
+every 20 s against wall-clock time (so sleep is detected even though timers pause), persists the
+decision *before* starting the run (no double fires after a crash), and waits up to 30 s at
+startup for MCP servers to connect so catch-up runs have their tools. Scheduled runs stream
+over app events (`background-run-started`, `background-run-event`); if the chat is open you see
+it live and can answer approval prompts. The agent is told the run is unattended and must not
+wait for answers.
+
+**Limits.** Runs only while the app is open (no OS-level launch agent). Tool calls that need
+approval are auto-denied after 15 minutes if nobody answers. Interval schedules count from when
+they were saved/last ran, not from a fixed clock time. No OS notifications yet.
 
 ## Attachments
 

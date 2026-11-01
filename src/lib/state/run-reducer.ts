@@ -28,13 +28,15 @@ export interface AssistantTurn {
   stopReason: StopReason | null;
   error: string | null;
   notices: string[];
+  /** Set when an agent's fallback model took over; the model that actually answered. */
+  switchedModel: string | null;
   lastSeq: number;
   /** Set when a sequence gap was observed; the UI should request a snapshot (Phase 1+). */
   desynced: boolean;
 }
 
 export function emptyTurn(): AssistantTurn {
-  return { runId: null, phase: "queued", segments: [], usage: null, stopReason: null, error: null, notices: [], lastSeq: -1, desynced: false };
+  return { runId: null, phase: "queued", segments: [], usage: null, stopReason: null, error: null, notices: [], switchedModel: null, lastSeq: -1, desynced: false };
 }
 
 export function isTerminal(phase: RunPhase): boolean {
@@ -93,6 +95,10 @@ export function applyRunEvent(turn: AssistantTurn, event: RunEvent): AssistantTu
       break;
     case "notice":
       next.notices = [...turn.notices, p.message];
+      break;
+    case "model_switched":
+      next.switchedModel = p.model;
+      next.notices = [...turn.notices, `The default model failed (${p.reason}). Continued with the fallback model ${p.model}.`];
       break;
     case "tool_call":
       next.segments = [...turn.segments, { kind: "tool", call: p.call, status: "running", content: null, isError: false }];

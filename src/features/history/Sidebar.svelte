@@ -2,6 +2,18 @@
   import { product } from "$lib/generated/product";
   import type { AppInfo } from "$lib/ipc/commands";
   import { chatStore } from "$features/chat/chat-store.svelte";
+  import { agentStore } from "$features/agents/agent-store.svelte";
+  import { nav } from "$lib/state/nav.svelte";
+
+  async function openChat(id: string) {
+    nav.showChat();
+    await chatStore.select(id);
+  }
+
+  async function newChat() {
+    nav.showChat();
+    await chatStore.newChat();
+  }
 
   let { appInfo, onopensettings, onopenconnections }: { appInfo: AppInfo | null; onopensettings: () => void; onopenconnections: () => void } = $props();
 
@@ -28,9 +40,20 @@
     <span class="name">{product.displayName}</span>
   </header>
 
-  <button class="new-chat" onclick={() => chatStore.newChat()} title="New chat (⌘N / Ctrl+N)">
+  <button class="new-chat" onclick={newChat} title="New chat (⌘N / Ctrl+N)">
     <span class="plus" aria-hidden="true">+</span> New chat
     <kbd>⌘N</kbd>
+  </button>
+
+  <button
+    class="nav-item"
+    class:active={nav.view.kind !== "chat"}
+    aria-current={nav.view.kind !== "chat" ? "page" : undefined}
+    onclick={() => nav.showAgents()}
+    title="Your agents"
+  >
+    <span class="nav-ico" aria-hidden="true">◆</span> Agents
+    {#if agentStore.agents.length}<span class="count">{agentStore.agents.length}</span>{/if}
   </button>
 
   <label class="search">
@@ -43,13 +66,18 @@
       <div class="group-label" id="group-{group.label}">{group.label}</div>
       <ul class="group" aria-labelledby="group-{group.label}">
         {#each group.chats as chat (chat.summary.id)}
-          <li class="row" class:active={chat.summary.id === chatStore.activeId}>
+          {@const current = nav.view.kind === "chat" && chat.summary.id === chatStore.activeId}
+          <li class="row" class:active={current}>
             <button
               class="chat-item"
-              aria-current={chat.summary.id === chatStore.activeId ? "page" : undefined}
-              onclick={() => chatStore.select(chat.summary.id)}
+              aria-current={current ? "page" : undefined}
+              onclick={() => openChat(chat.summary.id)}
+              title={chat.summary.agent_name ? `${chat.summary.agent_name}${chat.summary.schedule_id ? " · scheduled run" : ""}` : undefined}
             >
               {#if chat.activeRunId}<span class="dot" role="img" aria-label="generating"></span>{/if}
+              {#if chat.summary.agent_name}
+                <span class="agent-tag" aria-label="Agent {chat.summary.agent_name}">{chat.summary.schedule_id ? "⏱" : chat.summary.agent_name.slice(0, 1).toUpperCase()}</span>
+              {/if}
               <span class="chat-title">{chat.summary.title}</span>
             </button>
             <button
@@ -126,6 +154,41 @@
     font: inherit;
     font-size: 11px;
     color: var(--fg-faint);
+  }
+  .nav-item {
+    justify-content: flex-start;
+    padding: 7px 10px;
+    color: var(--fg-muted);
+  }
+  .nav-item:hover {
+    background: var(--bg-hover);
+    color: var(--fg);
+  }
+  .nav-item.active {
+    background: var(--accent-soft);
+    color: var(--fg);
+  }
+  .nav-ico {
+    color: var(--accent);
+    font-size: 12px;
+  }
+  .count {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--fg-faint);
+  }
+  .agent-tag {
+    flex: none;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 3px;
+    border-radius: 5px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 10px;
+    font-weight: 700;
+    display: grid;
+    place-items: center;
   }
   .search input {
     padding: 6px 10px;

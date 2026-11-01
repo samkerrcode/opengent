@@ -18,6 +18,15 @@ describe("applyRunEvent", () => {
     expect(isTerminal(t.phase)).toBe(true);
   });
 
+  it("records a fallback model switch as a notice", () => {
+    let t = emptyTurn();
+    t = applyRunEvent(t, ev(0, { type: "model_switched", provider_id: "p", model: "backup", reason: "offline" }));
+    t = applyRunEvent(t, ev(1, { type: "text_delta", text: "ok" }));
+    expect(t.switchedModel).toBe("backup");
+    expect(t.notices[0]).toContain("backup");
+    expect(t.notices[0]).toContain("offline");
+  });
+
   it("keeps text around tool calls in separate segments", () => {
     let t = emptyTurn();
     t = applyRunEvent(t, ev(0, { type: "text_delta", text: "Checking." }));

@@ -41,6 +41,9 @@ process-wrap = { version = "=10.0.1", default-features = false, features = [
     "job-object",
 ], optional = true }
 base64 = "0.22.1"
+# Local-time schedule math (weekday/time-of-day recurrences across DST). Already in the
+# lockfile via rmcp; `clock` adds the OS time-zone lookup.
+chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1.0.2", features = ["keychain"], optional = true }

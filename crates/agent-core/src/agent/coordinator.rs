@@ -51,6 +51,15 @@ pub struct RunRequest {
     pub tools: Option<RunTools>,
     /// Surfaced to the user before generation starts (e.g. "older messages were trimmed").
     pub notices: Vec<String>,
+    /// Model to switch to when `provider` fails before producing any output in a step.
+    pub fallback: Option<FallbackModel>,
+}
+
+/// A second model a run may switch to once (user-configured agents).
+pub struct FallbackModel {
+    pub provider: Arc<dyn ModelProvider>,
+    pub provider_id: String,
+    pub model: String,
 }
 
 struct PendingApproval {
@@ -196,21 +205,31 @@ struct Step {
     stop_reason: StopReason,
 }
 
-/// Streams a single completion. Returns `None` once a terminal payload has been emitted
-/// (cancel/failure), `Some(step)` when the model finished the turn — possibly with tool calls.
+/// How a generation step ended.
+enum StepEnd {
+    /// The model finished the turn — possibly with tool calls.
+    Done(Step),
+    /// Cancelled; the terminal payload has already been emitted.
+    Cancelled,
+    /// The provider failed. `produced` is whether any output (text, reasoning, tool calls)
+    /// reached the UI first — only a failure before output can be retried on a fallback.
+    Failed { message: String, produced: bool },
+}
+
+/// Streams a single completion.
 async fn stream_step<S: RunSink>(
     provider: &Arc<dyn ModelProvider>,
     completion: &CompletionRequest,
     emitter: &mut RunEmitter<S>,
     cancel: &CancellationToken,
-) -> Option<Step> {
+) -> StepEnd {
     let mut rx = match provider.stream(completion, cancel.clone()) {
         Ok(rx) => rx,
         Err(e) => {
-            emitter.emit(RunEventPayload::Failed {
+            return StepEnd::Failed {
                 message: e.to_string(),
-            });
-            return None;
+                produced: false,
+            }
         }
     };
     emitter.emit(RunEventPayload::Phase {
@@ -222,25 +241,31 @@ async fn stream_step<S: RunSink>(
         calls: Vec::new(),
         stop_reason: StopReason::EndTurn,
     };
+    let mut produced = false;
     loop {
         let flush_at = emitter.flush_deadline();
         tokio::select! {
             biased;
             _ = cancel.cancelled() => {
                 emitter.emit(RunEventPayload::Cancelled);
-                return None;
+                return StepEnd::Cancelled;
             }
             _ = async { match flush_at { Some(t) => tokio::time::sleep_until(t).await, None => std::future::pending().await } } => {
                 emitter.flush();
             }
             ev = rx.recv() => match ev {
                 Some(ProviderEvent::TextDelta(t)) => {
+                    produced = true;
                     step.text.push_str(&t);
                     emitter.push_text(&t);
                 }
-                Some(ProviderEvent::ReasoningDelta(text)) => emitter.push_thinking(&text),
+                Some(ProviderEvent::ReasoningDelta(text)) => {
+                    produced = true;
+                    emitter.push_thinking(&text);
+                }
                 Some(ProviderEvent::Usage(usage)) => emitter.emit(RunEventPayload::Usage { usage }),
                 Some(ProviderEvent::ToolCall { id, name, arguments }) => {
+                    produced = true;
                     let arguments = serde_json::from_str::<Value>(&arguments)
                         .unwrap_or(Value::String(arguments));
                     step.calls.push(ToolCallInfo {
@@ -253,16 +278,11 @@ async fn stream_step<S: RunSink>(
                 }
                 Some(ProviderEvent::Done(stop_reason)) => {
                     step.stop_reason = stop_reason;
-                    return Some(step);
+                    return StepEnd::Done(step);
                 }
-                Some(ProviderEvent::Error(message)) => {
-                    emitter.emit(RunEventPayload::Phase { phase: RunPhase::Failed });
-                    emitter.emit(RunEventPayload::Failed { message });
-                    return None;
-                }
+                Some(ProviderEvent::Error(message)) => return StepEnd::Failed { message, produced },
                 None => {
-                    emitter.emit(RunEventPayload::Failed { message: "provider stream ended unexpectedly".into() });
-                    return None;
+                    return StepEnd::Failed { message: "provider stream ended unexpectedly".into(), produced };
                 }
             },
         }
@@ -313,7 +333,8 @@ async fn run_loop<S: RunSink>(
         emitter.emit(RunEventPayload::Notice { message });
     }
 
-    let provider = request.provider;
+    let mut provider = request.provider;
+    let mut fallback = request.fallback;
     let mut tools = request.tools;
     let mut completion = request.completion;
     let mut tool_steps = 0usize;
@@ -323,8 +344,29 @@ async fn run_loop<S: RunSink>(
         // `find_tools` loads them, and a "always allow" decision can unblock a tool mid-run.
         completion.tools = tools.as_ref().map(|t| t.specs()).unwrap_or_default();
 
-        let Some(step) = stream_step(&provider, &completion, &mut emitter, &cancel).await else {
-            return;
+        let step = match stream_step(&provider, &completion, &mut emitter, &cancel).await {
+            StepEnd::Done(step) => step,
+            StepEnd::Cancelled => return,
+            StepEnd::Failed { message, produced } => {
+                // Switch once, and only before anything was shown: retrying after partial
+                // output would duplicate it. The run then stays on the fallback.
+                if let Some(fb) = fallback.take().filter(|_| !produced) {
+                    tracing::warn!(model = %completion.model, fallback = %fb.model, error = %message, "model failed; switching to fallback");
+                    emitter.emit(RunEventPayload::ModelSwitched {
+                        provider_id: fb.provider_id,
+                        model: fb.model.clone(),
+                        reason: message,
+                    });
+                    provider = fb.provider;
+                    completion.model = fb.model;
+                    continue;
+                }
+                emitter.emit(RunEventPayload::Phase {
+                    phase: RunPhase::Failed,
+                });
+                emitter.emit(RunEventPayload::Failed { message });
+                return;
+            }
         };
         if step.calls.is_empty() || tools.is_none() {
             emitter.emit(RunEventPayload::Phase {
@@ -676,7 +718,98 @@ mod tests {
             },
             tools: None,
             notices: Vec::new(),
+            fallback: None,
         }
+    }
+
+    /// Fails every request, before any output when `after` is empty.
+    struct FailingProvider {
+        after: &'static str,
+    }
+
+    impl ModelProvider for FailingProvider {
+        fn id(&self) -> &str {
+            "failing"
+        }
+        fn capabilities(&self) -> crate::providers::Capabilities {
+            Default::default()
+        }
+        fn stream(
+            &self,
+            _request: &CompletionRequest,
+            _cancel: CancellationToken,
+        ) -> Result<mpsc::Receiver<ProviderEvent>> {
+            let (tx, rx) = mpsc::channel(8);
+            let after = self.after;
+            tokio::spawn(async move {
+                if !after.is_empty() {
+                    let _ = tx.send(ProviderEvent::TextDelta(after.into())).await;
+                }
+                let _ = tx
+                    .send(ProviderEvent::Error("model is offline".into()))
+                    .await;
+            });
+            Ok(rx)
+        }
+    }
+
+    fn fallback() -> Option<FallbackModel> {
+        Some(FallbackModel {
+            provider: Arc::new(FakeProvider {
+                chunk_delay: Duration::ZERO,
+                chunk_chars: 8,
+            }),
+            provider_id: "sim".into(),
+            model: "backup".into(),
+        })
+    }
+
+    #[tokio::test]
+    async fn switches_to_fallback_when_primary_fails_before_output() {
+        let coord = RunCoordinator::new(1, Handle::current());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut req = request(ChatId::new(), Duration::ZERO);
+        req.provider = Arc::new(FailingProvider { after: "" });
+        req.fallback = fallback();
+        coord.start(req, tx).unwrap();
+        let events = collect(rx).await;
+        assert!(events.iter().any(|e| matches!(
+            &e.payload,
+            RunEventPayload::ModelSwitched { model, reason, .. }
+                if model == "backup" && reason.contains("offline")
+        )));
+        let text: String = events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                RunEventPayload::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(text.contains("`backup` model"), "fallback answered: {text}");
+        assert_eq!(
+            events.last().unwrap().payload,
+            RunEventPayload::Completed {
+                stop_reason: StopReason::EndTurn
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn no_fallback_after_partial_output() {
+        let coord = RunCoordinator::new(1, Handle::current());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut req = request(ChatId::new(), Duration::ZERO);
+        req.provider = Arc::new(FailingProvider { after: "partial" });
+        req.fallback = fallback();
+        coord.start(req, tx).unwrap();
+        let events = collect(rx).await;
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e.payload, RunEventPayload::ModelSwitched { .. })));
+        assert!(matches!(
+            events.last().unwrap().payload,
+            RunEventPayload::Failed { .. }
+        ));
     }
 
     async fn collect(mut rx: mpsc::UnboundedReceiver<RunEvent>) -> Vec<RunEvent> {

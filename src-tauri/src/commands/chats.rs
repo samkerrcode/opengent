@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use agent_core::domain::ChatId;
+use agent_core::domain::{AgentId, ChatId};
 use agent_core::storage::chats as repo;
 use agent_core::storage::{AttachmentMeta, ChatDetail, ChatSummary};
 use agent_core::Error;
@@ -32,9 +32,16 @@ pub async fn search_chats(
         .await
 }
 
+/// Creates an empty chat, optionally bound to a user-configured agent.
 #[tauri::command]
-pub async fn create_chat(state: State<'_, AppState>) -> Result<ChatSummary, Error> {
-    state.db.call(|c| repo::create_chat(c, "New chat")).await
+pub async fn create_chat(
+    state: State<'_, AppState>,
+    agent_id: Option<AgentId>,
+) -> Result<ChatSummary, Error> {
+    state
+        .db
+        .call(move |c| repo::create_chat_with(c, "New chat", agent_id, None))
+        .await
 }
 
 #[tauri::command]

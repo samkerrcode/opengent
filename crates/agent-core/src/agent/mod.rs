@@ -8,10 +8,11 @@ mod emitter;
 mod recorder;
 pub mod tools;
 
+pub use coordinator::FallbackModel;
 pub use coordinator::{RunCoordinator, RunRequest, RunSink};
 pub use emitter::{EmitterConfig, RunEmitter};
 pub use recorder::RunRecorder;
 pub use tools::{
     cap_result, cap_result_with, definitions_tokens, resolve_on_demand, RunTools, ToolEntry,
-    ToolFuture, ToolHost, ToolLoading, ToolNamer, ToolOutput, ToolSettings, FIND_TOOLS,
+    ToolFilter, ToolFuture, ToolHost, ToolLoading, ToolNamer, ToolOutput, ToolSettings, FIND_TOOLS,
 };
