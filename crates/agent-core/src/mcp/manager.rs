@@ -902,7 +902,7 @@ mod tests {
         let store = McpStore::load(&root, Arc::new(MemorySecretStore::default())).unwrap();
         McpManager::new(
             store,
-            reqwest::Client::new(),
+            crate::http::client().unwrap(),
             tokio::runtime::Handle::current(),
             || {},
         )

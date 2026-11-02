@@ -6,8 +6,6 @@
 //! (fast, cached), falling back to a list of well-known install locations.
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
-use std::time::Duration;
 
 use super::config::{McpServerConfig, McpStore};
 use crate::Result;
@@ -71,7 +69,8 @@ const PATH_FALLBACKS: &[&str] = &[
     "~/.local/share/mise/shims",
 ];
 
-static LOGIN_PATH: OnceLock<Option<String>> = OnceLock::new();
+#[cfg(unix)]
+static LOGIN_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
 /// Expands a leading `~` (or `~/…`) to the user's home. Stdio servers spawn without a
 /// shell, so `~` in commands/args/cwd must be expanded by us.
@@ -96,6 +95,7 @@ const PATH_MARK: &str = "__OPENGENT_PATH__";
 fn query_login_path() -> Option<String> {
     use std::io::Read;
     use std::process::{Command, Stdio};
+    use std::time::Duration;
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let mut child = Command::new(&shell)
         .args([
@@ -141,11 +141,6 @@ fn query_login_path() -> Option<String> {
     } else {
         Some(path.to_owned())
     }
-}
-
-#[cfg(not(unix))]
-fn query_login_path() -> Option<String> {
-    None
 }
 
 /// The PATH a stdio server is spawned with: the login shell's, else the app's PATH extended
