@@ -28,9 +28,7 @@ It's built to be equally at home on a personal machine and in a business setting
   tool with *Always allow / Ask / Block* policies enforced below the UI, and build reusable
   **agents** that run on schedules. The source is open, auditable, and permissively licensed.
 
-<p align="center">
-  <video src="https://github.com/user-attachments/assets/e552658e-231b-44a2-97c2-7181deb878e3" poster="https://raw.githubusercontent.com/samkerrcode/opengent/main/docs/assets/screenshot.webp" autoplay muted loop playsinline controls width="860"></video>
-</p>
+https://github.com/user-attachments/assets/e552658e-231b-44a2-97c2-7181deb878e3
 
 ## Highlights
 
