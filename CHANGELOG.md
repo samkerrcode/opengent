@@ -6,6 +6,10 @@ planned work lives in the [README roadmap](README.md#roadmap).
 
 ## Unreleased — Phase 4 (OAuth)
 
+- Fixed the attachment picker hiding text files for vision-capable models: the dialog no
+  longer uses extension filters, one unusable file in a multi-select is skipped with a
+  per-file reason instead of failing the whole pick, and images left pending after
+  switching to a text-only model are flagged in the composer and block Send.
 - Consistent OpenGent G-and-diamond branding across the README, desktop app icons,
   sidebar, and welcome screens; light/dark horizontal SVG lockups and a ready-to-upload
   social preview. Assistant activity retains the spinning radar and reduced-motion support.

@@ -39,6 +39,9 @@ fn hex(bytes: &[u8]) -> String {
 /// Sniffs the magic bytes of common raster image formats. Returns the canonical mime when
 /// the prefix matches, so a `.png` rename of arbitrary binary data is not accepted as an
 /// image (it falls through to the UTF-8 text check and is rejected as binary).
+// TODO: additional formats worth supporting — HEIC/HEIF (iPhone photos), BMP, TIFF.
+// Non-image documents (PDF) and non-UTF-8 text (UTF-16, Latin-1) need separate import
+// paths, not just sniffing here.
 fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some("image/png")

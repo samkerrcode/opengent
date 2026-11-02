@@ -254,7 +254,10 @@ class ChatStore {
   async pickAttachments(chat: Chat) {
     try {
       const picked = await commands.pickAttachments(this.supportsImages(chat));
-      for (const a of picked) if (!chat.pending.some((p) => p.id === a.id)) chat.pending.push(a);
+      for (const a of picked.attached) if (!chat.pending.some((p) => p.id === a.id)) chat.pending.push(a);
+      if (picked.rejected.length) {
+        this.error = picked.rejected.map((r) => `${r.name}: ${r.reason}`).join("\n");
+      }
     } catch (e) {
       this.error = describeError(e);
     }

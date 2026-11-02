@@ -4,13 +4,32 @@ use agent_core::domain::{AgentId, ChatId};
 use agent_core::storage::chats as repo;
 use agent_core::storage::{AttachmentMeta, ChatDetail, ChatSummary};
 use agent_core::Error;
+use serde::Serialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
+use ts_rs::TS;
 
 use crate::AppState;
 
 const LIST_LIMIT: usize = 500;
 const MAX_ATTACHMENTS_PER_PICK: usize = 20;
+
+/// A file the user picked that could not be attached, with a user-facing reason.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct RejectedAttachment {
+    pub name: String,
+    pub reason: String,
+}
+
+/// Picker result: imported attachments plus per-file rejections, so one bad file in a
+/// multi-select doesn't discard the rest.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct PickedAttachments {
+    pub attached: Vec<AttachmentMeta>,
+    pub rejected: Vec<RejectedAttachment>,
+}
 
 #[tauri::command]
 pub async fn list_chats(state: State<'_, AppState>) -> Result<Vec<ChatSummary>, Error> {
@@ -71,22 +90,23 @@ pub async fn delete_chat(state: State<'_, AppState>, id: ChatId) -> Result<(), E
 
 /// Opens the native file picker and imports the chosen files as immutable attachment
 /// snapshots. Paths never come from the webview; the dialog result stays in Rust.
-/// `include_images` reflects the active model's image capability — image files picked
-/// anyway are rejected with a clear error.
+/// The picker is intentionally unfiltered — `import_file` decides by content (any UTF-8
+/// text file, or a magic-byte-sniffed PNG/JPEG/GIF/WebP), which no extension list can
+/// describe without hiding attachable files. `include_images` reflects the active model's
+/// image capability: images picked for a text-only model come back in `rejected` with a
+/// per-file reason instead of failing the whole pick.
 #[tauri::command]
 pub async fn pick_attachments(
     app: AppHandle,
     state: State<'_, AppState>,
     include_images: bool,
-) -> Result<Vec<AttachmentMeta>, Error> {
+) -> Result<PickedAttachments, Error> {
     let picked = tauri::async_runtime::spawn_blocking(move || {
-        let mut dialog = app.dialog().file().set_title("Attach files");
-        if include_images {
-            dialog = dialog
-                .add_filter("Images and text", &["png", "jpg", "jpeg", "gif", "webp"])
-                .add_filter("All files", &["*"]);
-        }
-        dialog.blocking_pick_files().unwrap_or_default()
+        app.dialog()
+            .file()
+            .set_title("Attach files")
+            .blocking_pick_files()
+            .unwrap_or_default()
     })
     .await
     .map_err(|e| Error::Internal(e.to_string()))?;
@@ -96,26 +116,37 @@ pub async fn pick_attachments(
         .take(MAX_ATTACHMENTS_PER_PICK)
         .collect();
     if paths.is_empty() {
-        return Ok(Vec::new());
+        return Ok(PickedAttachments {
+            attached: Vec::new(),
+            rejected: Vec::new(),
+        });
     }
     let store = state.attachments.clone();
     state
         .db
         .call(move |conn| {
-            let mut out = Vec::with_capacity(paths.len());
+            let mut attached = Vec::with_capacity(paths.len());
+            let mut rejected = Vec::new();
             for path in &paths {
                 match store.import_file(conn, path) {
                     Ok(meta) if meta.mime.starts_with("image/") && !include_images => {
-                        return Err(Error::InvalidInput(format!(
-                            "{}: the selected model does not accept image attachments",
-                            path.display()
-                        )));
+                        rejected.push(RejectedAttachment {
+                            name: meta.name,
+                            reason: "the selected model does not accept image attachments".into(),
+                        });
                     }
-                    Ok(meta) => out.push(meta),
-                    Err(e) => return Err(Error::InvalidInput(format!("{}: {e}", path.display()))),
+                    Ok(meta) => attached.push(meta),
+                    Err(e) => rejected.push(RejectedAttachment {
+                        name: path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("file")
+                            .to_owned(),
+                        reason: e.to_string(),
+                    }),
                 }
             }
-            Ok(out)
+            Ok(PickedAttachments { attached, rejected })
         })
         .await
 }

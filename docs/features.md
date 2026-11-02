@@ -160,8 +160,9 @@ they were saved/last ran, not from a fixed clock time. No OS notifications yet.
 ## Attachments
 
 Attach files to a message with the **⌁ Attach** button (native file picker, up to 20 files,
-2 MiB each). Text files are expanded into labeled `<attachment>` excerpts in the prompt.
-Images go to models that can see them.
+2 MiB each). The picker accepts any file; what it can't use is skipped per file with a
+reason instead of failing the whole selection. Text files are expanded into labeled
+`<attachment>` excerpts in the prompt. Images go to models that can see them.
 
 ### Image attachments
 
@@ -181,10 +182,13 @@ thumbnails in the composer and in the sent message, and are sent to the model as
    claude ≥ 3, gemini, llava, qwen-vl, pixtral, gemma3, and similar) count as capable even
    when the server reports nothing.
 
-**Behavior when unsupported.** The file picker hides its image filter and rejects picked
-images; `start_run` re-validates and fails the send with a clear error. Replaying an old chat
-that contains images against a text-only model degrades each image to a labeled placeholder
-(`status="omitted"`) instead of dropping it silently.
+**Behavior when unsupported.** The picker shows all files (a type list can't describe
+"any UTF-8 text or sniffed image" without hiding attachable files); picked images are
+skipped with a per-file reason. Images already pending when you switch to a text-only
+model are flagged in the composer and block Send until removed. `start_run` re-validates
+and fails the send with a clear error. Replaying an old chat that contains images against
+a text-only model degrades each image to a labeled placeholder (`status="omitted"`)
+instead of dropping it silently.
 
 **How it works.** Images are sniffed by magic bytes (a `.png` that isn't one is rejected),
 stored as immutable content-addressed blobs under `~/.opengent/attachments/`, base64-encoded
@@ -196,6 +200,9 @@ file access). Key code: `crates/agent-core/src/providers/capabilities.rs` (heuri
 
 **Limits.** 2 MiB per image before base64 inflation; each image is estimated at ~1,500 tokens
 for context budgeting. SVG is treated as text (providers don't accept it as image input).
+Formats not yet supported — to be added later — include HEIC/HEIF (iPhone photos), BMP,
+TIFF, PDF and other document types, and non-UTF-8 text (UTF-16, Latin-1); they are skipped
+with a reason at pick time.
 
 ## History & persistence
 
