@@ -1,0 +1,3 @@
+# Generated files are emitted with LF endings; pin them LF on checkout so the
+# CI drift check doesn't flag CRLF worktree copies on Windows runners.
+src/lib/generated/** text eol=lf
