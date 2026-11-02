@@ -37,6 +37,18 @@ Node 24 LTS (`nvm use`), the Tauri system dependencies, then `npm install` and
 `npm run tauri:dev`. Mock OpenAI and MCP servers for local testing live in `scripts/dev/` (see
 [AGENTS.md](AGENTS.md#commands)).
 
+## Branching
+
+- Branch off `main` and open a PR back to `main`. There is no long-lived `dev` branch.
+- Name branches `<type>/<slug>` — e.g. `feat/mcp-oauth`, `fix/catchup-panic`,
+  `chore/bump-tauri`. `<type>` must be one of: `feat`, `fix`, `perf`, `refactor`, `test`,
+  `docs`, `ci`, `chore`. Write the PR title the same way (`fix: prevent double dispatch`) —
+  it becomes the squash-merge commit message.
+- One branch = one PR = one issue. Open a draft PR for multi-day work so CI runs on it.
+- Branches are deleted on merge. Never reuse a merged branch — cut a fresh one off `main`.
+- Security fixes use `fix/` with a neutral slug; don't name branches or PRs in ways that
+  disclose a vulnerability before it's patched.
+
 ## Pull request checklist
 
 - `npm run verify` passes. This is the PR gate; it runs svelte-check, vitest,
