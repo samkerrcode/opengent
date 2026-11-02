@@ -39,7 +39,12 @@
     textarea?.focus();
   }
 
-  const canSend = $derived(!busy && (value.trim().length > 0 || pending.length > 0));
+  // Pending images the current model can't accept — e.g. attached under a vision model
+  // before switching to a text-only one. Sending would fail, so flag them and hold Send.
+  const unsupported = $derived(
+    new Set(pending.filter((a) => a.mime.startsWith("image/") && !supportsImages).map((a) => a.id)),
+  );
+  const canSend = $derived(!busy && unsupported.size === 0 && (value.trim().length > 0 || pending.length > 0));
 
   function submit() {
     if (!canSend) return;
@@ -80,7 +85,7 @@
     {#if pending.length}
       <ul class="pending" aria-label="Attachments for this message">
         {#each pending as a (a.id)}
-          <li class="file">
+          <li class="file" class:unsupported={unsupported.has(a.id)}>
             {#if a.mime.startsWith("image/")}
               {#await attachmentDataUrl(a.id) then url}
                 {#if url}<img class="file-thumb" src={url} alt="" />{/if}
@@ -88,7 +93,12 @@
             {:else}
               <span class="file-icon" aria-hidden="true">▤</span>
             {/if}
-            <span class="file-name" title={a.name}>{a.name}</span>
+            <span
+              class="file-name"
+              title={unsupported.has(a.id)
+                ? `${a.name}: the selected model does not accept image attachments`
+                : a.name}
+            >{a.name}</span>
             <span class="file-meta">{fmtMeta(a)}</span>
             <button type="button" class="file-remove" aria-label="Remove {a.name}" onclick={() => onremoveattachment(a.id)}>✕</button>
           </li>
@@ -153,7 +163,12 @@
           <span class="stop-icon" aria-hidden="true"></span> Stop
         </button>
       {:else}
-        <button type="submit" class="btn-primary send" disabled={!canSend} title="Send (Enter)">
+        <button
+          type="submit"
+          class="btn-primary send"
+          disabled={!canSend}
+          title={unsupported.size ? "Remove the unsupported attachments to send" : "Send (Enter)"}
+        >
           Send <span aria-hidden="true">↵</span>
         </button>
       {/if}
@@ -220,6 +235,13 @@
   .file-meta {
     color: var(--fg-faint);
     white-space: nowrap;
+  }
+  .file.unsupported {
+    border-color: var(--danger);
+  }
+  .file.unsupported .file-name {
+    color: var(--danger);
+    text-decoration: line-through;
   }
   .file-remove {
     padding: 0 4px;
