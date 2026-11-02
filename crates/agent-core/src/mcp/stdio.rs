@@ -251,7 +251,9 @@ mod tests {
 
     #[test]
     fn expand_tilde_handles_home_and_leaves_others() {
-        let home = std::env::var("HOME").unwrap();
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap();
         assert_eq!(expand_tilde("~/x/y"), format!("{home}/x/y"));
         assert_eq!(expand_tilde("~"), home);
         assert_eq!(expand_tilde("/abs/x"), "/abs/x");
