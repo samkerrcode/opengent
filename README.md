@@ -29,7 +29,7 @@ It's built to be equally at home on a personal machine and in a business setting
   **agents** that run on schedules. The source is open, auditable, and permissively licensed.
 
 <p align="center">
-  <video src="https://github.com/user-attachments/assets/50ee2ec0-a3a3-40e5-a9b4-7a7658b325e8" poster="https://raw.githubusercontent.com/samkerrcode/opengent/main/docs/assets/screenshot.webp" autoplay muted loop playsinline controls width="860"></video>
+  <video src="https://github.com/user-attachments/assets/e552658e-231b-44a2-97c2-7181deb878e3" poster="https://raw.githubusercontent.com/samkerrcode/opengent/main/docs/assets/screenshot.webp" autoplay muted loop playsinline controls width="860"></video>
 </p>
 
 ## Highlights
