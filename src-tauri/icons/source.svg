@@ -1,16 +1,18 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <title>OpenGent app icon</title>
+
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#1b1f2a"/>
-      <stop offset="1" stop-color="#0d0f15"/>
+    <linearGradient id="surface" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#202939"/><stop offset="1" stop-color="#101216"/>
     </linearGradient>
-    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#7cf5d8"/>
-      <stop offset="1" stop-color="#4ea3ff"/>
+    <linearGradient id="blue" gradientUnits="userSpaceOnUse" x1="0" y1="22" x2="0" y2="234">
+      <stop stop-color="#6ea8ff"/><stop offset="1" stop-color="#2f6fed"/>
     </linearGradient>
   </defs>
-  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
-  <circle cx="512" cy="512" r="300" fill="none" stroke="url(#accent)" stroke-width="56" stroke-linecap="round" stroke-dasharray="1320 1884" transform="rotate(-60 512 512)"/>
-  <circle cx="512" cy="512" r="112" fill="url(#accent)"/>
-  <circle cx="776" cy="320" r="56" fill="#7cf5d8"/>
+  <rect x="64" y="64" width="896" height="896" rx="204" fill="url(#surface)" stroke="#344157" stroke-width="2"/>
+  <g transform="translate(160 160) scale(2.75)"><g stroke="url(#blue)" stroke-width="24" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M193 69a94 94 0 1 0 0 118"/>
+    <path d="M120 222v-82q0-12 12-12h74"/>
+  </g>
+  <path d="m214 103 25 25-25 25-25-25Z" fill="url(#blue)" stroke="url(#blue)" stroke-width="4" stroke-linejoin="round"/></g>
 </svg>

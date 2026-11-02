@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" fill="none">
+  <title>Open G with a diamond terminal</title>
+  <g stroke="#2f6fed" stroke-width="24" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M193 69a94 94 0 1 0 0 118"/>
+    <path d="M120 222v-82q0-12 12-12h74"/>
+  </g>
+  <path d="m214 103 25 25-25 25-25-25Z" fill="#2f6fed" stroke="#2f6fed" stroke-width="4" stroke-linejoin="round"/>
+</svg>

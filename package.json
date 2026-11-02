@@ -2,9 +2,11 @@
   "name": "opengent",
   "private": true,
   "version": "0.1.0",
+  "license": "MIT OR Apache-2.0",
   "type": "module",
   "scripts": {
     "gen:product": "node scripts/product.mjs",
+    "gen:brand": "node scripts/branding.mjs",
     "dev": "npm run gen:product && vite",
     "build": "npm run gen:product && vite build",
     "preview": "vite preview",

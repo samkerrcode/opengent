@@ -1,5 +1,6 @@
 <script lang="ts">
   import { product } from "$lib/generated/product";
+  import BrandMark from "$lib/components/BrandMark.svelte";
   import type { AppInfo } from "$lib/ipc/commands";
   import { chatStore } from "$features/chat/chat-store.svelte";
   import { agentStore } from "$features/agents/agent-store.svelte";
@@ -36,7 +37,7 @@
 
 <nav class="sidebar" aria-label="Chats">
   <header class="brand">
-    <span class="logo" aria-hidden="true"></span>
+    <BrandMark />
     <span class="name">{product.displayName}</span>
   </header>
 
@@ -124,15 +125,14 @@
     align-items: center;
     gap: var(--space-2);
     padding: 0 var(--space-2);
-    font-weight: 650;
-    letter-spacing: 0.01em;
-    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.025em;
+    font-size: 15.5px;
   }
-  .logo {
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: conic-gradient(from 200deg, var(--accent), var(--accent-soft) 70%);
+  .name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .new-chat {
     justify-content: flex-start;

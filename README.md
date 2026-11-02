@@ -1,55 +1,91 @@
-# OpenGent
+<p align="center">
+  <img src="docs/assets/logo.svg" alt="OpenGent logo" width="120" />
+</p>
 
-A frontier quality model-agnostic desktop agent for macOS and Windows. OpenGent talks to whichever LLM provider you
-configure (OpenAI, Anthropic, Google, AWS Bedrock, Hugging Face, or any custom/local endpoint),
-streams responses token by token, and takes actions only through explicitly configured MCP servers
-with per-tool permissions.
+<h1 align="center">OpenGent</h1>
 
-Built with **Tauri 2** (desktop shell), **Svelte 5 + TypeScript** (interface), and **Rust** for
-everything privileged: networking, secrets, persistence, the MCP client, and the agent loop.
+<p align="center">
+  <strong>Any model. Only the tools you allow. Every step in plain sight.</strong>
+</p>
 
-> **Status: Phases 0–3 complete; Phase 4 (OAuth) is next.** You can connect any
-> OpenAI-compatible server (Ollama, LM Studio, vLLM, hosted gateways), chat with streamed,
-> Markdown-rendered replies, and attach MCP servers (stdio + Streamable HTTP) whose tools the
-> model can call under per-tool Always allow / Ask / Block policies. Chats persist between
-> launches in `~/.opengent`, with search, rename, attachments (including images on
-> vision-capable models), and recovery of interrupted runs. **Agents** bundle a role, default +
-> fallback models, instructions and a tool selection, and can run on schedules (with run-once or
-> skip handling for runs missed while the app was closed). See [Roadmap](#roadmap) and
-> [docs/features.md](docs/features.md) for the feature guide.
+<p align="center">
+  <a href="https://github.com/samkerrcode/opengent/actions/workflows/ci.yml"><img src="https://github.com/samkerrcode/opengent/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0" /></a>
+  <img src="https://img.shields.io/badge/platform-macOS%2012%2B%20%C2%B7%20Windows%2010%2B-lightgrey" alt="Platform: macOS 12+ · Windows 10+" />
+  <img src="https://img.shields.io/badge/status-pre--1.0-orange" alt="Status: pre-1.0" />
+</p>
 
----
+OpenGent is a native desktop AI agent that works for you — not for a model vendor. Plug in a
+local model running on your laptop or a frontier model behind your company's gateway, connect
+the tools you trust, and stay in control of every action it takes. The model proposes; you
+decide; Rust enforces.
 
-## Why
+It's built to be equally at home on a personal machine and in a business setting:
 
-Most agent UIs are tied to one vendor, bundle a browser runtime, or hide what the agent is doing.
-OpenGent aims for:
+- **For individuals** — run fully local with Ollama or LM Studio: no account, no cloud, no
+  telemetry. Chats stay on your disk; API keys stay in your OS keychain.
+- **For teams and businesses** — point it at an approved OpenAI-compatible gateway, gate every
+  tool with *Always allow / Ask / Block* policies enforced below the UI, and build reusable
+  **agents** that run on schedules. The source is open, auditable, and permissively licensed.
 
-- **Provider parity** – cloud and local models are equal citizens behind one adapter interface.
-- **Transparent execution** – every turn shows its real phases (generating, awaiting approval,
-  calling a tool) with inspectable arguments and results. Nothing is simulated or invented.
-- **Permissioned actions** – tools come from MCP servers you add; each tool is *Always allow*,
-  *Ask*, or *Block*, enforced in Rust at dispatch time, not just in the UI.
-- **Small, fast, local** – a ~6 MiB app using the OS webview; data in `~/.opengent`; secrets in
-  the OS keychain; no telemetry.
+<p align="center">
+  <img src="docs/assets/screenshot.webp" alt="OpenGent new chat screen connected to a local Gemma model" width="860" />
+</p>
+
+## Highlights
+
+- **Model-agnostic.** Any OpenAI-compatible endpoint today — Ollama, LM Studio, vLLM,
+  llama.cpp, OpenRouter, or a self-hosted gateway — with a built-in simulated provider for
+  trying the app without an account. Native OpenAI, Anthropic, Google, Bedrock and Hugging Face
+  adapters are on the [roadmap](#roadmap).
+- **Real tools, real permissions.** Connect [MCP](https://modelcontextprotocol.io) servers over
+  stdio or Streamable HTTP. Each tool is *Always allow*, *Ask*, or *Block*; approvals are
+  enforced in Rust at dispatch, and an *Always allow* grant reverts to *Ask* if the tool's
+  definition changes.
+- **Transparent execution.** Every turn shows its real phases — generating, awaiting approval,
+  calling a tool — with inspectable arguments and results. Nothing is simulated or hidden.
+- **Agents & schedules.** Package a role, default + fallback model, instructions and a tool
+  selection into an agent; run it on demand or once / every N minutes / on chosen weekdays,
+  with catch-up handling for runs missed while the app was closed.
+- **Polished chat.** Token-by-token streaming, sanitized Markdown with code highlighting and
+  KaTeX math, file and image attachments, search, and recovery of interrupted runs.
+- **Small, fast, local.** A ~6 MiB app on the OS webview. Data lives in `~/.opengent`, secrets in
+  the macOS Keychain / Windows Credential Manager, and there is no telemetry.
+
+See **[docs/features.md](docs/features.md)** for the full feature guide.
+
+## Status
+
+OpenGent is **pre-1.0** and under active development. Phases 0–3 of the [roadmap](#roadmap)
+are complete and Phase 4 (OAuth for MCP servers) is next. macOS is verified. Windows builds and
+tests run in CI but haven't been tested by hand yet. There are no prebuilt installers yet
+(signed installers come with Phase 7), so for now you build from source.
 
 ## Quick start
 
-Prerequisites: Rust (stable, via `rustup`), Node 24 LTS (`nvm use`), and the
-[Tauri system dependencies](https://v2.tauri.app/start/prerequisites/) for your OS
-(Xcode Command Line Tools on macOS; MSVC Build Tools + WebView2 on Windows).
+**Prerequisites:** Rust (stable, via [`rustup`](https://rustup.rs)), Node 24 LTS (`nvm use`
+reads `.nvmrc`), and the [Tauri system dependencies](https://v2.tauri.app/start/prerequisites/)
+for your OS — Xcode Command Line Tools on macOS; MSVC Build Tools + WebView2 on Windows.
 
 ```sh
+git clone https://github.com/samkerrcode/opengent.git
+cd opengent
 npm install
 npm run tauri:dev      # run the app with hot reload
 npm run tauri:build    # release bundle in target/release/bundle/
-npm run verify         # svelte-check, vitest, cargo fmt/clippy/test
 ```
 
-Open **Providers** (⌘, / Ctrl+,) to add an OpenAI-compatible endpoint — presets for Ollama,
-LM Studio, vLLM and OpenRouter are included. API keys go straight to the OS keychain. A built-in
-**simulated provider** is always available for trying the interface without an account. For a fake
-server with realistic streaming, run `node scripts/dev/mock-openai-server.mjs` and point a
+**First run.**
+
+1. Open **Providers** (⌘, on macOS / Ctrl+, on Windows) and add an endpoint. Presets are
+   included for Ollama, LM Studio, vLLM / llama.cpp, and OpenRouter. API keys go straight to
+   the OS keychain.
+2. Pick a model in the composer and start chatting. The built-in **simulated provider** works
+   with no setup at all.
+3. Optionally, open **Connections** to add MCP servers. You can paste a standard
+   `{"mcpServers": {…}}` JSON config.
+
+For a realistic local test server, run `node scripts/dev/mock-openai-server.mjs` and point a
 provider at `http://localhost:8787/v1`.
 
 ## Architecture
@@ -61,29 +97,32 @@ Svelte UI  ──typed commands / ordered Channel──▶  Tauri host (src-taur
                                              agent-core (Rust, no UI deps)
                                              ├── config      product identity, data root
                                              ├── domain      ids, messages, run events
-                                             ├── agent       run coordinator, event emitter
+                                             ├── agent       run coordinator, context, tool loop
                                              ├── agents      user agents, schedule math
                                              ├── providers   ModelProvider trait + adapters
+                                             ├── storage     SQLite (WAL), migrations, attachments
                                              ├── secrets     SecretStore (Keychain / Cred. Manager)
+                                             ├── http        shared rustls client
                                              └── mcp         rmcp client (stdio, Streamable HTTP)
 ```
 
-Key design rules (see `AGENTS.md` for contributor conventions):
+Design rules (contributor conventions live in [AGENTS.md](AGENTS.md)):
 
 - **One identity source.** `product.json` defines the display name, slug, data directory,
   bundle identifier, and version. A build step propagates it to Rust (`build.rs`), the frontend,
-  and the Tauri bundle. The name "OpenGent" is not hardcoded anywhere else.
-- **Rust owns the truth.** The webview holds view state only. It has no shell, filesystem, or HTTP
-  capability; everything goes through validated commands.
+  and the Tauri bundle; the name is not hardcoded anywhere else.
+- **Rust owns the truth.** The webview holds view state only. It has no shell, filesystem, or
+  HTTP capability; everything goes through validated commands.
 - **Ordered streaming with backpressure.** Run events carry a schema version and a monotonic
   sequence number, are coalesced (~30 ms / 2 KiB) before crossing IPC, and are delivered over
   Tauri Channels. A dropped receiver cancels the run.
 - **Secrets never leave Rust.** The core hands out opaque `SecretRef`s; values live in the OS
   credential store and are never written to SQLite, logs, or IPC responses.
 - **Provider-native state is preserved.** Messages are typed content blocks; opaque provider
-  continuation data (reasoning items, thought signatures) is kept verbatim and never forwarded to
-  a different provider.
-- **Pinned, vetted dependencies.** Exact versions published ≥ 7 days ago; minimal feature sets.
+  continuation data (reasoning items, thought signatures) is kept verbatim and never forwarded
+  to a different provider.
+- **First-party by default.** External dependencies are reserved for key capabilities, pinned
+  to exact versions published ≥ 7 days ago, with minimal feature sets.
 
 ## Repository layout
 
@@ -92,118 +131,69 @@ Key design rules (see `AGENTS.md` for contributor conventions):
 | `product.json` | Product identity (single source of truth) |
 | `scripts/product.mjs` | Generates `src/lib/generated/product.ts` and the Tauri config overlay |
 | `crates/agent-core/` | Runtime library; fully testable without a window |
-| `src-tauri/` | Tauri host: `AppState`, IPC commands, capabilities, CSP, icons |
-| `src/` | Svelte app: `features/chat`, `features/history`, `lib/ipc`, `lib/state` |
+| `src-tauri/` | Tauri host: `AppState`, IPC commands, scheduler, capabilities, CSP, icons |
+| `src/` | Svelte app: `features/{chat,history,providers,mcp,agents}`, `lib/ipc`, `lib/state` |
 | `src/lib/generated/bindings/` | TypeScript types generated from Rust DTOs by ts-rs (committed; CI checks drift) |
+| `scripts/dev/` | Mock OpenAI-compatible and MCP servers for local testing |
+| `docs/` | Feature guide and branding assets |
 | `.github/workflows/ci.yml` | macOS + Windows checks, tests, and unsigned build |
 
 ## Roadmap
 
-The full design document lives outside the repo for now; this is the phase summary.
-Each phase has an acceptance gate that must pass before the next begins.
+Each phase has an acceptance gate that must pass before the next begins. Delivered work is
+detailed in [CHANGELOG.md](CHANGELOG.md); shipped features are documented in
+[docs/features.md](docs/features.md).
 
 | Phase | Scope | Status |
 |---|---|---|
-| **0 – Foundation** | Cross-platform Tauri/Svelte build, product identity, typed IPC, run coordinator with real streaming/cancellation, native keychain + rmcp feasibility, CI | ✅ Done (macOS verified; Windows via CI, not yet run) |
+| **0 – Foundation** | Cross-platform Tauri/Svelte build, product identity, typed IPC, run coordinator with real streaming/cancellation, native keychain + rmcp feasibility, CI | ✅ Done (macOS verified; Windows via CI) |
 | **1 – Workspace & persistence** | SQLite (WAL) chat history, search, attachments as immutable content-hashed snapshots, restart recovery, command palette, inspector panel | ✅ Done (command palette and inspector deferred) |
 | **2 – Custom/local providers** | OpenAI-compatible Chat Completions streaming, provider/model settings, capability flags, incremental sanitized Markdown, context limits. *First usable chat.* | ✅ Done |
 | **3 – MCP agent** | stdio + Streamable HTTP servers, tool discovery, Always allow / Ask / Block policies, approval UI, full loop: model → approval → tool → result → model. *Agent alpha.* | ✅ Done |
-| **4 – OAuth** | Browser sign-in (authorization code + PKCE, U2M) and client credentials (M2M) for MCP servers; token lifecycle in the keychain | |
+| **4 – OAuth** | Browser sign-in (authorization code + PKCE, U2M) and client credentials (M2M) for MCP servers; token lifecycle in the keychain | Next |
 | **5 – OpenAI & Anthropic native** | Responses API and Messages API adapters, provider-aware prompt caching, cross-provider context projection | |
 | **6 – Google, Bedrock, Hugging Face** | Gemini (thought signatures), Bedrock ConverseStream (feature-gated AWS SDK), HF presets | |
 | **7 – Release hardening** | Performance profiling, accessibility, export/import, signing & notarization, installers | |
 | **8 – Extensions** | Sub-agents, A2A, skills, hooks, model router — through the existing `ModelProvider` / tool / permission seams | |
 
-### What Phase 0 delivered
+### Proposed features
 
-- Release `.app` (5.98 MiB) that launches, resolves `~/.opengent` with private permissions, and
-  selects the macOS Keychain as its secret backend.
-- `RunCoordinator`: one active run per chat, bounded concurrency, cooperative cancellation,
-  sequence-numbered coalesced events; works when invoked from non-runtime threads.
-- Simulated provider exercising the full UI stream path (phase rail, Stop, jump-to-latest).
-- Verified against real systems (opt-in tests): Keychain round trip with an 8 KiB payload; live
-  stdio MCP handshake and tool listing with `@modelcontextprotocol/server-everything`.
-- 36 automated tests (30 core, 2 host, 4 UI), clippy-clean, bindings drift check.
+These are approved for the roadmap and can be built in any order, alongside or between the
+numbered phases:
 
-### What Phase 1 delivered
+| Feature | Summary |
+|---|---|
+| **Encrypted chats** | A lock toggle in the composer prompts for a password. Every message in that chat is encrypted at rest with a strong, ideally quantum-resistant algorithm, and you have to unlock the chat again after navigating away or relaunching. |
+| **Security policies** | A policies menu with configurable data masking. Sensitive values are detected and replaced with placeholder tokens before a prompt leaves the app, the model is told to keep the tokens, and the original values are restored in the response. Each classification (phone numbers, SSN/TIN, email addresses) can be toggled separately. |
+| **Native tools & sandboxed runtime** | Built-in tools you can configure from the Tools menu: file creation and editing; a basic POSIX command set (curl, grep, glob, cat, …) running in an isolated per-chat filesystem (a headless container or an embedded runtime, whichever balances security and performance best); and web search over free, configurable sources and APIs. |
+| **Image generation** | Text-to-image, with automatic detection of provider models that support it. |
+| **CLI** | An `opengent` binary (name derived from `product.json`) built on `agent-core` for headless use: list configured models, run a prompt, run a prompt with an agent, and schedule a prompt. |
 
-- SQLite (WAL) database under the data root on a dedicated worker thread, with schema migrations;
-  chats, messages, and attachment join tables.
-- Rust-owned history: `start_run` loads prior turns from the database, records streamed deltas as
-  checkpoints through `RunRecorder`, and finalizes each message (completed / cancelled / failed).
-  Startup recovery marks runs that were in-progress at shutdown as interrupted.
-- Attachments: native file picker, bounded text import with binary/oversized rejection, SHA-256
-  content-addressed blobs under `~/.opengent/attachments` with deduplication, and labeled
-  expansion into the model context.
-- UI: chat list/sidebar now backed by persisted summaries, rename and delete, attachment chips in
-  the composer, and interrupted/failed states restored on reload.
+Have an idea? Open a [feature request](https://github.com/samkerrcode/opengent/issues/new/choose).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how proposals are approved.
 
-### What Phase 2 delivered
+> **Naming.** "OpenGent" is a working name and may be rebranded. `product.json` is the single
+> identity source, so changing the display name is a config change. Candidates under
+> consideration: Bastion, Aegis, Remit, Cadre, Quorum, Syndic, Signet.
 
-- OpenAI-compatible adapter with an incremental SSE parser (tested at every byte split), friendly
-  error mapping (auth, 404, connection refused, idle timeout, truncated streams), cancellation.
-- Provider store: named connections persisted as JSON under the data root (secrets in the keychain
-  only), model discovery via `/models`, connection test, active provider/model selection.
-- Context compiler: versioned system prompt as a stable prefix, token budget with disclosed
-  trimming of the oldest turns (surfaced as a notice in the UI).
-- UI: provider settings dialog with presets, provider/model picker in the composer, sanitized
-  Markdown rendering (markdown-it with raw HTML off + DOMPurify), links opened via the OS browser,
-  retry/regenerate, chat search and delete, and a theme that works on the macOS 12 WebKit baseline.
+### Known limitations
 
-### What Phase 3 delivered
-
-- MCP client (rmcp) for **stdio** (child process, allow-listed env, login-shell PATH
-  recovery, stderr tail capture) and **Streamable HTTP** (custom headers, shared TLS/pool
-  client). Config lives in `~/.opengent/mcp.json`; env/header values marked *secret* go to
-  the OS keychain. Standard `mcpServers` JSON can be pasted into the Connections dialog.
-- `McpManager`: background connect/reconnect, `tools/list_changed` refresh, disconnect
-  watchdog, and the `ToolHost` seam used by the run loop. Policies are enforced in Rust at
-  dispatch: **Always allow / Ask / Block** per tool plus a per-server default; blocked tools
-  are never advertised to the model (only named in the system prompt as disabled).
-  *Always allow* grants are bound to the tool's definition signature (pinned at grant
-  time or first use) — a changed schema/description reverts to *Ask*.
-- Agent loop: model → tool calls → (approval pause) → results → model, up to 8 tool steps
-  and 16 calls per step. Streamed `tool_calls` fragments are assembled in the
-  OpenAI-compatible adapter (bounded index/argument size, deduplicated call ids);
-  assistant turns persist as ordered content blocks (text, calls, results) and reload
-  identically. Arguments must be a JSON object — malformed calls never reach the tool.
-- **Tools menu** in the composer: connection toggles, per-tool permission submenu, and the
-  **tool loading** mode — *All*, *On-demand* (`find_tools` meta-tool loads matching tools by
-  keyword), or *Auto* (all when small, on-demand past a size/context threshold). The loaded
-  set is recovered from chat history on later turns.
-- Approval UI on tool cards: Allow once / Always allow / Deny, with arguments shown and
-  server-provided destructive/read-only hints; unanswered approvals auto-deny after
-  15 minutes. Denial and blocking are reported back to the model as results. New stdio
-  servers, or changes to their command/cwd/env, require a native confirmation dialog.
-- Sandboxing & hygiene: stdio servers run as process-group leaders with kill-on-drop
-  (grandchildren die on disconnect/quit); stderr tails are line-capped and redact secrets;
-  `mcp.json` is owner-only (0600); remote connections never follow redirects; cancelled
-  calls send `notifications/cancelled`. Mock servers for dev: `mock-mcp-server.mjs`
-  (stdio + `--http`, `--many N` filler tools) and the mock OpenAI server can emit tool calls.
-
-### Agents & schedules (beyond the phase plan)
-
-- **Agents** sidebar area: intro page, agent cards, editor for name, description, default and
-  fallback model, instructions (appended to a built-in agent system prompt), and per-server MCP
-  tool selection. Agent chats reuse the chat UI with the agent's name and models.
-- **Fallback model**: switches once per run when the default fails before any output.
-- **Schedules**: once / interval / weekdays-at-time; missed runs (app closed, machine asleep)
-  are run once on return or skipped, per schedule. Runs stream live and accept approvals when
-  the chat is open. See [docs/features.md](docs/features.md#agents).
-
-### Known gaps
-
-- Windows build has not been executed yet (CI job exists).
-- No packaged end-to-end UI test; the webview path is verified manually via `tauri:dev`.
-- Command palette and inspector panel from the Phase 1 scope are deferred (sidebar search covers
-  the primary need for now).
-- Only the OpenAI-compatible protocol is implemented; native provider adapters arrive in Phase 5.
+- The Windows build runs in CI but hasn't been tested by hand.
+- There's no packaged end-to-end UI test; the webview path is verified manually with
+  `tauri:dev`.
+- The command palette and inspector panel from Phase 1 are deferred (sidebar search covers the
+  main need for now).
+- Only the OpenAI-compatible protocol is implemented. Native provider adapters arrive in
+  Phases 5–6.
+- MCP servers that need OAuth sign-in can't connect until Phase 4.
+- Scheduled runs only fire while the app is open.
 - Builds are unsigned. The DMG step can fail if a previous build's image is still mounted
   (`hdiutil detach`); the `.app` itself is unaffected.
 
-## Development notes
+## Development
 
 ```sh
+npm run verify                                     # svelte-check, vitest, cargo fmt/clippy/test (PR gate)
 npm run gen:types                                  # regenerate TS bindings after changing #[derive(TS)] types
 cargo test -p agent-core -- --ignored              # live tests (keychain; MCP needs the env var below)
 OPENGENT_TEST_MCP_COMMAND="npx -y @modelcontextprotocol/server-everything" \
@@ -215,17 +205,37 @@ OPENGENT_DATA_DIR=/tmp/og ./target/release/opengent-desktop   # run against an a
 OPENGENT_LOG=debug npm run tauri:dev                          # tracing filter
 ```
 
-Environment variable names derive from the product slug, so they follow a rename of `product.json`.
+Environment variable names derive from the product slug, so they follow a rename of
+`product.json`.
 
-## Security model (short version)
+## Security
 
-- Strict CSP; webview has only `core:default`, dialog-open, and opener permissions.
-- Provider and MCP traffic originates in Rust. HTTPS required except explicit loopback endpoints.
-- MCP tool permission prompts reduce risk but are **not** an OS sandbox: a local stdio server can
-  do whatever your user account can. Only add servers you trust.
-- Local chat data is not encrypted at rest (relies on OS account isolation / disk encryption);
-  at-rest encryption is a separate future feature.
+OpenGent is built to high security standards, and its security and performance are reviewed
+regularly. In short:
+
+- Strict CSP with frozen prototypes. The webview is granted only `core:default`, window-title,
+  dialog-open, and opener permissions — no shell, filesystem, or HTTP access.
+- Provider and MCP traffic originates in Rust. HTTPS is required except for loopback endpoints,
+  and remote MCP connections never follow redirects.
+- MCP tool permissions reduce risk but are **not** an OS sandbox. A local stdio server can do
+  anything your user account can, so only add servers you trust.
+- Local chat data isn't encrypted at rest (it relies on OS account isolation and disk
+  encryption). Per-chat encryption is on the [roadmap](#proposed-features).
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md). Please don't open a public issue.
+
+## Contributing
+
+OpenGent is **human-designed and AI-led**. The architecture and features are directed by the
+maintainer, and most code is written and reviewed with frontier AI models, which are also
+recommended for contributors. Contributions are welcome on **approved issues only**. Read
+[CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR. Everyone is expected to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
-MIT OR Apache-2.0
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
+
+OpenGent was created by Sam Kerr ([@samkerrcode](https://github.com/samkerrcode)), co-authored
+with AI. If you use this code in a paid product, attribution to the original creator is
+appreciated, though not required by the licenses.

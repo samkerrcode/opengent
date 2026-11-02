@@ -5,6 +5,7 @@
   import AssistantTurnView from "./AssistantTurn.svelte";
   import { attachmentDataUrl } from "$lib/attachments";
   import { product } from "$lib/generated/product";
+  import BrandMark from "$lib/components/BrandMark.svelte";
   import { providerStore } from "$features/providers/provider-store.svelte";
   import { nav } from "$lib/state/nav.svelte";
 
@@ -140,7 +141,7 @@
       </section>
     {:else if chat.items.length === 0}
       <section class="empty">
-        <div class="mark" aria-hidden="true"></div>
+        <div class="mark"><BrandMark size={40} /></div>
         <h1>What are we working on?</h1>
         {#if providerStore.activeProvider?.kind === "simulated"}
           <p>
@@ -308,7 +309,6 @@
     width: 40px;
     height: 40px;
     border-radius: 50%;
-    background: conic-gradient(from 200deg, var(--accent), var(--accent-soft) 70%);
     margin-bottom: var(--space-2);
   }
   .empty h1 {

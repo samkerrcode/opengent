@@ -4,6 +4,7 @@
   import { nav } from "$lib/state/nav.svelte";
   import { chatStore } from "$features/chat/chat-store.svelte";
   import type { Agent } from "$lib/ipc/commands";
+  import BrandMark from "$lib/components/BrandMark.svelte";
 
   async function chatWith(agent: Agent) {
     if (await chatStore.newChat(agent.id)) nav.showChat();
@@ -29,7 +30,7 @@
       <p class="muted center">Loading…</p>
     {:else if agentStore.agents.length === 0}
       <section class="intro">
-        <div class="mark" aria-hidden="true"></div>
+        <BrandMark size={48} />
         <h2>Build agents that work your way</h2>
         <p class="lede">
           An agent is a reusable assistant with its own purpose, models, instructions and tools. Chat with it any time, or
@@ -95,7 +96,6 @@
   .center { text-align: center; margin-top: 20vh; }
   .error { color: var(--danger); background: var(--danger-soft); padding: 8px 10px; border-radius: var(--radius-md); margin: 0 0 var(--space-4); }
   .intro { max-width: 600px; margin: 6vh auto 0; display: grid; gap: var(--space-4); justify-items: center; text-align: center; }
-  .mark { width: 48px; height: 48px; border-radius: 50%; background: conic-gradient(from 200deg, var(--accent), var(--accent-soft) 70%); }
   .intro h2 { margin: 0; font-size: 26px; font-weight: 600; letter-spacing: -0.015em; }
   .lede { margin: 0; color: var(--fg-muted); max-width: 52ch; }
   .features { list-style: none; padding: 0; margin: var(--space-2) 0; display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); text-align: left; width: 100%; }

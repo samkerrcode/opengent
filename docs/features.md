@@ -5,6 +5,7 @@ What OpenGent does today, one section per capability. Each entry covers **what i
 document stays scannable as the app grows.
 
 - [Chat](#chat)
+- [Branding & activity indicators](#branding--activity-indicators)
 - [Providers & models](#providers--models)
 - [Connections (MCP tools)](#connections-mcp-tools)
 - [Agents](#agents)
@@ -18,6 +19,24 @@ document stays scannable as the app grows.
 Streaming conversations with Markdown-rendered replies: code highlighting, KaTeX math,
 stop/cancel (Esc), retry, live token usage, and "older messages trimmed" notices when history
 exceeds the model's context window.
+
+## Branding & activity indicators
+
+**What.** The open G with a solid diamond identifies the app in the Dock/taskbar, sidebar,
+and chat/agent welcome screens. Assistant responses retain the radar-like activity symbol.
+
+**How to use.** No setup is needed. The radar spins while a run is active and stops at a
+terminal state; the adjacent phase label describes what is happening. Enable the OS
+reduced-motion preference to disable its rotation.
+
+**How it works.** In-app brand marks share the README's canonical SVG and use the theme's
+accent color. The sidebar name comes from product identity, not an embedded image.
+Desktop icons and the social preview are generated from that same mark.
+
+**Limits.** The radar indicates an active run, not a percentage complete or a security
+guarantee. Desktop icons are packaged at build time; the repository social preview must
+be uploaded manually. Asset exports and regeneration instructions live in
+[the branding asset guide](assets/README.md).
 
 ## Providers & models
 
@@ -48,8 +67,9 @@ definition, captured at grant time or on first use — if the server changes the
 description the tool falls back to *Ask* and shows a "changed" badge; and a new stdio server,
 or a change to its command, working directory or environment, must be confirmed in a native
 OS dialog, so server installs can't be driven silently. A model that calls a disabled tool
-is told it is disabled (and to say so) rather than that it doesn't exist. Approval cards open their arguments automatically and carry the
-server's destructive/read-only hints; unanswered approvals auto-deny after 15 minutes.
+is told it is disabled (and to say so) rather than that it doesn't exist. Approval cards open
+their arguments automatically and carry the server's destructive/read-only hints; unanswered
+approvals auto-deny after 15 minutes.
 
 **Tool loading.** Under ⚒ Tools → *Tool loading*: **Always load all** sends every enabled
 tool's schema each request; **On-demand** sends only a `find_tools` search tool — the model
@@ -77,8 +97,8 @@ server: up to 500 tools, 64 env/header entries, 1 KB tool descriptions, 16 KB in
 schemas (oversized tools are skipped). Stdio children get an allow-listed environment plus
 a recovered login-shell PATH so `npx`/`uvx` resolve from GUI launches. Server-supplied
 metadata (descriptions, schemas) is treated as untrusted and bounded before it reaches the
-model. MCP auth (OAuth) is Phase 4 — remote servers that need browser sign-in can't
-connect yet.
+model. MCP auth (OAuth) is [Phase 4](../README.md#roadmap) — remote servers that need
+browser sign-in can't connect yet.
 
 ## Agents
 
