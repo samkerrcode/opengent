@@ -1,9 +1,10 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import ModelPicker from "$features/providers/ModelPicker.svelte";
   import ToolsMenu from "$features/mcp/ToolsMenu.svelte";
   import { mcpStore } from "$features/mcp/mcp-store.svelte";
   import { attachmentDataUrl } from "$lib/attachments";
-  import type { Agent, AttachmentMeta } from "$lib/ipc/commands";
+  import type { Agent, AttachmentMeta, PermissionScope } from "$lib/ipc/commands";
 
   let {
     busy,
@@ -14,11 +15,13 @@
     onremoveattachment,
     onopensettings,
     onopenconnections,
+    chatId,
     agent = null,
     supportsImages,
     onopenagent,
   }: {
     busy: boolean;
+    chatId: string;
     pending: AttachmentMeta[];
     agent?: Agent | null;
     supportsImages: boolean;
@@ -34,6 +37,14 @@
   let value = $state("");
   let textarea = $state<HTMLTextAreaElement | null>(null);
   let toolsOpen = $state(false);
+
+  // Agent chats use the agent's tool permissions; plain chats their own overrides.
+  const scope = $derived<PermissionScope>(agent ? { kind: "agent", id: agent.id } : { kind: "chat", id: chatId });
+  const activeTools = $derived(mcpStore.activeToolCountFor(scope));
+  $effect(() => {
+    const s = scope;
+    untrack(() => void mcpStore.loadScope(s));
+  });
 
   export function focus() {
     textarea?.focus();
@@ -146,15 +157,15 @@
           <button
             type="button"
             class="chip"
-            class:accent={mcpStore.activeToolCount > 0}
+            class:accent={activeTools > 0}
             onclick={() => (toolsOpen = !toolsOpen)}
             aria-expanded={toolsOpen}
-            title="MCP connections and tool permissions"
+            title={agent ? `Tools and permissions for ${agent.name}` : "Tools and permissions for this chat"}
           >
-            ⚒ Tools{mcpStore.activeToolCount ? ` · ${mcpStore.activeToolCount}` : ""}
+            ⚒ Tools{activeTools ? ` · ${activeTools}` : ""}
           </button>
           {#if toolsOpen}
-            <ToolsMenu {onopenconnections} onclose={() => (toolsOpen = false)} />
+            <ToolsMenu {scope} {agent} {onopenconnections} onclose={() => (toolsOpen = false)} />
           {/if}
         </span>
       </div>

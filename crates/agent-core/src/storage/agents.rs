@@ -88,6 +88,28 @@ pub fn save_agent(conn: &Connection, input: AgentInput) -> Result<Agent> {
     get_agent(conn, id)
 }
 
+/// Replaces only the agent's server access / tool permissions (Tools menu edits and
+/// approval-card grants), keeping everything else.
+pub fn set_agent_servers(
+    conn: &Connection,
+    id: AgentId,
+    servers: Vec<crate::agents::AgentServerAccess>,
+) -> Result<Agent> {
+    let a = get_agent(conn, id)?;
+    save_agent(
+        conn,
+        AgentInput {
+            id: Some(id),
+            name: a.name,
+            description: a.description,
+            default_model: a.default_model,
+            fallback_model: a.fallback_model,
+            system_prompt: a.system_prompt,
+            servers,
+        },
+    )
+}
+
 /// Deletes the agent and its schedules; its chats remain as plain chats.
 pub fn delete_agent(conn: &Connection, id: AgentId) -> Result<()> {
     let n = conn
@@ -395,6 +417,8 @@ mod tests {
             servers: vec![AgentServerAccess {
                 server_id: "fs".into(),
                 tools: None,
+                default_policy: None,
+                policies: Default::default(),
             }],
         }
     }

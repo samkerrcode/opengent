@@ -1,5 +1,7 @@
 <script lang="ts">
   import { mcpStore } from "./mcp-store.svelte";
+  import ToolAccessBadge from "./ToolAccessBadge.svelte";
+  import ToolPolicySelect from "./ToolPolicySelect.svelte";
   import {
     describeError,
     type KeyValueInput,
@@ -33,6 +35,7 @@
 
   let editing = $state<Form | null>(null);
   let busy = $state(false);
+  let testing = $state(false);
   let notice = $state<{ ok: boolean; text: string } | null>(null);
   let dialog = $state<HTMLElement | null>(null);
   let jsonImport = $state("");
@@ -119,21 +122,55 @@
     }
   }
 
-  async function save(andConnect: boolean) {
+  // "Save & test" waits in Rust for the connection outcome, then reports what happened.
+  async function save(test: boolean) {
     if (!editing) return;
     busy = true;
+    testing = test;
     notice = null;
     try {
-      await mcpStore.save(toInput(editing));
-      const id = editing.id;
-      // save() connects enabled servers automatically; offer explicit reconnect too.
-      notice = { ok: true, text: andConnect ? "Saved; connecting…" : "Saved." };
-      if (andConnect && id) await mcpStore.reconnect(id);
+      const id = await mcpStore.save(toInput(editing), test);
+      // A new server now has an id: keep editing it so status and tools appear.
+      if (editing && !editing.id) editing.id = id;
+      const s = mcpStore.servers.find((x) => x.id === id);
+      if (s && !s.enabled) {
+        notice = { ok: true, text: "Saved. This connection is disabled — turn it on to connect." };
+      } else if (!test) {
+        notice = { ok: true, text: "Saved." };
+      } else if (s?.status.kind === "connected") {
+        const n = s.tools.length;
+        notice = { ok: true, text: `Saved and connected · ${n} tool${n === 1 ? "" : "s"} discovered${n ? " — set their permissions below." : "."}` };
+      } else {
+        notice = { ok: false, text: "Saved, but the connection failed — see the error above." };
+      }
     } catch (e) {
       notice = { ok: false, text: describeError(e) };
     } finally {
       busy = false;
+      testing = false;
     }
+  }
+
+  async function setEnabled(s: McpServerView, enabled: boolean) {
+    notice = null;
+    try {
+      await mcpStore.setEnabled(s.id, enabled);
+    } catch (e) {
+      notice = { ok: false, text: describeError(e) };
+    }
+  }
+
+  async function act(p: Promise<unknown>) {
+    try {
+      await p;
+    } catch (e) {
+      notice = { ok: false, text: describeError(e) };
+    }
+  }
+
+  function setDefault(s: McpServerView, policy: ToolPolicy) {
+    if (editing) editing.default_policy = policy;
+    void act(mcpStore.setDefaultPolicy(s.id, policy));
   }
 
   async function remove(s: McpServerView) {
@@ -164,6 +201,7 @@
   }
 
   const current = $derived(editing?.id ? mcpStore.servers.find((s) => s.id === editing?.id) : undefined);
+  const overrideCount = $derived(current ? Object.keys(current.tool_policies).length : 0);
 
   $effect(() => {
     dialog?.focus();
@@ -199,6 +237,31 @@
 
       <div class="form">
         {#if editing}
+          {#if current}
+            <div class="enabled-bar" class:off={!current.enabled}>
+              <label class="switch">
+                <input type="checkbox" role="switch" checked={current.enabled} disabled={busy} onchange={(e) => setEnabled(current, e.currentTarget.checked)} />
+                <span>{current.enabled ? "Enabled" : "Disabled"}</span>
+              </label>
+              <span class="estatus">
+                {#if current.enabled}
+                  {statusText(current)}{current.server_info ? ` · ${current.server_info}` : ""}
+                {:else}
+                  Not connected and not offered to any chat or agent.
+                {/if}
+              </span>
+              {#if current.enabled}
+                <button class="btn-ghost btn-sm" onclick={() => act(mcpStore.reconnect(current.id))} disabled={busy || current.status.kind === "connecting"}>Reconnect</button>
+              {/if}
+            </div>
+            {#if current.enabled && current.status.kind === "failed"}
+              <p class="result bad" role="status">{current.status.error}</p>
+              {#if current.stderr_tail.length}
+                <pre class="stderr selectable">{current.stderr_tail.slice(-8).join("\n")}</pre>
+              {/if}
+            {/if}
+          {/if}
+
           <div class="row2">
             <label>
               <span>Transport</span>
@@ -254,32 +317,66 @@
           {/if}
 
           <div class="row2">
-            <label>
-              <span>Tool permission default</span>
-              <select bind:value={editing.default_policy}>
-                {#each policies as p (p.value)}<option value={p.value}>{p.label}</option>{/each}
-              </select>
-            </label>
+            {#if !current}
+              <label>
+                <span>Default for new tools</span>
+                <select bind:value={editing.default_policy}>
+                  {#each policies as p (p.value)}<option value={p.value}>{p.label}</option>{/each}
+                </select>
+              </label>
+            {/if}
             <label>
               <span>Tool call timeout <small>(seconds)</small></span>
               <input type="text" inputmode="numeric" bind:value={editing.call_timeout_secs} placeholder="120" />
             </label>
           </div>
 
-          {#if current}
-            <div class="status">
-              <span>Status: {statusText(current)}{current.server_info ? ` · ${current.server_info}` : ""}</span>
-              <button class="btn-ghost btn-sm" onclick={() => mcpStore.reconnect(current.id)}>Reconnect</button>
-            </div>
-            {#if current.status.kind === "failed"}
-              <p class="result bad" role="status">{current.status.error}</p>
-              {#if current.stderr_tail.length}
-                <pre class="stderr selectable">{current.stderr_tail.slice(-8).join("\n")}</pre>
-              {/if}
-            {/if}
-          {/if}
-          {#if notice}
+          {#if testing}
+            <p class="result ok" role="status">Saved; testing the connection…</p>
+          {:else if notice}
             <p class="result" class:ok={notice.ok} class:bad={!notice.ok} role="status">{notice.text}</p>
+          {/if}
+
+          {#if current}
+            <fieldset class="perms">
+              <legend>Tool permissions <small>(saved automatically · defaults for every chat)</small></legend>
+              <div class="defrow">
+                <span>Default for new tools</span>
+                <ToolPolicySelect value={current.default_policy} label="Default permission for new tools" onchange={(p) => setDefault(current, p)} />
+                {#if overrideCount}
+                  <button class="btn-ghost btn-sm" onclick={() => act(mcpStore.resetToolPolicies(current.id))} title="Clear per-tool choices so every tool follows the default">Reset all to default</button>
+                {/if}
+              </div>
+              {#if current.tools.length}
+                {#if current.tools_cached}
+                  <p class="phint">Last seen tool list — the server isn't connected. Changes apply when it reconnects.</p>
+                {/if}
+                <ul class="tools">
+                  {#each current.tools as t (t.name)}
+                    <li class="tool" class:off={t.policy === "block"}>
+                      <span class="tname" title={t.description ?? t.name}>
+                        {t.title ?? t.name}{#if t.title && t.title !== t.name}<small> {t.name}</small>{/if}
+                      </span>
+                      <ToolAccessBadge access={t.access} />
+                      {#if t.changed}
+                        <span class="warn" title="This tool's definition changed since it was allowed — it will ask for approval again">changed</span>
+                      {/if}
+                      <ToolPolicySelect value={t.policy} label="Permission for {t.name}" onchange={(p) => act(mcpStore.setToolPolicy(current.id, t.name, p))} />
+                    </li>
+                  {/each}
+                </ul>
+                <p class="phint">
+                  Badges come from the server's own hints and aren't verified. <strong>Unannotated</strong> tools gave no hint —
+                  the MCP spec treats them as potentially destructive, so <em>Ask</em> is the safe choice.
+                </p>
+              {:else}
+                <p class="phint">
+                  {current.enabled
+                    ? "No tools discovered yet. Use Save & test (or Reconnect) to list this server's tools and set a permission for each."
+                    : "Turn the connection on and test it to discover its tools."}
+                </p>
+              {/if}
+            </fieldset>
           {/if}
 
           {#if showImport}
@@ -300,13 +397,18 @@
               <button class="btn-danger btn-sm" onclick={() => remove(current)} disabled={busy}>Remove</button>
             {/if}
             <span class="spacer"></span>
-            <button class="btn-outline" onclick={() => save(true)} disabled={busy || !editing.name}>Save & connect</button>
+            <button
+              class="btn-outline"
+              onclick={() => save(true)}
+              disabled={busy || !editing.name || current?.enabled === false}
+              title={current?.enabled === false ? "Turn the connection on to test it" : "Save, connect and list the server's tools"}
+            >{testing ? "Testing…" : "Save & test"}</button>
             <button class="btn-primary" onclick={() => save(false)} disabled={busy || !editing.name}>Save</button>
           </footer>
         {:else}
           <div class="placeholder">
             <p>Connect MCP servers to give the model tools. Local servers run as commands (stdio); remote servers use Streamable HTTP.</p>
-            <p class="muted">Each tool can be set to Always allow, Ask, or Block — from the ⚒ Tools menu or per-server here.</p>
+            <p class="muted">Each tool can be set to Allow, Ask, or Disable — per tool here once the server is connected, or from the ⚒ Tools menu.</p>
             <button class="btn-primary" onclick={startNew}>Add connection</button>
           </div>
         {/if}
@@ -341,7 +443,28 @@
   .kvrow { display: grid; grid-template-columns: 140px 1fr auto auto; gap: 6px; align-items: center; }
   .kvrow input { padding: 5px 8px; font-size: 12.5px; }
   .sec { display: inline-flex; grid-template-columns: none; flex-direction: row; align-items: center; gap: 4px; font-size: 11px; color: var(--fg-faint); }
-  .status { display: flex; align-items: center; gap: var(--space-2); font-size: 12.5px; color: var(--fg-muted); }
+  .enabled-bar { display: flex; align-items: center; gap: var(--space-3); padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg); font-size: 12.5px; color: var(--fg-muted); }
+  .enabled-bar.off { border-style: dashed; }
+  .estatus { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .switch { display: inline-flex; flex-direction: row; align-items: center; gap: 8px; color: var(--fg); font-weight: 500; flex: none; cursor: pointer; }
+  .switch input { -webkit-appearance: none; appearance: none; margin: 0; width: 30px; height: 17px; border-radius: 999px; background: var(--border-strong); position: relative; cursor: pointer; transition: background var(--motion-fast) var(--ease); flex: none; }
+  .switch input::after { content: ""; position: absolute; top: 2px; left: 2px; width: 13px; height: 13px; border-radius: 50%; background: #fff; transition: transform var(--motion-fast) var(--ease); }
+  .switch input:checked { background: var(--accent); }
+  .switch input:checked::after { transform: translateX(13px); }
+  .switch input:disabled { opacity: 0.5; cursor: default; }
+  .perms { border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-2) var(--space-3) var(--space-3); display: grid; gap: 8px; margin: 0; min-width: 0; }
+  .perms legend { font-size: 12px; color: var(--fg-muted); padding: 0 4px; }
+  .perms legend small { color: var(--fg-faint); }
+  .defrow { display: flex; align-items: center; gap: var(--space-2); font-size: 12.5px; color: var(--fg-muted); }
+  .defrow :global(.policy) { font-size: 12px; padding: 3px 8px; }
+  .tools { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; max-height: 260px; overflow-y: auto; border-top: 1px solid var(--border); padding-top: 6px; }
+  .tool { display: flex; align-items: center; gap: 6px; font-size: 12.5px; padding: 3px 2px; border-radius: var(--radius-sm); }
+  .tool:hover { background: var(--bg-hover); }
+  .tool.off .tname { opacity: 0.5; }
+  .tname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tname small { color: var(--fg-faint); font-family: var(--font-mono); font-size: 11px; }
+  .warn { flex: none; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--warning); border: 1px solid var(--warning); border-radius: var(--radius-sm); padding: 0 4px; }
+  .phint { margin: 0; font-size: 11.5px; color: var(--fg-faint); line-height: 1.45; }
   .result { margin: 0; padding: 8px 10px; border-radius: var(--radius-md); font-size: 13px; }
   .result.ok { background: var(--accent-soft); }
   .result.bad { background: var(--danger-soft); color: var(--danger); }

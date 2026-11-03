@@ -1,17 +1,32 @@
 <script lang="ts">
   import { mcpStore } from "./mcp-store.svelte";
-  import type { McpServerView, ToolLoading, ToolPolicy } from "$lib/ipc/commands";
+  import ToolAccessBadge from "./ToolAccessBadge.svelte";
+  import ToolPolicySelect from "./ToolPolicySelect.svelte";
+  import { ownAccess, snapshotAccess, toolOn, toolPolicy, withTool } from "./permissions";
+  import { agentStore } from "$features/agents/agent-store.svelte";
+  import {
+    describeError,
+    type Agent,
+    type AgentServerAccess,
+    type McpServerView,
+    type PermissionScope,
+    type ToolInfo,
+    type ToolLoading,
+    type ToolPolicy,
+  } from "$lib/ipc/commands";
 
-  let { onopenconnections, onclose }: { onopenconnections: () => void; onclose: () => void } = $props();
+  // Plain chats edit this chat's overrides; agent chats edit the agent. Nothing here
+  // enables/disables a connection — that lives in Connections.
+  let {
+    scope,
+    agent = null,
+    onopenconnections,
+    onclose,
+  }: { scope: PermissionScope; agent?: Agent | null; onopenconnections: () => void; onclose: () => void } = $props();
 
   let menuEl = $state<HTMLElement>();
   let openServer = $state<string | null>(null);
-
-  const policies: { value: ToolPolicy; label: string; hint: string }[] = [
-    { value: "always_allow", label: "Allow", hint: "run without asking" },
-    { value: "ask", label: "Ask", hint: "approve each call" },
-    { value: "block", label: "Disable", hint: "hidden from the model" },
-  ];
+  let error = $state<string | null>(null);
 
   const loadings: { value: ToolLoading; label: string }[] = [
     { value: "auto", label: "Auto — all tools when the set is small, on-demand when large" },
@@ -19,8 +34,16 @@
     { value: "on_demand", label: "On-demand — the model searches and loads tools" },
   ];
 
+  const isAgent = $derived(scope.kind === "agent");
+  const views = $derived(mcpStore.scopedFor(scope));
+
+  const view = (id: string) => views?.find((v) => v.server_id === id);
+  const scopedTool = (s: McpServerView, name: string) => view(s.id)?.tools.find((t) => t.name === name);
+  const accessFor = (s: McpServerView): AgentServerAccess | null => agent?.servers.find((a) => a.server_id === s.id) ?? null;
+  const inScope = (s: McpServerView) => (isAgent ? accessFor(s) !== null : (view(s.id)?.in_scope ?? true));
+
   function dotClass(s: McpServerView) {
-    if (!s.enabled) return "off";
+    if (!s.enabled || !inScope(s)) return "off";
     switch (s.status.kind) {
       case "connected": return "ok";
       case "connecting": return "busy";
@@ -29,18 +52,65 @@
     }
   }
 
+  function activeIn(s: McpServerView): number {
+    const v = view(s.id);
+    return v ? v.tools.filter((t) => t.in_scope && t.policy !== "block").length : 0;
+  }
+
   function statusText(s: McpServerView): string {
+    if (!s.enabled) return "off in Connections";
+    if (!inScope(s)) return isAgent ? "not used by agent" : "off in this chat";
     switch (s.status.kind) {
       case "connected": {
-        const off = s.tools.filter((t) => t.policy === "block").length;
-        return `${s.tools.length - off} tools${off ? ` · ${off} off` : ""}`;
+        const on = activeIn(s);
+        return on === s.tools.length ? `${on} tools` : `${on} of ${s.tools.length} tools`;
       }
       case "connecting": return "connecting…";
       case "failed": return "failed";
-      case "disabled": return "off";
       default: return "idle";
     }
   }
+
+  async function act(p: Promise<unknown>) {
+    error = null;
+    try {
+      await p;
+      if (isAgent) await agentStore.load();
+    } catch (e) {
+      error = describeError(e);
+    }
+  }
+
+  function saveAccess(s: McpServerView, access: AgentServerAccess | null) {
+    if (agent) void act(mcpStore.setAgentServerAccess(agent.id, s.id, access));
+  }
+
+  function toggleServer(s: McpServerView, on: boolean) {
+    if (scope.kind === "chat") return void act(mcpStore.setChatServerEnabled(scope.id, s.id, on));
+    const cur = accessFor(s);
+    saveAccess(s, on ? (cur ? ownAccess(cur, s) : snapshotAccess(s)) : null);
+  }
+
+  function setChatTool(s: McpServerView, name: string, policy: ToolPolicy | null) {
+    if (scope.kind === "chat") void act(mcpStore.setChatToolPolicy(scope.id, s.id, name, policy));
+  }
+
+  function setAgentTool(s: McpServerView, t: ToolInfo, policy: ToolPolicy | "on") {
+    const cur = accessFor(s);
+    if (cur) saveAccess(s, withTool(ownAccess(cur, s), t, policy));
+  }
+
+  function setAgentDefault(s: McpServerView, policy: ToolPolicy) {
+    const cur = accessFor(s);
+    if (cur) saveAccess(s, { ...ownAccess(cur, s), default_policy: policy });
+  }
+
+  function reset(s: McpServerView) {
+    if (scope.kind === "chat") void act(mcpStore.resetChatToolPermissions(scope.id, s.id));
+    else saveAccess(s, snapshotAccess(s));
+  }
+
+  const hasOverrides = (s: McpServerView) => isAgent || (view(s.id)?.tools.some((t) => t.overridden) ?? false);
 
   function onDown(e: MouseEvent) {
     if (menuEl && !menuEl.contains(e.target as Node)) onclose();
@@ -48,65 +118,92 @@
   function onKey(e: KeyboardEvent) {
     if (e.key === "Escape") onclose();
   }
+  function openConnections() {
+    onclose();
+    onopenconnections();
+  }
 </script>
 
 <svelte:window onmousedown={onDown} onkeydown={onKey} />
 
 <div class="menu" bind:this={menuEl} role="menu" aria-label="Tools and connections">
   <header class="head">
-    <span class="h">Connections</span>
-    {#if mcpStore.toolCount}<span class="n">{mcpStore.toolCount} tools</span>{/if}
+    <span class="h">{isAgent && agent ? `Tools · ${agent.name}` : "Tools · this chat"}</span>
+    {#if mcpStore.servers.length}<span class="n">{mcpStore.activeToolCountFor(scope)} active</span>{/if}
   </header>
+  <p class="scope-hint">
+    {isAgent ? "Changes are saved to the agent and apply to all its chats and schedules." : "Changes apply to this chat only. Defaults for new chats are set in Connections."}
+  </p>
+  {#if error}<p class="err top">{error}</p>{/if}
 
   <div class="list">
     {#each mcpStore.servers as s (s.id)}
+      {@const on = inScope(s)}
+      {@const access = accessFor(s)}
+      {@const own = access ? ownAccess(access, s) : null}
       <div class="server">
         <div class="srow">
           <button
             class="expand"
             class:open={openServer === s.id}
             onclick={() => (openServer = openServer === s.id ? null : s.id)}
-            disabled={s.tools.length === 0}
+            disabled={s.tools.length === 0 || !s.enabled || !on}
             aria-label="Tool permissions for {s.name}"
           >›</button>
           <span class="dot {dotClass(s)}" aria-hidden="true"></span>
           <span class="sname" title={s.name}>{s.name}</span>
           <span class="scount">{statusText(s)}</span>
-          <label class="toggle" title={s.enabled ? "Disable server" : "Enable server"}>
-            <input
-              type="checkbox"
-              checked={s.enabled}
-              onchange={(e) => mcpStore.setEnabled(s.id, e.currentTarget.checked)}
-            />
-          </label>
+          {#if s.enabled}
+            <label class="toggle" title={on ? (isAgent ? "Stop using in this agent" : "Turn off for this chat") : (isAgent ? "Use in this agent" : "Turn on for this chat")}>
+              <input type="checkbox" checked={on} onchange={(e) => toggleServer(s, e.currentTarget.checked)} />
+            </label>
+          {:else}
+            <button class="enable" onclick={openConnections} title="Connections are enabled in Connections">Enable…</button>
+          {/if}
         </div>
-        {#if s.status.kind === "failed"}
+        {#if s.enabled && on && s.status.kind === "failed"}
           <p class="err" title={s.status.error}>{s.status.error}</p>
         {/if}
-        {#if openServer === s.id && s.tools.length}
+        {#if openServer === s.id && s.tools.length && s.enabled && on}
           <div class="sub">
-            <label class="def">
-              <span>New tools default to</span>
-              <select value={s.default_policy} onchange={(e) => mcpStore.setDefaultPolicy(s.id, e.currentTarget.value as ToolPolicy)}>
-                {#each policies as p (p.value)}<option value={p.value}>{p.label}</option>{/each}
-              </select>
-            </label>
-            {#each s.tools as t (t.name)}
-              <div class="tool" class:off={t.policy === "block"} title={t.description ?? t.name}>
-                <span class="tname">{t.title ?? t.name}</span>
-                {#if t.changed}
-                  <span class="warn" title="This tool's definition changed since it was allowed — it will ask for approval again">changed</span>
-                {/if}
-                <select
-                  class="policy"
-                  value={t.policy}
-                  aria-label="Permission for {t.name}"
-                  onchange={(e) => mcpStore.setToolPolicy(s.id, t.name, e.currentTarget.value as ToolPolicy)}
-                >
-                  {#each policies as p (p.value)}<option value={p.value}>{p.label}</option>{/each}
+            {#if isAgent && own}
+              <div class="def">
+                <span>New tools</span>
+                <select value={own.default_policy === "block" ? "block" : "ask"} onchange={(e) => setAgentDefault(s, e.currentTarget.value as ToolPolicy)} aria-label="New tools on {s.name}">
+                  <option value="ask">Ask</option>
+                  <option value="block">Off</option>
                 </select>
               </div>
+            {/if}
+            {#each s.tools as t (t.name)}
+              {@const st = scopedTool(s, t.name)}
+              {@const agentOn = own ? toolOn(own, t.name) : false}
+              <div class="tool" class:off={t.policy === "block" || (isAgent ? !agentOn : st?.policy === "block")} title={t.description ?? t.name}>
+                {#if isAgent && t.policy !== "block"}
+                  <input class="tcheck" type="checkbox" checked={agentOn} aria-label="Use {t.name}" onchange={(e) => setAgentTool(s, t, e.currentTarget.checked ? "on" : "block")} />
+                {/if}
+                <span class="tname">{t.title ?? t.name}</span>
+                <ToolAccessBadge access={t.access} />
+                {#if st?.changed}
+                  <span class="warn" title="This tool's definition changed since it was allowed — it will ask for approval again">changed</span>
+                {/if}
+                {#if t.policy === "block"}
+                  <span class="ceil" title="Disabled in Connections — no chat or agent can turn it on">off in Connections</span>
+                {:else if isAgent && own}
+                  {#if agentOn}
+                    <ToolPolicySelect value={toolPolicy(own, t.name)} allowDisable={false} label="Permission for {t.name}" onchange={(p) => setAgentTool(s, t, p)} />
+                  {/if}
+                {:else if st}
+                  {#if st.overridden}
+                    <button class="ovr" title="Set for this chat — click to use the connection default" onclick={() => setChatTool(s, t.name, null)}>●</button>
+                  {/if}
+                  <ToolPolicySelect value={st.policy} label="Permission for {t.name}" onchange={(p) => setChatTool(s, t.name, p)} />
+                {/if}
+              </div>
             {/each}
+            {#if hasOverrides(s)}
+              <button class="reset" onclick={() => reset(s)}>{isAgent ? "Reset to connection defaults" : "Reset to defaults"}</button>
+            {/if}
           </div>
         {/if}
       </div>
@@ -122,7 +219,7 @@
         {#each loadings as l (l.value)}<option value={l.value}>{l.label}</option>{/each}
       </select>
     </label>
-    <button class="manage" onclick={() => { onclose(); onopenconnections(); }}>Manage connections…</button>
+    <button class="manage" onclick={openConnections}>Manage connections…</button>
   </footer>
 </div>
 
@@ -131,8 +228,8 @@
     position: absolute;
     bottom: calc(100% + 8px);
     left: 0;
-    width: 340px;
-    max-height: 420px;
+    width: 400px;
+    max-height: 460px;
     display: flex;
     flex-direction: column;
     background: var(--bg-elevated);
@@ -146,7 +243,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 10px 12px 8px;
+    padding: 10px 12px 2px;
     font-size: 12px;
     font-weight: 600;
     color: var(--fg-muted);
@@ -155,6 +252,13 @@
     margin-left: auto;
     font-weight: normal;
     color: var(--fg-faint);
+  }
+  .scope-hint {
+    margin: 0;
+    padding: 0 12px 8px;
+    font-size: 11px;
+    color: var(--fg-faint);
+    line-height: 1.4;
   }
   .list {
     overflow-y: auto;
@@ -211,9 +315,15 @@
     color: var(--fg-faint);
     flex: none;
   }
-  .toggle input {
+  .toggle input,
+  .tcheck {
     accent-color: var(--accent);
     margin: 0;
+  }
+  .enable {
+    font-size: 11px;
+    padding: 1px 6px;
+    color: var(--accent);
   }
   .err {
     margin: 0 6px 4px 31px;
@@ -222,6 +332,10 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .err.top {
+    margin: 0 12px 6px;
+    white-space: normal;
   }
   .sub {
     margin: 0 6px 6px 31px;
@@ -242,14 +356,18 @@
     border-bottom: 1px solid var(--border);
     margin-bottom: 2px;
   }
-  .def select { width: auto; padding: 2px 6px; font-size: 11.5px; }
+  .def select {
+    width: auto;
+    padding: 1px 6px;
+    font-size: 11px;
+  }
   .tool {
     display: flex;
     align-items: center;
     gap: 6px;
     font-size: 12px;
   }
-  .tool.off {
+  .tool.off .tname {
     opacity: 0.5;
   }
   .tname {
@@ -270,11 +388,25 @@
     border-radius: var(--radius-sm);
     padding: 0 4px;
   }
-  .policy {
-    width: auto;
-    padding: 1px 6px;
+  .ceil {
+    flex: none;
     font-size: 11px;
-    border-radius: var(--radius-sm);
+    color: var(--fg-faint);
+  }
+  .ovr {
+    flex: none;
+    padding: 0 2px;
+    font-size: 9px;
+    color: var(--accent);
+  }
+  .reset {
+    justify-self: start;
+    font-size: 11px;
+    padding: 2px 4px;
+    color: var(--fg-muted);
+  }
+  .reset:hover {
+    color: var(--fg);
   }
   .empty {
     margin: 0;
