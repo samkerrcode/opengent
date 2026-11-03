@@ -6,6 +6,9 @@ planned work lives in the [README roadmap](README.md#roadmap).
 
 ## Unreleased — Phase 4 (OAuth)
 
+- Bumped `katex` 0.16.47 → 0.19.1 (Dependabot alert: prototype-pollution gadget
+  allowing inherited `trust` options, fixed in 0.18.2) and added an npm `overrides`
+  entry so `@vscode/markdown-it-katex`'s nested copy resolves to the same version.
 - Fixed the attachment picker hiding text files for vision-capable models: the dialog no
   longer uses extension filters, one unusable file in a multi-select is skipped with a
   per-file reason instead of failing the whole pick, and images left pending after
