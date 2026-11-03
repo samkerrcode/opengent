@@ -6,6 +6,9 @@ planned work lives in the [README roadmap](README.md#roadmap).
 
 ## Unreleased — Phase 4 (OAuth)
 
+- Bumped `katex` 0.16.47 → 0.19.1 (Dependabot alert: prototype-pollution gadget
+  allowing inherited `trust` options, fixed in 0.18.2) and added an npm `overrides`
+  entry so `@vscode/markdown-it-katex`'s nested copy resolves to the same version.
 - Scoped tool permissions. Connection permissions are now defaults: the composer's ⚒ Tools
   menu sets per-chat overrides (turn a server off for one chat without disconnecting it;
   Allow / Ask / Disable per tool) and, in agent chats, edits the agent. Agents own their tools
