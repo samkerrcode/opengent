@@ -14,8 +14,11 @@ pub fn list_mcp_servers(state: State<'_, AppState>) -> Vec<McpServerView> {
     state.mcp.list_views()
 }
 
-/// Validates and persists a server config (secrets to the keychain). If the server is
-/// enabled it (re)connects in the background — status changes arrive via `mcp-changed`.
+/// Validates and persists a server config (secrets to the keychain) and returns its id. An
+/// enabled server reconnects when `connect` is set ("Save & test" — awaited, so the result
+/// is known on return) or, in the background, when the save changed how it is reached; a
+/// plain save that only renames or edits permissions keeps the live session. Disabled
+/// servers never connect. Status changes arrive via `mcp-changed`.
 /// A new stdio server, or a change to what one launches (command, args, cwd, env), must be
 /// confirmed through a native dialog first: it runs arbitrary code, so it can't be driven
 /// silently by the webview.
@@ -24,7 +27,8 @@ pub async fn save_mcp_server(
     app: AppHandle,
     state: State<'_, AppState>,
     input: McpServerInput,
-) -> Result<(), Error> {
+    connect: bool,
+) -> Result<String, Error> {
     // An empty command is rejected by `save` validation; don't prompt for it.
     if !input.command.trim().is_empty() && state.mcp.store().launch_changed(&input) {
         let env_names: Vec<&str> = input.env.iter().map(|e| e.name.trim()).collect();
@@ -57,13 +61,21 @@ pub async fn save_mcp_server(
             return Err(Error::InvalidInput("server command not confirmed".into()));
         }
     }
+    let changed = state.mcp.store().connection_changed(&input);
     let config = state.mcp.store().save(input)?;
-    let id = config.id.clone();
-    let manager: Arc<McpManager> = state.mcp.clone();
-    tauri::async_runtime::spawn(async move {
-        manager.connect(&id).await;
-    });
-    Ok(())
+    if config.enabled {
+        if connect {
+            // "Save & test" waits for the outcome so the UI can report it.
+            state.mcp.connect(&config.id).await;
+        } else if changed {
+            let id = config.id.clone();
+            let manager: Arc<McpManager> = state.mcp.clone();
+            tauri::async_runtime::spawn(async move {
+                manager.connect(&id).await;
+            });
+        }
+    }
+    Ok(config.id)
 }
 
 #[tauri::command]
@@ -124,6 +136,12 @@ pub fn set_mcp_default_policy(
 ) -> Result<(), Error> {
     state.mcp.store().set_default_policy(&server_id, policy)?;
     Ok(())
+}
+
+/// Clears per-tool overrides so every tool follows the server default.
+#[tauri::command]
+pub fn reset_mcp_tool_policies(state: State<'_, AppState>, server_id: String) -> Result<(), Error> {
+    state.mcp.store().reset_tool_policies(&server_id)
 }
 
 #[tauri::command]

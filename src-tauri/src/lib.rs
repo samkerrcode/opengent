@@ -59,6 +59,7 @@ pub fn run() {
             commands::reconnect_mcp_server,
             commands::set_mcp_tool_policy,
             commands::set_mcp_default_policy,
+            commands::reset_mcp_tool_policies,
             commands::get_tool_settings,
             commands::set_tool_settings,
             commands::resolve_tool_approval,

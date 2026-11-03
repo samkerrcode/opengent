@@ -24,6 +24,7 @@ import type { KeyValueInput } from "$lib/generated/bindings/KeyValueInput";
 import type { McpServerInput } from "$lib/generated/bindings/McpServerInput";
 import type { McpServerView } from "$lib/generated/bindings/McpServerView";
 import type { McpTransport } from "$lib/generated/bindings/McpTransport";
+import type { ToolAccess } from "$lib/generated/bindings/ToolAccess";
 import type { ToolCallInfo } from "$lib/generated/bindings/ToolCallInfo";
 import type { ToolCallStatus } from "$lib/generated/bindings/ToolCallStatus";
 import type { ToolInfo } from "$lib/generated/bindings/ToolInfo";
@@ -75,6 +76,7 @@ export type {
   SecretProbe,
   StoredMessage,
   TlsMode,
+  ToolAccess,
   ToolCallInfo,
   ToolCallStatus,
   ToolInfo,
@@ -138,7 +140,10 @@ export const commands = {
 
   // MCP connections & tool security (Phase 3).
   listMcpServers: () => invoke<McpServerView[]>("list_mcp_servers"),
-  saveMcpServer: (input: McpServerInput) => invoke<void>("save_mcp_server", { input }),
+  /** Returns the server id. `connect` forces a (re)connect ("Save & test"); otherwise only
+   * changes to how the server is reached reconnect it. Disabled servers never connect. */
+  saveMcpServer: (input: McpServerInput, connect: boolean) =>
+    invoke<string>("save_mcp_server", { input, connect }),
   deleteMcpServer: (id: string) => invoke<void>("delete_mcp_server", { id }),
   setMcpServerEnabled: (id: string, enabled: boolean) =>
     invoke<void>("set_mcp_server_enabled", { id, enabled }),
@@ -147,6 +152,7 @@ export const commands = {
     invoke<void>("set_mcp_tool_policy", { serverId, tool, policy }),
   setMcpDefaultPolicy: (serverId: string, policy: ToolPolicy) =>
     invoke<void>("set_mcp_default_policy", { serverId, policy }),
+  resetMcpToolPolicies: (serverId: string) => invoke<void>("reset_mcp_tool_policies", { serverId }),
   getToolSettings: () => invoke<ToolSettings>("get_tool_settings"),
   setToolSettings: (settings: ToolSettings) => invoke<void>("set_tool_settings", { settings }),
   resolveToolApproval: (runId: RunId, callId: string, decision: ApprovalDecision) =>

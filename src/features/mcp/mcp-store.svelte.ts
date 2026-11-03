@@ -28,8 +28,9 @@ class McpStore {
     return this.servers.filter((s) => s.enabled).length;
   }
 
+  /** Tools on connected servers (`tools` also holds the cached list of offline ones). */
   get toolCount(): number {
-    return this.servers.reduce((n, s) => n + s.tools.length, 0);
+    return this.connected.reduce((n, s) => n + s.tools.length, 0);
   }
 
   /** Tools actually offered to the model: excludes disabled (block-policy) tools and
@@ -63,10 +64,11 @@ class McpStore {
     }
   }
 
-  private async run(p: Promise<unknown>) {
+  private async run<T>(p: Promise<T>): Promise<T> {
     try {
-      await p;
+      const v = await p;
       this.error = null;
+      return v;
     } catch (e) {
       this.error = describeError(e);
       throw e;
@@ -75,8 +77,9 @@ class McpStore {
     }
   }
 
-  save(input: McpServerInput) {
-    return this.run(commands.saveMcpServer(input));
+  /** Resolves to the server id. */
+  save(input: McpServerInput, connect: boolean) {
+    return this.run(commands.saveMcpServer(input, connect));
   }
 
   remove(id: string) {
@@ -97,6 +100,10 @@ class McpStore {
 
   setDefaultPolicy(serverId: string, policy: ToolPolicy) {
     return this.run(commands.setMcpDefaultPolicy(serverId, policy));
+  }
+
+  resetToolPolicies(serverId: string) {
+    return this.run(commands.resetMcpToolPolicies(serverId));
   }
 
   setLoading(loading: ToolLoading) {

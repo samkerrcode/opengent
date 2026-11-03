@@ -7,6 +7,10 @@ import type { ToolPolicy } from "./ToolPolicy";
 
 export type McpServerView = { status: McpServerStatus, server_info: string | null, tools: Array<ToolInfo>, 
 /**
+ * `tools` is the last list seen (server disabled, offline or failed), not live.
+ */
+tools_cached: boolean, 
+/**
  * Recent stderr lines for stdio servers that failed to start.
  */
 stderr_tail: Array<string>, id: string, name: string, enabled: boolean, transport: McpTransport, command: string, args: Array<string>, env: Array<KeyValueEntry>, cwd: string | null, url: string, headers: Array<KeyValueEntry>, 

@@ -22,13 +22,13 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 
-use super::config::{McpServerConfig, McpStore, McpTransport};
+use super::config::{KnownTool, McpServerConfig, McpStore, McpTransport};
 use super::{client_config, StdioServerSpec};
 use crate::agent::context::{estimate_tokens, tools_prompt, ServerBrief};
 use crate::agent::tools::{
     resolve_on_demand, RunTools, ToolEntry, ToolFilter, ToolFuture, ToolHost, ToolNamer, ToolOutput,
 };
-use crate::domain::{Message, ToolPolicy};
+use crate::domain::{Message, ToolAccess, ToolPolicy};
 use crate::providers::ToolSpec;
 
 /// Wait for the MCP handshake + initial `tools/list` before marking a server connected.
@@ -94,9 +94,8 @@ pub struct ToolInfo {
     pub title: Option<String>,
     pub description: Option<String>,
     pub policy: ToolPolicy,
-    /// MCP annotation hints (untrusted metadata, shown for information only).
-    pub read_only: bool,
-    pub destructive: bool,
+    /// From MCP annotation hints (untrusted metadata, shown for information only).
+    pub access: ToolAccess,
     /// An `always_allow` grant exists but the tool's definition changed since it was
     /// granted; it currently behaves as `ask` until re-approved.
     #[serde(default)]
@@ -112,6 +111,8 @@ pub struct McpServerView {
     pub status: McpServerStatus,
     pub server_info: Option<String>,
     pub tools: Vec<ToolInfo>,
+    /// `tools` is the last list seen (server disabled, offline or failed), not live.
+    pub tools_cached: bool,
     /// Recent stderr lines for stdio servers that failed to start.
     pub stderr_tail: Vec<String>,
 }
@@ -155,6 +156,24 @@ pub(crate) fn tool_signature(t: &rmcp::model::Tool) -> String {
     }
     use base64::Engine;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(h.finalize())
+}
+
+/// The cacheable summary of a live tool definition.
+fn known_tool(t: &rmcp::model::Tool) -> KnownTool {
+    let ann = t.annotations.as_ref();
+    KnownTool {
+        name: t.name.to_string(),
+        title: t
+            .title
+            .clone()
+            .or_else(|| ann.and_then(|a| a.title.clone())),
+        description: t.description.as_deref().map(str::to_owned),
+        access: ToolAccess::from_hints(
+            ann.and_then(|a| a.read_only_hint),
+            ann.and_then(|a| a.destructive_hint),
+        ),
+        signature: tool_signature(t),
+    }
 }
 
 /// Client-side MCP handler: declares our identity/capabilities and forwards
@@ -243,14 +262,27 @@ impl McpManager {
         tools.iter().find(|t| t.name == tool).map(tool_signature)
     }
 
-    /// Persists a tool policy and, when the server is connected, the tool's current
-    /// definition signature so an `AlwaysAllow` grant stays verifiable.
+    /// Persists a tool policy plus the definition signature it was granted against — live
+    /// when connected, else the last listed one — so an `AlwaysAllow` grant stays
+    /// verifiable even when made while the server is offline.
     pub fn set_policy(&self, server_id: &str, tool: &str, policy: ToolPolicy) {
-        let sig = self.current_signature(server_id, tool);
+        let sig = self
+            .current_signature(server_id, tool)
+            .or_else(|| self.store.cached_signature(server_id, tool));
         if let Err(e) = self.store.set_tool_policy(server_id, tool, policy, sig) {
             tracing::warn!(error = %e, "failed to persist tool policy");
         }
         self.notify();
+    }
+
+    /// Caches the listed tools (and pins newly seen default-allowed ones).
+    fn record_catalog(&self, server_id: &str, tools: &[rmcp::model::Tool]) {
+        if let Err(e) = self
+            .store
+            .set_catalog(server_id, tools.iter().map(known_tool).collect())
+        {
+            tracing::warn!(error = %e, "failed to persist tool catalog");
+        }
     }
 
     /// Enabled servers whose first connection attempt hasn't settled (connected or failed).
@@ -292,41 +324,35 @@ impl McpManager {
             .into_iter()
             .map(|config| {
                 let live = inner.live.get(&config.id);
-                let tools = live
-                    .map(|l| {
-                        let mut namer = ToolNamer::new();
-                        l.tools
-                            .lock()
-                            .expect("tools lock")
-                            .iter()
-                            .map(|t| {
-                                let ann = t.annotations.as_ref();
-                                let policy = self.store.policy_for(&config.id, &t.name);
-                                ToolInfo {
-                                    name: t.name.to_string(),
-                                    exposed: namer.name(&config.name, &t.name),
-                                    title: t
-                                        .title
-                                        .clone()
-                                        .or_else(|| ann.and_then(|a| a.title.clone())),
-                                    description: t.description.as_deref().map(str::to_owned),
-                                    policy,
-                                    read_only: ann.and_then(|a| a.read_only_hint).unwrap_or(false),
-                                    destructive: ann
-                                        .and_then(|a| a.destructive_hint)
-                                        .unwrap_or(true),
-                                    changed: policy == ToolPolicy::AlwaysAllow
-                                        && self.store.grant_stale(
-                                            &config.id,
-                                            &t.name,
-                                            &tool_signature(t),
-                                        ),
-                                }
-                            })
-                            .collect()
+                let known: Vec<KnownTool> = match live {
+                    Some(l) => l
+                        .tools
+                        .lock()
+                        .expect("tools lock")
+                        .iter()
+                        .map(known_tool)
+                        .collect(),
+                    None => self.store.catalog(&config.id),
+                };
+                let mut namer = ToolNamer::new();
+                let tools = known
+                    .into_iter()
+                    .map(|t| {
+                        let policy = self.store.policy_for(&config.id, &t.name);
+                        ToolInfo {
+                            exposed: namer.name(&config.name, &t.name),
+                            policy,
+                            access: t.access,
+                            changed: policy == ToolPolicy::AlwaysAllow
+                                && self.store.grant_stale(&config.id, &t.name, &t.signature),
+                            name: t.name,
+                            title: t.title,
+                            description: t.description,
+                        }
                     })
-                    .unwrap_or_default();
+                    .collect();
                 McpServerView {
+                    tools_cached: live.is_none(),
                     status: if config.enabled {
                         inner
                             .status
@@ -424,7 +450,11 @@ impl McpManager {
                     return;
                 }
                 let live = Arc::new(live);
-                let count = live.tools.lock().expect("tools lock").len() as u32;
+                let count = {
+                    let tools = live.tools.lock().expect("tools lock");
+                    self.record_catalog(id, &tools);
+                    tools.len() as u32
+                };
                 self.inner
                     .lock()
                     .expect("mcp lock")
@@ -525,6 +555,7 @@ impl McpManager {
                     let count = {
                         let mut t = live.tools.lock().expect("tools lock");
                         *t = tools;
+                        this.record_catalog(&id, &t);
                         t.len() as u32
                     };
                     this.set_status(&id, McpServerStatus::Connected { tool_count: count });

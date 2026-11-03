@@ -55,16 +55,33 @@ optional env vars and working directory) or a *remote server* (Streamable HTTP e
 optional headers). Paste a standard `{"mcpServers": {…}}` JSON config to prefill the form.
 Secret env/header values go to the OS keychain; everything else lives in `mcp.json`.
 Servers connect in the background and can be toggled on/off from the ⚒ **Tools** chip in the
-composer; status dots and stderr tails surface failures.
+composer or the **Enabled** switch at the top of a connection in Connections; status dots and
+stderr tails surface failures. While a connection is disabled, Reconnect is hidden and
+**Save & test** is greyed out. **Save & test** saves, connects, waits for the handshake and
+reports the result ("connected · N tools discovered" or the error); a plain **Save** only
+reconnects when the command, working directory, environment, URL or headers changed.
 
-**Tool security.** Every tool is *Always allow*, *Ask*, or *Block* — set per tool in the
-⚒ Tools menu (each server expands into its tool list) or per server in Connections via the
-default policy. Blocked tools are never sent to the model; *Ask* pauses the run on an
-approval card (Allow once / Always allow / Deny), *Always allow* persists the choice.
-Enforcement happens in Rust at dispatch, not just in the UI. Two extra guardrails:
-*Always allow* (per tool or as the server default) pins a signature of the tool's
-definition, captured at grant time or on first use — if the server changes the schema or
-description the tool falls back to *Ask* and shows a "changed" badge; and a new stdio server,
+**Tool permissions.** A connection's **Tool permissions** section lists every tool the
+server reported, each with an access badge and an *Allow* / *Ask* / *Disable* choice, plus
+*Default for new tools* and *Reset all to default*. Changes save immediately. The list is
+cached in `mcp.json` after each successful listing, so it stays visible ("last seen") and
+editable while the server is disabled or offline. Badges come from the server's MCP
+annotation hints and are informational only — never used to grant anything:
+*Read-only* (`readOnlyHint`), *Write* (`destructiveHint: false`), *Destructive*
+(`destructiveHint: true`), and *Unannotated* (no hints given). Unannotated tools get a
+dashed amber badge and a note: the MCP spec defaults them to potentially destructive, so
+*Ask* is the safe choice.
+
+**Tool security.** Every tool is *Always allow*, *Ask*, or *Block* — set per tool in
+Connections → Tool permissions or the ⚒ Tools menu (each server expands into its tool
+list), or per server via the default. Blocked tools are never sent to the model; *Ask*
+pauses the run on an approval card (Allow once / Always allow / Deny), *Always allow*
+persists the choice. Enforcement happens in Rust at dispatch, not just in the UI. Two extra
+guardrails: *Always allow* (per tool or as the server default) pins a signature of the
+tool's definition — captured when granted (from the live definition, or the cached one when
+offline) or, for a default Allow, when the tool is first listed; only configs predating the
+cache pin on first use. If the server changes the schema or description the tool falls back
+to *Ask* and shows a "changed" badge; and a new stdio server,
 or a change to its command, working directory or environment, must be confirmed in a native
 OS dialog, so server installs can't be driven silently. A model that calls a disabled tool
 is told it is disabled (and to say so) rather than that it doesn't exist. Approval cards open
@@ -97,7 +114,11 @@ server: up to 500 tools, 64 env/header entries, 1 KB tool descriptions, 16 KB in
 schemas (oversized tools are skipped). Stdio children get an allow-listed environment plus
 a recovered login-shell PATH so `npx`/`uvx` resolve from GUI launches. Server-supplied
 metadata (descriptions, schemas) is treated as untrusted and bounded before it reaches the
-model. MCP auth (OAuth) is [Phase 4](../README.md#roadmap) — remote servers that need
+model; the cached tool list keeps at most 500 tools per server, with titles capped at 128
+and descriptions at 256 characters, and is display/pinning only — calls always need the
+live server. Permissions are still global per connection (every chat and agent shares them);
+per-chat and per-agent permissions are designed in
+[design/scoped-tool-permissions.md](design/scoped-tool-permissions.md). MCP auth (OAuth) is [Phase 4](../README.md#roadmap) — remote servers that need
 browser sign-in can't connect yet.
 
 ## Agents

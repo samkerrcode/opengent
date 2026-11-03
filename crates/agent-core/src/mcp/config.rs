@@ -12,7 +12,7 @@ use ts_rs::TS;
 
 use crate::agent::tools::ToolSettings;
 use crate::config::DataRoot;
-use crate::domain::ToolPolicy;
+use crate::domain::{ToolAccess, ToolPolicy};
 use crate::providers::openai_compat::normalize_base_url;
 use crate::secrets::{SecretRef, SecretStore};
 use crate::{Error, Result};
@@ -129,6 +129,39 @@ struct StoreFile {
     /// loses the grant and falls back to `Ask` until re-approved.
     #[serde(default)]
     signatures: HashMap<String, HashMap<String, String>>,
+    /// Last tool list seen per server (`server_id -> tools`), so permissions can be edited
+    /// and grants pinned while a server is disabled or offline. Display/pinning only —
+    /// dispatch always requires the live tool.
+    #[serde(default)]
+    catalog: HashMap<String, Vec<KnownTool>>,
+}
+
+/// Bounds on cached server-provided metadata (untrusted, persisted to disk).
+const MAX_CACHED_TOOLS: usize = 500;
+const MAX_CACHED_NAME: usize = 128;
+const MAX_CACHED_TITLE: usize = 128;
+const MAX_CACHED_DESC: usize = 256;
+
+/// A tool as last listed by its server.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnownTool {
+    pub name: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub access: ToolAccess,
+    /// Definition signature (see `manager::tool_signature`).
+    pub signature: String,
+}
+
+impl KnownTool {
+    fn bounded(mut self) -> Self {
+        let cap = |s: &str, n: usize| s.chars().take(n).collect::<String>();
+        self.title = self.title.map(|t| cap(&t, MAX_CACHED_TITLE));
+        self.description = self.description.map(|d| cap(&d, MAX_CACHED_DESC));
+        self
+    }
 }
 
 pub struct McpStore {
@@ -203,6 +236,20 @@ pub fn split_command(line: &str) -> Vec<String> {
     out
 }
 
+/// Whether env/header inputs differ from the stored entries. A secret row with an empty
+/// value keeps the stored secret, so it only counts as a change if it wasn't secret before.
+fn entries_changed(inputs: &[KeyValueInput], old: &[KeyValueEntry]) -> bool {
+    inputs.len() != old.len()
+        || inputs.iter().any(|e| {
+            let name = e.name.trim();
+            match old.iter().find(|o| o.name == name) {
+                None => true,
+                Some(o) if e.secret => !o.secret || !e.value.is_empty(),
+                Some(o) => o.secret || o.value != e.value,
+            }
+        })
+}
+
 impl McpStore {
     pub fn load(data_root: &DataRoot, secrets: Arc<dyn SecretStore>) -> Result<Self> {
         let path = data_root.path().join("mcp.json");
@@ -241,6 +288,7 @@ impl McpStore {
                 .collect(),
             settings: state.settings.clone(),
             signatures: state.signatures.clone(),
+            catalog: state.catalog.clone(),
         };
         let tmp = self.path.with_extension("json.tmp");
         let bytes =
@@ -294,9 +342,10 @@ impl McpStore {
 
     /// Dispatch-time policy. `AlwaysAllow` (explicit or via the server default) is honored
     /// only while the tool's definition signature matches the pinned one; a changed tool
-    /// falls back to `Ask`. With no pin yet (grant made while offline, server-default
-    /// allow, or a config predating signatures) the current definition is pinned on first
-    /// use. A tool with no live definition can't be verified and gets `Ask`.
+    /// falls back to `Ask`. Grants are normally pinned when made (from the live or cached
+    /// definition) or when a default-allowed tool is first listed (`set_catalog`); only a
+    /// tool with no pin at all — a config predating signatures or the catalog cache — is
+    /// pinned on first use. A tool with no live definition can't be verified and gets `Ask`.
     pub fn effective_policy(
         &self,
         server_id: &str,
@@ -339,9 +388,9 @@ impl McpStore {
             .is_some_and(|s| s != current_sig)
     }
 
-    /// `signature` should be the tool's current definition signature when the server is
-    /// connected. Without one any old pin is dropped, so the definition is re-pinned on
-    /// first use instead of being compared against a stale one.
+    /// `signature` should be the tool's definition signature — live when connected, else
+    /// from the cached catalog. Without one (never listed) any old pin is dropped, and the
+    /// definition is pinned when the server next lists it.
     pub fn set_tool_policy(
         &self,
         server_id: &str,
@@ -374,7 +423,103 @@ impl McpStore {
             .find(|s| s.id == server_id)
             .ok_or_else(|| Error::NotFound(format!("MCP server `{server_id}`")))?;
         s.default_policy = policy;
+        // A default Allow is a grant for every known tool it covers: pin their current
+        // definitions now rather than trusting whatever shows up at first use.
+        Self::pin_unpinned_allowed(&mut state, server_id);
         self.persist(&state)
+    }
+
+    /// Drops every per-tool override so all tools follow the server default.
+    pub fn reset_tool_policies(&self, server_id: &str) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        let s = state
+            .servers
+            .iter_mut()
+            .find(|s| s.id == server_id)
+            .ok_or_else(|| Error::NotFound(format!("MCP server `{server_id}`")))?;
+        s.tool_policies.clear();
+        Self::pin_unpinned_allowed(&mut state, server_id);
+        self.persist(&state)
+    }
+
+    /// Pins the cached signature of every tool on `server_id` whose stored policy is
+    /// `AlwaysAllow` and that has no pin yet. Existing (possibly stale) pins are kept, so a
+    /// changed tool still needs explicit re-approval. Returns whether anything was pinned.
+    fn pin_unpinned_allowed(state: &mut StoreFile, server_id: &str) -> bool {
+        let Some(server) = state.servers.iter().find(|s| s.id == server_id) else {
+            return false;
+        };
+        let allowed: Vec<(String, String)> = state
+            .catalog
+            .get(server_id)
+            .into_iter()
+            .flatten()
+            .filter(|t| {
+                server
+                    .tool_policies
+                    .get(&t.name)
+                    .copied()
+                    .unwrap_or(server.default_policy)
+                    == ToolPolicy::AlwaysAllow
+            })
+            .map(|t| (t.name.clone(), t.signature.clone()))
+            .collect();
+        let pins = state.signatures.entry(server_id.to_owned()).or_default();
+        let mut changed = false;
+        for (name, sig) in allowed {
+            if let std::collections::hash_map::Entry::Vacant(e) = pins.entry(name) {
+                e.insert(sig);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Records the server's current tool list (bounded) and pins newly discovered tools
+    /// covered by an `AlwaysAllow` policy. Writes to disk only when something changed.
+    pub fn set_catalog(&self, server_id: &str, tools: Vec<KnownTool>) -> Result<()> {
+        let tools: Vec<KnownTool> = tools
+            .into_iter()
+            .filter(|t| !t.name.is_empty() && t.name.chars().count() <= MAX_CACHED_NAME)
+            .take(MAX_CACHED_TOOLS)
+            .map(KnownTool::bounded)
+            .collect();
+        let mut state = self.state.lock().unwrap();
+        if !state.servers.iter().any(|s| s.id == server_id) {
+            return Ok(());
+        }
+        let changed = state.catalog.get(server_id) != Some(&tools);
+        if changed {
+            state.catalog.insert(server_id.to_owned(), tools);
+        }
+        let pinned = Self::pin_unpinned_allowed(&mut state, server_id);
+        if changed || pinned {
+            self.persist(&state)?;
+        }
+        Ok(())
+    }
+
+    /// The last tool list seen for a server (empty if it never connected).
+    pub fn catalog(&self, server_id: &str) -> Vec<KnownTool> {
+        self.state
+            .lock()
+            .unwrap()
+            .catalog
+            .get(server_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Definition signature of a tool from the cached catalog.
+    pub fn cached_signature(&self, server_id: &str, tool: &str) -> Option<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .catalog
+            .get(server_id)?
+            .iter()
+            .find(|t| t.name == tool)
+            .map(|t| t.signature.clone())
     }
 
     /// Validated upsert. `env`/`headers` inputs with `secret` + empty value keep the stored
@@ -578,6 +723,7 @@ impl McpStore {
             Some(slot) => *slot = config.clone(),
             None => state.servers.push(config.clone()),
         }
+        Self::pin_unpinned_allowed(&mut state, &id);
         self.persist(&state)?;
         for r in stale_secrets {
             let _ = self.secrets.delete(&r);
@@ -604,21 +750,28 @@ impl McpStore {
             .as_deref()
             .map(str::trim)
             .filter(|c| !c.is_empty());
-        let env_changed = input.env.len() != old.env.len()
-            || input.env.iter().any(|e| {
-                let name = e.name.trim();
-                match old.env.iter().find(|o| o.name == name) {
-                    None => true,
-                    // A secret row with an empty value keeps the stored one.
-                    Some(o) if e.secret => !o.secret || !e.value.is_empty(),
-                    Some(o) => o.secret || o.value != e.value,
-                }
-            });
         old.transport != input.transport
             || old.command != command
             || old.args != args
             || old.cwd.as_deref() != cwd
-            || env_changed
+            || entries_changed(&input.env, &old.env)
+    }
+
+    /// Whether saving `input` changes how the server is reached — launch settings for stdio
+    /// or URL/headers for HTTP — so an existing session is out of date. A plain save that
+    /// only renames or edits permissions/timeouts keeps the current connection.
+    pub fn connection_changed(&self, input: &McpServerInput) -> bool {
+        let Some(old) = input.id.as_deref().and_then(|id| self.get(id).ok()) else {
+            return true;
+        };
+        match input.transport {
+            McpTransport::Stdio => self.launch_changed(input),
+            McpTransport::StreamableHttp => {
+                old.transport != input.transport
+                    || normalize_base_url(&input.url).map_or(true, |u| u != old.url)
+                    || entries_changed(&input.headers, &old.headers)
+            }
+        }
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {
@@ -632,6 +785,7 @@ impl McpStore {
             .ok_or_else(|| Error::NotFound(format!("MCP server `{id}`")))?;
         state.servers.retain(|s| s.id != id);
         state.signatures.remove(id);
+        state.catalog.remove(id);
         debug_assert!(state.servers.len() < before);
         for (scope, entries) in [("env", &removed.env), ("header", &removed.headers)] {
             for e in entries.iter().filter(|e| e.secret) {
@@ -839,6 +993,111 @@ mod tests {
             s.effective_policy(&id, "t", Some("sig-c")),
             ToolPolicy::Block
         );
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    fn known(name: &str, sig: &str) -> KnownTool {
+        KnownTool {
+            name: name.into(),
+            title: None,
+            description: Some("d".repeat(MAX_CACHED_DESC + 10)),
+            access: ToolAccess::Unannotated,
+            signature: sig.into(),
+        }
+    }
+
+    #[test]
+    fn catalog_is_bounded_persisted_and_cleared_on_delete() {
+        let (s, tmp) = store();
+        let id = s.save(input("x")).unwrap().id;
+        let mut tools = vec![
+            known("a", "sig-a"),
+            known(&"n".repeat(MAX_CACHED_NAME + 1), "x"),
+        ];
+        tools.extend((0..MAX_CACHED_TOOLS + 5).map(|i| known(&format!("t{i}"), "s")));
+        s.set_catalog(&id, tools).unwrap();
+        let cat = s.catalog(&id);
+        assert_eq!(
+            cat.len(),
+            MAX_CACHED_TOOLS,
+            "capped, oversized name dropped"
+        );
+        assert_eq!(cat[0].description.as_ref().unwrap().len(), MAX_CACHED_DESC);
+        assert_eq!(s.cached_signature(&id, "a").as_deref(), Some("sig-a"));
+        let root = resolve_data_root(Some(&tmp)).unwrap();
+        let reloaded = McpStore::load(&root, Arc::new(MemorySecretStore::default())).unwrap();
+        assert_eq!(reloaded.catalog(&id).len(), MAX_CACHED_TOOLS);
+        s.set_catalog("unknown-server", vec![known("a", "s")])
+            .unwrap();
+        assert!(s.catalog("unknown-server").is_empty());
+        s.delete(&id).unwrap();
+        assert!(s.catalog(&id).is_empty());
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn default_allow_pins_at_discovery_not_first_use() {
+        let (s, tmp) = store();
+        let id = s.save(input("x")).unwrap().id;
+        s.set_default_policy(&id, ToolPolicy::AlwaysAllow).unwrap();
+        s.set_catalog(&id, vec![known("t", "sig-a")]).unwrap();
+        // The definition changed between listing and first use: not trusted.
+        assert_eq!(s.effective_policy(&id, "t", Some("sig-b")), ToolPolicy::Ask);
+        assert_eq!(
+            s.effective_policy(&id, "t", Some("sig-a")),
+            ToolPolicy::AlwaysAllow
+        );
+        // A later listing with a new definition keeps the original pin (stays stale).
+        s.set_catalog(&id, vec![known("t", "sig-b")]).unwrap();
+        assert!(s.grant_stale(&id, "t", "sig-b"));
+        // Switching the default to Allow pins known tools that weren't pinned yet.
+        let id2 = s.save(input("y")).unwrap().id;
+        s.set_catalog(&id2, vec![known("u", "sig-u")]).unwrap();
+        s.set_default_policy(&id2, ToolPolicy::AlwaysAllow).unwrap();
+        assert_eq!(
+            s.effective_policy(&id2, "u", Some("other")),
+            ToolPolicy::Ask
+        );
+        // Reset clears overrides back to the default.
+        s.set_tool_policy(&id2, "u", ToolPolicy::Block, None)
+            .unwrap();
+        s.reset_tool_policies(&id2).unwrap();
+        assert_eq!(s.policy_for(&id2, "u"), ToolPolicy::AlwaysAllow);
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn connection_changed_ignores_renames_and_permissions() {
+        let (s, tmp) = store();
+        assert!(s.connection_changed(&input("x")), "new server");
+        let id = s.save(input("x")).unwrap().id;
+        let mut i = input("renamed");
+        i.id = Some(id.clone());
+        i.env[1].value = String::new();
+        i.default_policy = ToolPolicy::AlwaysAllow;
+        i.call_timeout_secs = 30;
+        assert!(!s.connection_changed(&i));
+        i.command = "npx other".into();
+        assert!(s.connection_changed(&i));
+
+        let mut h = input("remote");
+        h.transport = McpTransport::StreamableHttp;
+        h.command = String::new();
+        h.env.clear();
+        h.url = "http://localhost:8900/mcp".into();
+        let hid = s.save(h.clone()).unwrap().id;
+        h.id = Some(hid);
+        assert!(!s.connection_changed(&h));
+        let mut h2 = h.clone();
+        h2.url = "http://localhost:8901/mcp".into();
+        assert!(s.connection_changed(&h2));
+        let mut h3 = h.clone();
+        h3.headers.push(KeyValueInput {
+            name: "X-Key".into(),
+            value: "v".into(),
+            secret: false,
+        });
+        assert!(s.connection_changed(&h3));
         std::fs::remove_dir_all(tmp).unwrap();
     }
 

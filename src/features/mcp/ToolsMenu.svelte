@@ -1,17 +1,13 @@
 <script lang="ts">
   import { mcpStore } from "./mcp-store.svelte";
-  import type { McpServerView, ToolLoading, ToolPolicy } from "$lib/ipc/commands";
+  import ToolAccessBadge from "./ToolAccessBadge.svelte";
+  import ToolPolicySelect from "./ToolPolicySelect.svelte";
+  import type { McpServerView, ToolLoading } from "$lib/ipc/commands";
 
   let { onopenconnections, onclose }: { onopenconnections: () => void; onclose: () => void } = $props();
 
   let menuEl = $state<HTMLElement>();
   let openServer = $state<string | null>(null);
-
-  const policies: { value: ToolPolicy; label: string; hint: string }[] = [
-    { value: "always_allow", label: "Allow", hint: "run without asking" },
-    { value: "ask", label: "Ask", hint: "approve each call" },
-    { value: "block", label: "Disable", hint: "hidden from the model" },
-  ];
 
   const loadings: { value: ToolLoading; label: string }[] = [
     { value: "auto", label: "Auto — all tools when the set is small, on-demand when large" },
@@ -85,26 +81,18 @@
         {/if}
         {#if openServer === s.id && s.tools.length}
           <div class="sub">
-            <label class="def">
+            <div class="def">
               <span>New tools default to</span>
-              <select value={s.default_policy} onchange={(e) => mcpStore.setDefaultPolicy(s.id, e.currentTarget.value as ToolPolicy)}>
-                {#each policies as p (p.value)}<option value={p.value}>{p.label}</option>{/each}
-              </select>
-            </label>
+              <ToolPolicySelect value={s.default_policy} label="Default permission for new tools on {s.name}" onchange={(p) => mcpStore.setDefaultPolicy(s.id, p)} />
+            </div>
             {#each s.tools as t (t.name)}
               <div class="tool" class:off={t.policy === "block"} title={t.description ?? t.name}>
                 <span class="tname">{t.title ?? t.name}</span>
+                <ToolAccessBadge access={t.access} />
                 {#if t.changed}
                   <span class="warn" title="This tool's definition changed since it was allowed — it will ask for approval again">changed</span>
                 {/if}
-                <select
-                  class="policy"
-                  value={t.policy}
-                  aria-label="Permission for {t.name}"
-                  onchange={(e) => mcpStore.setToolPolicy(s.id, t.name, e.currentTarget.value as ToolPolicy)}
-                >
-                  {#each policies as p (p.value)}<option value={p.value}>{p.label}</option>{/each}
-                </select>
+                <ToolPolicySelect value={t.policy} label="Permission for {t.name}" onchange={(p) => mcpStore.setToolPolicy(s.id, t.name, p)} />
               </div>
             {/each}
           </div>
@@ -131,7 +119,7 @@
     position: absolute;
     bottom: calc(100% + 8px);
     left: 0;
-    width: 340px;
+    width: 380px;
     max-height: 420px;
     display: flex;
     flex-direction: column;
@@ -242,7 +230,7 @@
     border-bottom: 1px solid var(--border);
     margin-bottom: 2px;
   }
-  .def select { width: auto; padding: 2px 6px; font-size: 11.5px; }
+
   .tool {
     display: flex;
     align-items: center;
@@ -269,12 +257,6 @@
     border: 1px solid var(--warning);
     border-radius: var(--radius-sm);
     padding: 0 4px;
-  }
-  .policy {
-    width: auto;
-    padding: 1px 6px;
-    font-size: 11px;
-    border-radius: var(--radius-sm);
   }
   .empty {
     margin: 0;

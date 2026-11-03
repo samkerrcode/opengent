@@ -1,7 +1,8 @@
 # OpenGent – contributor notes
 
 Frontier quality model-agnostic desktop agent and harness. Tauri 2 host + Svelte 5 UI; all agent logic in Rust (`crates/agent-core`).
-Design/roadmap: see the phased plan and proposed features in README.md; delivered work in CHANGELOG.md.
+Design/roadmap: see the phased plan and proposed features in README.md; detailed designs for
+approved-but-unbuilt work in `docs/design/`; delivered work in CHANGELOG.md.
 Contributor guidelines: see CONTRIBUTING.md. Security scope: SECURITY.md.
 
 ## Layout

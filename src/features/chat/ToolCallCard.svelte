@@ -1,5 +1,6 @@
 <script lang="ts">
   import { mcpStore } from "$features/mcp/mcp-store.svelte";
+  import ToolAccessBadge from "$features/mcp/ToolAccessBadge.svelte";
   import type { ToolCallStatus } from "$lib/ipc/commands";
   import type { ToolSegment } from "$lib/state/run-reducer";
 
@@ -75,8 +76,7 @@
     <span class="chev" aria-hidden="true">›</span>
     <span class="wrench" aria-hidden="true">⚒</span>
     <span class="title" title={segment.call.name}>{title}</span>
-    {#if info?.destructive}<span class="hint" title="The server marks this tool as potentially destructive">destructive</span>{/if}
-    {#if info?.read_only}<span class="hint ro" title="The server marks this tool as read-only">read-only</span>{/if}
+    {#if info}<ToolAccessBadge access={info.access} />{/if}
     <span class="status" data-status={segment.status}>{labels[segment.status]}</span>
   </button>
 
@@ -142,21 +142,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .hint {
-    flex: none;
-    font-size: 10px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--danger);
-    border: 1px solid var(--danger);
-    border-radius: var(--radius-sm);
-    padding: 0 4px;
-  }
-  .hint.ro {
-    color: var(--fg-faint);
-    border-color: var(--border-strong);
   }
   .status {
     margin-left: auto;
