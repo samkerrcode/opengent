@@ -165,7 +165,6 @@ numbered phases:
 | **Security policies** | A policies menu with configurable data masking. Sensitive values are detected and replaced with placeholder tokens before a prompt leaves the app, the model is told to keep the tokens, and the original values are restored in the response. Each classification (phone numbers, SSN/TIN, email addresses) can be toggled separately. |
 | **Native tools & sandboxed runtime** | Built-in tools you can configure from the Tools menu: file creation and editing; a basic POSIX command set (curl, grep, glob, cat, …) running in an isolated per-chat filesystem (a headless container or an embedded runtime, whichever balances security and performance best); and web search over free, configurable sources and APIs. |
 | **Image generation** | Text-to-image, with automatic detection of provider models that support it. |
-| **Scoped tool permissions** | Connection permissions become defaults. The ⚒ Tools menu sets per-chat overrides that never disconnect a server, and agents own their tools and permissions, copied from the defaults when a server is added. A global *Disable* is a hard ceiling, and every scope pins its own grants. Design: [docs/design/scoped-tool-permissions.md](docs/design/scoped-tool-permissions.md). |
 | **CLI** | An `opengent` binary (name derived from `product.json`) built on `agent-core` for headless use: list configured models, run a prompt, run a prompt with an agent, and schedule a prompt. |
 
 Have an idea? Open a [feature request](https://github.com/samkerrcode/opengent/issues/new/choose).

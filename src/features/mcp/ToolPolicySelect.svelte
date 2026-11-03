@@ -14,7 +14,17 @@
     onchange,
     label,
     disabled = false,
-  }: { value: ToolPolicy; onchange: (p: ToolPolicy) => void; label: string; disabled?: boolean } = $props();
+    allowDisable = true,
+  }: {
+    value: ToolPolicy;
+    onchange: (p: ToolPolicy) => void;
+    label: string;
+    disabled?: boolean;
+    /** Offer Disable (agents turn tools off with a checkbox instead). */
+    allowDisable?: boolean;
+  } = $props();
+
+  const options = $derived(allowDisable ? policyOptions : policyOptions.filter((p) => p.value !== "block"));
 </script>
 
 <select
@@ -24,7 +34,7 @@
   aria-label={label}
   onchange={(e) => onchange(e.currentTarget.value as ToolPolicy)}
 >
-  {#each policyOptions as p (p.value)}<option value={p.value} title={p.hint}>{p.label}</option>{/each}
+  {#each options as p (p.value)}<option value={p.value} title={p.hint}>{p.label}</option>{/each}
 </select>
 
 <style>

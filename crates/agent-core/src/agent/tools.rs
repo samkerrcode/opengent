@@ -62,38 +62,6 @@ impl Default for ToolSettings {
     }
 }
 
-/// Restricts a run's catalog to some servers and, per server, optionally to some tools
-/// (user-configured agents). Tools outside the filter are neither offered nor listed as
-/// disabled: for that run they don't exist. Global policies still apply to what remains.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ToolFilter {
-    /// server id → allowed original tool names (`None` = all tools on the server).
-    servers: HashMap<String, Option<HashSet<String>>>,
-}
-
-impl ToolFilter {
-    pub fn allow_server(&mut self, server_id: &str, tools: Option<Vec<String>>) {
-        self.servers
-            .insert(server_id.to_owned(), tools.map(|t| t.into_iter().collect()));
-    }
-
-    pub fn allows_server(&self, server_id: &str) -> bool {
-        self.servers.contains_key(server_id)
-    }
-
-    pub fn allows_tool(&self, server_id: &str, tool: &str) -> bool {
-        match self.servers.get(server_id) {
-            Some(None) => true,
-            Some(Some(set)) => set.contains(tool),
-            None => false,
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.servers.is_empty()
-    }
-}
-
 /// One callable tool from a connected server. Blocked tools never become entries.
 #[derive(Debug, Clone)]
 pub struct ToolEntry {

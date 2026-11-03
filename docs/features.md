@@ -54,9 +54,9 @@ a *local command* (stdio — e.g. `npx -y @modelcontextprotocol/server-everythin
 optional env vars and working directory) or a *remote server* (Streamable HTTP endpoint with
 optional headers). Paste a standard `{"mcpServers": {…}}` JSON config to prefill the form.
 Secret env/header values go to the OS keychain; everything else lives in `mcp.json`.
-Servers connect in the background and can be toggled on/off from the ⚒ **Tools** chip in the
-composer or the **Enabled** switch at the top of a connection in Connections; status dots and
-stderr tails surface failures. While a connection is disabled, Reconnect is hidden and
+Servers connect in the background and are enabled or disabled only with the **Enabled**
+switch at the top of a connection in Connections (the ⚒ Tools menu turns a server off for one
+chat or agent without disconnecting it); status dots and stderr tails surface failures. While a connection is disabled, Reconnect is hidden and
 **Save & test** is greyed out. **Save & test** saves, connects, waits for the handshake and
 reports the result ("connected · N tools discovered" or the error); a plain **Save** only
 reconnects when the command, working directory, environment, URL or headers changed.
@@ -72,16 +72,39 @@ annotation hints and are informational only — never used to grant anything:
 dashed amber badge and a note: the MCP spec defaults them to potentially destructive, so
 *Ask* is the safe choice.
 
+**Scoped permissions (chats and agents).** Connection permissions are the **defaults**.
+Every run also has a scope that can adjust them:
+
+- *Plain chats* — the composer's ⚒ **Tools** menu ("Tools · this chat") sets overrides for
+  that chat only: turn a server off for the chat (it stays connected for everything else),
+  or set a tool to Allow / Ask / Disable. Overridden tools show a dot; click it, or *Reset to
+  defaults*, to follow Connections again. New chats start with no overrides.
+- *Agents* — own their tools and permissions, edited in the agent editor or from an agent
+  chat's ⚒ Tools menu ("Tools · agent name"). See [Agents](#agents).
+- The approval card's **Always allow** saves to the run's scope ("Always allow in this chat"
+  / "for this agent"), never to the global defaults.
+
+Resolution, enforced in Rust (`mcp/permissions.rs`): a disabled connection offers nothing;
+tools off in the scope are neither offered nor named; a tool set to *Disable* in Connections
+is a **hard ceiling** no chat or agent can turn back on (menus show "off in Connections");
+otherwise the scope's choice applies, falling back to the connection's. Dispatch re-checks the
+scope on every call, so turning a server or tool off mid-run blocks its next call. A run
+whose chat or agent was deleted fails closed (every tool asks); deleting an agent also
+cancels its running chats.
+
 **Tool security.** Every tool is *Always allow*, *Ask*, or *Block* — set per tool in
-Connections → Tool permissions or the ⚒ Tools menu (each server expands into its tool
-list), or per server via the default. Blocked tools are never sent to the model; *Ask*
-pauses the run on an approval card (Allow once / Always allow / Deny), *Always allow*
-persists the choice. Enforcement happens in Rust at dispatch, not just in the UI. Two extra
-guardrails: *Always allow* (per tool or as the server default) pins a signature of the
-tool's definition — captured when granted (from the live definition, or the cached one when
-offline) or, for a default Allow, when the tool is first listed; only configs predating the
-cache pin on first use. If the server changes the schema or description the tool falls back
-to *Ask* and shows a "changed" badge; and a new stdio server,
+Connections → Tool permissions (the defaults), per chat or agent as above, or per server via
+the default. Blocked tools are never sent to the model; *Ask* pauses the run on an approval
+card (Allow once / Always allow / Deny), *Always allow* persists the choice. Enforcement
+happens in Rust at dispatch, not just in the UI. Two extra guardrails: *Always allow* pins a
+signature of the tool's definition, **per scope** — a connection grant is pinned when granted
+(from the live definition, or the cached one when offline) or, for a default Allow, when the
+tool is first listed (only configs predating the cache pin on first use); a chat/agent grant
+is pinned when saved, copying the connection's pin when there is one, so copying a stale
+grant keeps it stale, and an approval-card grant pins the definition just approved. Scoped
+grants never pin on first use, and re-approving in one scope never re-validates another. If
+the server changes the schema or description the tool falls back to *Ask* and shows a
+"changed" badge; and a new stdio server,
 or a change to its command, working directory or environment, must be confirmed in a native
 OS dialog, so server installs can't be driven silently. A model that calls a disabled tool
 is told it is disabled (and to say so) rather than that it doesn't exist. Approval cards open
@@ -116,40 +139,52 @@ a recovered login-shell PATH so `npx`/`uvx` resolve from GUI launches. Server-su
 metadata (descriptions, schemas) is treated as untrusted and bounded before it reaches the
 model; the cached tool list keeps at most 500 tools per server, with titles capped at 128
 and descriptions at 256 characters, and is display/pinning only — calls always need the
-live server. Permissions are still global per connection (every chat and agent shares them);
-per-chat and per-agent permissions are designed in
-[design/scoped-tool-permissions.md](design/scoped-tool-permissions.md). MCP auth (OAuth) is [Phase 4](../README.md#roadmap) — remote servers that need
+live server. Chat overrides and agent access accept at most 64 servers and 500 tools per
+server, with tool names up to 128 characters; scoped pins of deleted chats/agents are pruned
+at startup. MCP auth (OAuth) is [Phase 4](../README.md#roadmap) — remote servers that need
 browser sign-in can't connect yet.
 
 ## Agents
 
 **What it does.** Reusable assistants with their own name, description, default model,
-optional fallback model, instructions, and a restricted set of MCP servers/tools. Agent chats
-use the regular chat interface, labeled with the agent's name.
+optional fallback model, instructions, and its own MCP servers, tools and tool permissions.
+Agent chats use the regular chat interface, labeled with the agent's name.
 
 **How to use it.** Click **Agents** in the sidebar. With no agents you get an intro page and a
 *Create your first agent* button. The editor has four sections: *Identity* (name, description),
-*Models* (default + optional fallback), *Instructions* (your system prompt), and *Tools* (tick
-MCP servers; per server choose *All tools* — including ones the server adds later — or
-*Selected tools*). **Save & start chat** opens a new chat with the agent; the composer shows
-the agent chip instead of the model picker. Agent cards also offer **Chat** and **Configure**.
+*Models* (default + optional fallback), *Instructions* (your system prompt), and *Tools*: tick
+a connection to add it, then **Edit tools & permissions…** to turn each tool on/off and choose
+*Allow* or *Ask*, plus *New tools* (Ask or Off) for tools the server adds later. Adding a
+connection copies its defaults from Connections — read-only tools keep *Allow*; write,
+destructive and unannotated tools start at *Ask*, because agents can run unattended. The card
+summarizes how many tools run without asking (highlighted when some can make changes);
+*Reset to connection defaults* copies them again. The same controls are in an agent chat's
+⚒ Tools menu, which saves straight to the agent. **Save & start chat** opens a new chat with
+the agent; the composer shows the agent chip instead of the model picker. Agent cards also
+offer **Chat** and **Configure**.
 
 **How it works.** Agents are stored in SQLite (`agents` table; config as JSON). Chats carry an
 `agent_id`, and Rust resolves the agent's models, tools and prompt at run time — the webview
 never supplies them for agent chats. The system prompt is a built-in agent prompt
 (`agent_system_prompt` in `agent/context.rs`: identity, operating rules, untrusted-data
 handling, and an unattended-run section for schedules), then the tools section, then your
-instructions appended verbatim under *Agent instructions*. Tools outside the agent's selection
-are neither offered nor named (`ToolFilter` in `agent/tools.rs`, applied in
-`McpManager::prepare_tools`); global Always allow / Ask / Block policies still apply to the
-rest. The fallback model is used once per run when the default fails **before producing any
+instructions appended verbatim under *Agent instructions*. The agent's permissions
+(`AgentServerAccess`: `default_policy` + per-tool `policies`, `block` = off) are its run
+scope (`ScopePolicies::Agent`, resolved in `McpManager::prepare_tools` and at dispatch);
+servers the agent doesn't use are neither offered nor named, and tools disabled in
+Connections stay disabled. Agents saved before per-agent permissions follow the connection's
+permissions until opened in the editor, which converts them (an old *Selected tools* list
+becomes per-tool on/off) and saves on **Save**. The fallback model is used once per run when the default fails **before producing any
 output** (connection/auth/model errors); the turn shows a notice and is attributed to the
 fallback model (`ModelSwitched` run event). Context is budgeted for the smaller of the two
 models' windows.
 
 **Limits.** The fallback does not engage after partial output (it would duplicate text).
 Image attachments are gated on the default model's capabilities. Deleting an agent removes its
-schedules; its chats remain as plain chats.
+schedules; its chats remain as plain chats. Agents can't allow tools the server adds later
+without asking: *New tools* is Ask or Off, and a tool needs an explicit *Allow* (pinned to its
+definition at save time). Turning a connection off in an agent chat's menu and back on again
+re-copies the defaults rather than restoring earlier per-tool choices.
 
 ## Scheduled agent runs
 

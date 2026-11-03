@@ -6,6 +6,13 @@ planned work lives in the [README roadmap](README.md#roadmap).
 
 ## Unreleased — Phase 4 (OAuth)
 
+- Scoped tool permissions. Connection permissions are now defaults: the composer's ⚒ Tools
+  menu sets per-chat overrides (turn a server off for one chat without disconnecting it;
+  Allow / Ask / Disable per tool) and, in agent chats, edits the agent. Agents own their tools
+  and permissions — copied from the defaults when a connection is added, with Allow kept only
+  for read-only tools and new tools asking. The approval card's *Always allow* saves to the
+  chat or agent, not globally. A tool disabled in Connections is a hard ceiling; signature
+  pins are kept per scope; a deleted chat's or agent's runs fail closed.
 - Connections dialog: an Enabled switch (a connection turned off from the ⚒ Tools menu
   can be turned back on here); Reconnect is hidden and **Save & test** (was *Save &
   connect*) is greyed out while disabled; Save & test waits for the result and reports

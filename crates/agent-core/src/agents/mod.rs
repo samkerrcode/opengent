@@ -5,13 +5,13 @@
 
 pub mod schedule;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::agent::tools::ToolFilter;
-use crate::domain::AgentId;
+use crate::domain::{AgentId, ToolPolicy};
+use crate::mcp::permissions::{clean_tool_name, ScopePolicies, MAX_SCOPE_TOOLS};
 use crate::{Error, Result};
 
 pub use schedule::{
@@ -23,7 +23,6 @@ pub const MAX_AGENT_NAME: usize = 64;
 pub const MAX_AGENT_DESCRIPTION: usize = 500;
 pub const MAX_AGENT_PROMPT: usize = 32 * 1024;
 const MAX_SERVERS: usize = 64;
-const MAX_TOOLS_PER_SERVER: usize = 500;
 
 /// A provider + model pair.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -33,14 +32,22 @@ pub struct ModelRef {
     pub model: String,
 }
 
-/// One MCP server the agent may use.
+/// One MCP server the agent may use, with the agent's own tool permissions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AgentServerAccess {
     pub server_id: String,
-    /// Original tool names the agent may call. `None` = every tool on the server,
-    /// including tools the server adds later. Global permissions (Ask / Block) still apply.
+    /// Legacy allow-list of original tool names; `None` = every tool on the server. New
+    /// agents leave this `None` and turn tools off with a `block` policy instead.
     pub tools: Option<Vec<String>>,
+    /// Policy for tools without an entry in `policies` (including ones the server adds
+    /// later). `None` = a legacy agent that still follows the connection's permissions.
+    #[serde(default)]
+    pub default_policy: Option<ToolPolicy>,
+    /// Per-tool permissions for this agent (`block` = off for the agent). A tool disabled
+    /// in Connections stays disabled whatever is set here.
+    #[serde(default)]
+    pub policies: BTreeMap<String, ToolPolicy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -147,13 +154,24 @@ impl AgentInput {
                     .filter(|n| !n.is_empty() && uniq.insert(n.clone()))
                     .collect::<Vec<_>>()
             });
-            if tools
-                .as_ref()
-                .is_some_and(|t| t.len() > MAX_TOOLS_PER_SERVER)
+            if tools.as_ref().is_some_and(|t| t.len() > MAX_SCOPE_TOOLS)
+                || s.policies.len() > MAX_SCOPE_TOOLS
             {
                 return Err(Error::InvalidInput("too many tools selected".into()));
             }
-            servers.push(AgentServerAccess { server_id, tools });
+            for t in tools.iter().flatten() {
+                clean_tool_name(t)?;
+            }
+            let mut policies = BTreeMap::new();
+            for (tool, p) in s.policies {
+                policies.insert(clean_tool_name(&tool)?, p);
+            }
+            servers.push(AgentServerAccess {
+                server_id,
+                tools,
+                default_policy: s.default_policy,
+                policies,
+            });
         }
         Ok((
             self.id,
@@ -190,13 +208,9 @@ impl Agent {
         }
     }
 
-    /// The agent's tool restriction for `McpManager::prepare_tools`.
-    pub fn tool_filter(&self) -> ToolFilter {
-        let mut f = ToolFilter::default();
-        for s in &self.servers {
-            f.allow_server(&s.server_id, s.tools.clone());
-        }
-        f
+    /// The agent's tool permissions for its runs (see `mcp::permissions`).
+    pub fn scope_policies(&self) -> ScopePolicies {
+        ScopePolicies::Agent(self.servers.clone())
     }
 }
 
@@ -219,20 +233,42 @@ mod tests {
             }),
             system_prompt: "  Be thorough.  ".into(),
             servers: vec![
-                AgentServerAccess {
-                    server_id: "fs".into(),
-                    tools: Some(vec!["read".into(), " read ".into(), "".into()]),
-                },
-                AgentServerAccess {
-                    server_id: "fs".into(),
-                    tools: None,
-                },
-                AgentServerAccess {
-                    server_id: "web".into(),
-                    tools: None,
-                },
+                legacy("fs", Some(vec!["read".into(), " read ".into(), "".into()])),
+                legacy("fs", None),
+                legacy("web", None),
             ],
         }
+    }
+
+    fn legacy(server: &str, tools: Option<Vec<String>>) -> AgentServerAccess {
+        AgentServerAccess {
+            server_id: server.into(),
+            tools,
+            default_policy: None,
+            policies: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn legacy_access_json_deserializes() {
+        let a: AgentServerAccess =
+            serde_json::from_str(r#"{"server_id":"fs","tools":["read"]}"#).unwrap();
+        assert_eq!(a, legacy("fs", Some(vec!["read".into()])));
+    }
+
+    #[test]
+    fn validate_bounds_policy_names() {
+        let mut i = input();
+        i.servers[2]
+            .policies
+            .insert(" write ".into(), ToolPolicy::AlwaysAllow);
+        let (_, _, c) = i.validate().unwrap();
+        assert!(c.servers[1].policies.contains_key("write"));
+        let mut i = input();
+        i.servers[2]
+            .policies
+            .insert("x".repeat(200), ToolPolicy::Ask);
+        assert!(i.validate().is_err());
     }
 
     #[test]
@@ -264,10 +300,10 @@ mod tests {
     }
 
     #[test]
-    fn tool_filter_honors_server_and_tool_lists() {
+    fn scope_honors_server_and_tool_lists() {
         let (_, name, c) = input().validate().unwrap();
         let agent = Agent::from_parts(AgentId::new(), name, c, 0, 0);
-        let f = agent.tool_filter();
+        let f = agent.scope_policies();
         assert!(f.allows_tool("fs", "read"));
         assert!(!f.allows_tool("fs", "write"));
         assert!(f.allows_tool("web", "anything"));

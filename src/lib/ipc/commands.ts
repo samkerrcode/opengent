@@ -24,6 +24,9 @@ import type { KeyValueInput } from "$lib/generated/bindings/KeyValueInput";
 import type { McpServerInput } from "$lib/generated/bindings/McpServerInput";
 import type { McpServerView } from "$lib/generated/bindings/McpServerView";
 import type { McpTransport } from "$lib/generated/bindings/McpTransport";
+import type { PermissionScope } from "$lib/generated/bindings/PermissionScope";
+import type { ScopedServerView } from "$lib/generated/bindings/ScopedServerView";
+import type { ScopedToolView } from "$lib/generated/bindings/ScopedToolView";
 import type { ToolAccess } from "$lib/generated/bindings/ToolAccess";
 import type { ToolCallInfo } from "$lib/generated/bindings/ToolCallInfo";
 import type { ToolCallStatus } from "$lib/generated/bindings/ToolCallStatus";
@@ -67,6 +70,9 @@ export type {
   McpServerInput,
   McpServerView,
   McpTransport,
+  PermissionScope,
+  ScopedServerView,
+  ScopedToolView,
   ProviderConfig,
   ProviderInput,
   ProviderTestResult,
@@ -153,6 +159,19 @@ export const commands = {
   setMcpDefaultPolicy: (serverId: string, policy: ToolPolicy) =>
     invoke<void>("set_mcp_default_policy", { serverId, policy }),
   resetMcpToolPolicies: (serverId: string) => invoke<void>("reset_mcp_tool_policies", { serverId }),
+  // Scoped permissions: per-chat overrides and agent-owned access.
+  listToolPermissions: (scope: PermissionScope) =>
+    invoke<ScopedServerView[]>("list_tool_permissions", { scope }),
+  setChatServerEnabled: (chatId: string, serverId: string, enabled: boolean) =>
+    invoke<void>("set_chat_server_enabled", { chatId, serverId, enabled }),
+  /** `null` returns the tool to the connection's policy. */
+  setChatToolPolicy: (chatId: string, serverId: string, tool: string, policy: ToolPolicy | null) =>
+    invoke<void>("set_chat_tool_policy", { chatId, serverId, tool, policy }),
+  resetChatToolPermissions: (chatId: string, serverId: string | null) =>
+    invoke<void>("reset_chat_tool_permissions", { chatId, serverId }),
+  /** `null` removes the server from the agent. */
+  setAgentServerAccess: (agentId: string, serverId: string, access: AgentServerAccess | null) =>
+    invoke<Agent>("set_agent_server_access", { agentId, serverId, access }),
   getToolSettings: () => invoke<ToolSettings>("get_tool_settings"),
   setToolSettings: (settings: ToolSettings) => invoke<void>("set_tool_settings", { settings }),
   resolveToolApproval: (runId: RunId, callId: string, decision: ApprovalDecision) =>

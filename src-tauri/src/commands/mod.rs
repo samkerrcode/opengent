@@ -17,9 +17,9 @@ use agent_core::agent::context::{
     self, AgentPrompt, AttachmentContent, PromptProfile, ToolContext,
 };
 use agent_core::agent::{FallbackModel, RunRecorder, RunRequest, RunSink};
-use agent_core::agents::Agent;
 use agent_core::config::{product, ProductInfo};
 use agent_core::domain::{ChatId, ContentBlock, Role, RunEvent, RunId};
+use agent_core::mcp::{PermissionScope, ScopePolicies};
 use agent_core::secrets::SecretRef;
 use agent_core::storage::agents as agents_repo;
 use agent_core::storage::chats as repo;
@@ -156,13 +156,19 @@ pub(crate) async fn launch_run<S: RunSink>(
 
     // Rust owns agent configuration: an agent chat's models, tools and prompt are read from
     // the database, never taken from the webview.
-    let agent = state
+    // Tool permissions come from the agent, or for plain chats from the chat's overrides.
+    let (agent, chat_overrides) = state
         .db
         .call(move |c| {
-            repo::get_summary(c, chat_id)?
+            let agent = repo::get_summary(c, chat_id)?
                 .agent_id
                 .map(|a| agents_repo::get_agent(c, a))
-                .transpose()
+                .transpose()?;
+            let overrides = match agent {
+                Some(_) => None,
+                None => Some(repo::get_tool_overrides(c, chat_id)?),
+            };
+            Ok((agent, overrides))
         })
         .await?;
     let (provider_id, model) = match &agent {
@@ -326,15 +332,23 @@ pub(crate) async fn launch_run<S: RunSink>(
 
     // Tool snapshot: catalog from connected servers (skipped when the model can't call
     // tools), the system-prompt section, and a token reservation for the definitions.
-    // Agents only see the servers/tools they were configured with.
+    // The run's permission scope (agent or chat) decides which tools it sees and their
+    // policies; it stays installed so dispatch re-checks it on every call.
     let mut tool_ctx = ToolContext::default();
     let mut run_tools = None;
-    let filter = agent.as_ref().map(Agent::tool_filter);
+    let (scope, policies) = match (&agent, chat_overrides) {
+        (Some(a), _) => (PermissionScope::Agent(a.id), a.scope_policies()),
+        (None, o) => (
+            PermissionScope::Chat(chat_id),
+            ScopePolicies::Chat(o.unwrap_or_default()),
+        ),
+    };
+    state.mcp.set_scope(scope, policies);
     if caps.tools {
         if let Some((tools, prompt, def_tokens)) = state.mcp.prepare_tools(
             &history,
             context_window.unwrap_or(context::DEFAULT_CONTEXT_TOKENS),
-            filter.as_ref(),
+            &scope,
         ) {
             tool_ctx.definition_tokens = def_tokens;
             tool_ctx.prompt = prompt;

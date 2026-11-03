@@ -134,6 +134,11 @@ struct StoreFile {
     /// dispatch always requires the live tool.
     #[serde(default)]
     catalog: HashMap<String, Vec<KnownTool>>,
+    /// Pins for chat/agent-level `AlwaysAllow` grants: `scope key -> server -> tool -> sig`.
+    /// Kept apart from the global pins so re-approving in one scope can't re-validate a
+    /// stale grant in another.
+    #[serde(default)]
+    scoped_signatures: HashMap<String, HashMap<String, HashMap<String, String>>>,
 }
 
 /// Bounds on cached server-provided metadata (untrusted, persisted to disk).
@@ -289,6 +294,7 @@ impl McpStore {
             settings: state.settings.clone(),
             signatures: state.signatures.clone(),
             catalog: state.catalog.clone(),
+            scoped_signatures: state.scoped_signatures.clone(),
         };
         let tmp = self.path.with_extension("json.tmp");
         let bytes =
@@ -356,6 +362,17 @@ impl McpStore {
         if raw != ToolPolicy::AlwaysAllow {
             return raw;
         }
+        self.verify_global_allow(server_id, tool, current_sig)
+    }
+
+    /// Verifies a connection-level `AlwaysAllow` against the global pin (see
+    /// `effective_policy`); returns `AlwaysAllow` or `Ask`.
+    pub fn verify_global_allow(
+        &self,
+        server_id: &str,
+        tool: &str,
+        current_sig: Option<&str>,
+    ) -> ToolPolicy {
         let Some(current) = current_sig else {
             return ToolPolicy::Ask;
         };
@@ -373,6 +390,123 @@ impl McpStore {
                     tracing::warn!(error = %e, "failed to persist tool signature");
                 }
                 ToolPolicy::AlwaysAllow
+            }
+        }
+    }
+
+    /// Verifies a scope-level `AlwaysAllow` (chat/agent) against the scope's own pin. Scoped
+    /// grants are pinned when made (`sync_scope_pins`, `pin_scoped`), never on first use,
+    /// so a missing or mismatched pin means `Ask`.
+    pub fn verify_scoped_allow(
+        &self,
+        scope_key: &str,
+        server_id: &str,
+        tool: &str,
+        current_sig: Option<&str>,
+    ) -> ToolPolicy {
+        let state = self.state.lock().unwrap();
+        let pinned = state
+            .scoped_signatures
+            .get(scope_key)
+            .and_then(|m| m.get(server_id))
+            .and_then(|m| m.get(tool));
+        match (pinned, current_sig) {
+            (Some(p), Some(c)) if p == c => ToolPolicy::AlwaysAllow,
+            _ => ToolPolicy::Ask,
+        }
+    }
+
+    /// Whether a scope's pin for the tool no longer matches `current_sig` (or is missing).
+    pub fn scoped_grant_stale(
+        &self,
+        scope_key: &str,
+        server_id: &str,
+        tool: &str,
+        current_sig: &str,
+    ) -> bool {
+        let state = self.state.lock().unwrap();
+        state
+            .scoped_signatures
+            .get(scope_key)
+            .and_then(|m| m.get(server_id))
+            .and_then(|m| m.get(tool))
+            .is_none_or(|s| s != current_sig)
+    }
+
+    /// Pins (or, without a signature, unpins) a scope grant the user just approved against
+    /// the definition they saw — the approval card's "Always allow".
+    pub fn pin_scoped(&self, scope_key: &str, server_id: &str, tool: &str, sig: Option<String>) {
+        let mut state = self.state.lock().unwrap();
+        let pins = state
+            .scoped_signatures
+            .entry(scope_key.to_owned())
+            .or_default()
+            .entry(server_id.to_owned())
+            .or_default();
+        match sig {
+            Some(s) => pins.insert(tool.to_owned(), s),
+            None => pins.remove(tool),
+        };
+        if let Err(e) = self.persist(&state) {
+            tracing::warn!(error = %e, "failed to persist scoped tool signature");
+        }
+    }
+
+    /// Reconciles a scope's pins with its current `AlwaysAllow` grants (`server, tool,
+    /// current signature`). Existing pins are kept (a stale grant stays stale); a new grant
+    /// copies the **global** pin when there is one — so copying a connection's Allow can't
+    /// launder a changed tool into a fresh pin — else pins the current definition. Pins of
+    /// tools that are no longer allowed are dropped.
+    pub fn sync_scope_pins(&self, scope_key: &str, grants: Vec<(String, String, Option<String>)>) {
+        let mut state = self.state.lock().unwrap();
+        let old = state
+            .scoped_signatures
+            .get(scope_key)
+            .cloned()
+            .unwrap_or_default();
+        let mut next: HashMap<String, HashMap<String, String>> = HashMap::new();
+        for (server, tool, current) in grants {
+            let pin = old
+                .get(&server)
+                .and_then(|m| m.get(&tool))
+                .or_else(|| state.signatures.get(&server).and_then(|m| m.get(&tool)))
+                .cloned()
+                .or(current);
+            if let Some(pin) = pin {
+                next.entry(server).or_default().insert(tool, pin);
+            }
+        }
+        if next == old {
+            return;
+        }
+        if next.is_empty() {
+            state.scoped_signatures.remove(scope_key);
+        } else {
+            state.scoped_signatures.insert(scope_key.to_owned(), next);
+        }
+        if let Err(e) = self.persist(&state) {
+            tracing::warn!(error = %e, "failed to persist scoped tool signatures");
+        }
+    }
+
+    /// Drops a deleted chat's or agent's pins.
+    pub fn forget_scope(&self, scope_key: &str) {
+        let mut state = self.state.lock().unwrap();
+        if state.scoped_signatures.remove(scope_key).is_some() {
+            if let Err(e) = self.persist(&state) {
+                tracing::warn!(error = %e, "failed to persist scoped tool signatures");
+            }
+        }
+    }
+
+    /// Startup cleanup: drops pins of scopes for which `keep` is false.
+    pub fn prune_scopes(&self, keep: impl Fn(&str) -> bool) {
+        let mut state = self.state.lock().unwrap();
+        let before = state.scoped_signatures.len();
+        state.scoped_signatures.retain(|k, _| keep(k));
+        if state.scoped_signatures.len() != before {
+            if let Err(e) = self.persist(&state) {
+                tracing::warn!(error = %e, "failed to persist scoped tool signatures");
             }
         }
     }
@@ -786,6 +920,9 @@ impl McpStore {
         state.servers.retain(|s| s.id != id);
         state.signatures.remove(id);
         state.catalog.remove(id);
+        for pins in state.scoped_signatures.values_mut() {
+            pins.remove(id);
+        }
         debug_assert!(state.servers.len() < before);
         for (scope, entries) in [("env", &removed.env), ("header", &removed.headers)] {
             for e in entries.iter().filter(|e| e.secret) {

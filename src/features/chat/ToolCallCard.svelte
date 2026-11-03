@@ -1,6 +1,7 @@
 <script lang="ts">
   import { mcpStore } from "$features/mcp/mcp-store.svelte";
   import ToolAccessBadge from "$features/mcp/ToolAccessBadge.svelte";
+  import { chatStore } from "./chat-store.svelte";
   import type { ToolCallStatus } from "$lib/ipc/commands";
   import type { ToolSegment } from "$lib/state/run-reducer";
 
@@ -66,6 +67,15 @@
   const argsText = $derived(open ? pretty(segment.call.arguments) : "");
   const output = $derived(open ? resultText(segment.content) : "");
 
+  // "Always allow" is saved to the run's scope: the agent for agent chats, else this chat.
+  const agent = $derived(chatStore.active ? chatStore.agentFor(chatStore.active) : null);
+  const grantLabel = $derived(agent ? "Always allow for this agent" : "Always allow in this chat");
+  const grantHint = $derived(
+    agent
+      ? `Saved to ${agent.name}'s tool permissions (change it in the agent editor or the ⚒ Tools menu).`
+      : "Saved for this chat only. Defaults for every chat are set in Connections.",
+  );
+
   function decide(decision: "allow_once" | "always_allow" | "deny") {
     if (runId) void mcpStore.approve(runId, segment.call.id, decision);
   }
@@ -84,7 +94,7 @@
     <div class="approve" role="group" aria-label="Approve tool call">
       <span class="q">Allow this call?</span>
       <button class="btn-primary btn-sm" onclick={() => decide("allow_once")}>Allow</button>
-      <button class="btn-outline btn-sm" onclick={() => decide("always_allow")}>Always allow</button>
+      <button class="btn-outline btn-sm" onclick={() => decide("always_allow")} title={grantHint}>{grantLabel}</button>
       <button class="btn-ghost btn-sm" onclick={() => decide("deny")}>Deny</button>
     </div>
   {/if}

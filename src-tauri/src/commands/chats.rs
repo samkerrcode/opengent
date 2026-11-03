@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use agent_core::domain::{AgentId, ChatId};
+use agent_core::mcp::PermissionScope;
 use agent_core::storage::chats as repo;
 use agent_core::storage::{AttachmentMeta, ChatDetail, ChatSummary};
 use agent_core::Error;
@@ -85,7 +86,9 @@ pub async fn delete_chat(state: State<'_, AppState>, id: ChatId) -> Result<(), E
     if let Some(run) = state.coordinator.active_run(id) {
         state.coordinator.cancel(run);
     }
-    state.db.call(move |c| repo::delete_chat(c, id)).await
+    state.db.call(move |c| repo::delete_chat(c, id)).await?;
+    state.mcp.remove_scope(PermissionScope::Chat(id));
+    Ok(())
 }
 
 /// Opens the native file picker and imports the chosen files as immutable attachment

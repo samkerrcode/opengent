@@ -8,7 +8,18 @@
   import { mcpStore } from "$features/mcp/mcp-store.svelte";
   import { providerStore } from "$features/providers/provider-store.svelte";
   import { product } from "$lib/generated/product";
-  import { describeError, type AgentServerAccess, type McpServerView, type ModelRef } from "$lib/ipc/commands";
+  import ToolAccessBadge from "$features/mcp/ToolAccessBadge.svelte";
+  import ToolPolicySelect from "$features/mcp/ToolPolicySelect.svelte";
+  import { allowedSummary, ownAccess, snapshotAccess, toolOn, toolPolicy, withTool } from "$features/mcp/permissions";
+  import {
+    describeError,
+    type Agent,
+    type AgentServerAccess,
+    type McpServerView,
+    type ModelRef,
+    type ToolInfo,
+    type ToolPolicy,
+  } from "$lib/ipc/commands";
 
   // Mounted inside {#key} by App, so the form initializes once per agent.
   let { agentId, onopenconnections }: { agentId: string | null; onopenconnections: () => void } = $props();
@@ -16,7 +27,8 @@
   // `initial` seeds the form once; `existing` tracks the stored agent (refreshed after saves).
   const initial = untrack(() => agentStore.byId(agentId));
   const existing = $derived(agentStore.byId(agentId));
-  type ServerSel = { on: boolean; all: boolean; tools: string[] };
+  // The agent's own access per server; `on: false` keeps edits if the server is re-ticked.
+  type ServerSel = { on: boolean; access: AgentServerAccess };
 
   function initialModel(): ModelRef | null {
     if (initial) return { ...initial.default_model };
@@ -28,46 +40,71 @@
   let defaultModel = $state<ModelRef | null>(initialModel());
   let fallbackModel = $state<ModelRef | null>(initial?.fallback_model ? { ...initial.fallback_model } : null);
   let systemPrompt = $state(initial?.system_prompt ?? "");
-  let selection = $state<Record<string, ServerSel>>(
-    Object.fromEntries((initial?.servers ?? []).map((s) => [s.server_id, { on: true, all: s.tools === null, tools: [...(s.tools ?? [])] }])),
-  );
+  // Legacy agents (no own permissions yet) are converted from the connection's current
+  // permissions on open; saving persists the conversion.
+  function seed(agent: Agent | null): Record<string, ServerSel> {
+    return Object.fromEntries(
+      (agent?.servers ?? []).map((a) => [
+        a.server_id,
+        { on: true, access: ownAccess(a, mcpStore.servers.find((s) => s.id === a.server_id)) },
+      ]),
+    );
+  }
+
+  let selection = $state<Record<string, ServerSel>>(seed(initial));
+  let toolsDirty = $state(false);
   let busy = $state(false);
   let error = $state<string | null>(null);
   let savedNote = $state<string | null>(null);
   let openTools = $state<string | null>(null);
 
+  // Tool edits made elsewhere (an agent chat's ⚒ Tools menu, approval grants) refresh this
+  // card while it has no unsaved changes of its own.
+  $effect(() => {
+    const agent = existing;
+    if (agent && !untrack(() => toolsDirty)) selection = seed(agent);
+  });
+
   const MAX_PROMPT = 32 * 1024;
   const canSave = $derived(name.trim().length > 0 && defaultModel !== null && !busy);
 
-  function sel(id: string): ServerSel {
-    return (selection[id] ??= { on: false, all: true, tools: [] });
-  }
-
   function toggleServer(s: McpServerView, on: boolean) {
-    const cur = sel(s.id);
-    cur.on = on;
-    if (on && openTools === null && !cur.all) openTools = s.id;
-  }
-
-  function toggleTool(serverId: string, tool: string, on: boolean) {
-    const cur = sel(serverId);
-    cur.tools = on ? [...new Set([...cur.tools, tool])] : cur.tools.filter((t) => t !== tool);
-  }
-
-  function selectedCount(s: McpServerView): string {
+    toolsDirty = true;
     const cur = selection[s.id];
-    if (!cur?.on) return "";
-    if (cur.all) return "all tools";
-    return `${cur.tools.length} of ${s.tools.length || cur.tools.length} tools`;
+    if (cur) cur.on = on;
+    else selection[s.id] = { on, access: snapshotAccess(s) };
+    if (on && openTools === null) openTools = s.id;
+  }
+
+  function editTool(s: McpServerView, t: ToolInfo, policy: ToolPolicy | "on") {
+    const cur = selection[s.id];
+    if (!cur) return;
+    toolsDirty = true;
+    cur.access = withTool(cur.access, t, policy);
+  }
+
+  function setNewTools(s: McpServerView, policy: ToolPolicy) {
+    const cur = selection[s.id];
+    if (!cur) return;
+    toolsDirty = true;
+    cur.access = { ...cur.access, default_policy: policy };
+  }
+
+  function resetServer(s: McpServerView) {
+    toolsDirty = true;
+    selection[s.id] = { on: true, access: snapshotAccess(s) };
+  }
+
+  function selectedCount(s: McpServerView, a: AgentServerAccess): string {
+    const usable = s.tools.filter((t) => t.policy !== "block");
+    const on = usable.filter((t) => toolOn(a, t.name)).length;
+    return usable.length ? `${on} of ${usable.length} tools on` : "";
   }
 
   function servers(): AgentServerAccess[] {
     return mcpStore.servers
       .filter((s) => selection[s.id]?.on)
-      .map((s) => {
-        const cur = selection[s.id]!;
-        return { server_id: s.id, tools: cur.all ? null : [...cur.tools] };
-      });
+      .map((s) => ({ ...selection[s.id]!.access, policies: { ...selection[s.id]!.access.policies } }));
   }
 
   async function save(thenChat: boolean) {
@@ -85,6 +122,7 @@
         system_prompt: systemPrompt,
         servers: servers(),
       });
+      toolsDirty = false;
       if (thenChat) {
         if (await chatStore.newChat(saved.id)) nav.showChat();
       } else if (!existing) {
@@ -174,42 +212,78 @@
       {#if mcpStore.servers.length === 0}
         <p class="hint">No MCP servers are connected yet. Add one under Connections to give this agent tools — or leave it as a chat-only agent.</p>
       {:else}
-        <p class="hint">Choose which MCP servers and tools this agent may use. Tools set to <em>Ask</em> still require approval; disabled tools stay disabled.</p>
+        <p class="hint">
+          Choose the connections and tools this agent may use, and whether each runs without asking. Permissions here apply
+          only to this agent. Adding a connection copies its defaults from Connections — read-only tools keep <em>Allow</em>,
+          everything else starts at <em>Ask</em> because agents can run unattended. Tools disabled in Connections stay disabled.
+        </p>
         <ul class="servers">
           {#each mcpStore.servers as s (s.id)}
             {@const cur = selection[s.id]}
+            {@const sum = cur ? allowedSummary(cur.access, s) : null}
             <li class="server" class:on={cur?.on}>
               <div class="srow">
                 <label class="check">
                   <input type="checkbox" checked={cur?.on ?? false} onchange={(e) => toggleServer(s, e.currentTarget.checked)} />
                   <span class="sname">{s.name}</span>
                 </label>
-                <span class="sstatus">{s.status.kind === "connected" ? `${s.tools.length} tools` : s.enabled ? s.status.kind : "disabled"}</span>
+                <span class="sstatus">
+                  {#if !s.enabled}
+                    disabled in Connections
+                  {:else}
+                    {s.status.kind === "connected" ? `${s.tools.length} tools` : s.tools.length ? `${s.status.kind} · last seen ${s.tools.length} tools` : s.status.kind}
+                  {/if}
+                </span>
                 {#if cur?.on}
-                  <span class="scount">{selectedCount(s)}</span>
-                  <select class="mode" value={cur.all ? "all" : "some"} onchange={(e) => { cur.all = e.currentTarget.value === "all"; if (!cur.all) openTools = s.id; }} aria-label="Tool access for {s.name}">
-                    <option value="all">All tools</option>
-                    <option value="some">Selected tools</option>
-                  </select>
+                  <span class="scount">{selectedCount(s, cur.access)}</span>
+                  <label class="newtools">
+                    <span>New tools</span>
+                    <select value={cur.access.default_policy === "block" ? "block" : "ask"} onchange={(e) => setNewTools(s, e.currentTarget.value as ToolPolicy)} aria-label="New tools on {s.name}">
+                      <option value="ask">Ask</option>
+                      <option value="block">Off</option>
+                    </select>
+                  </label>
                 {/if}
               </div>
-              {#if cur?.on && !cur.all}
-                {@const names = [...new Set([...s.tools.map((t) => t.name), ...cur.tools])]}
-                {#if openTools === s.id || cur.tools.length === 0}
+              {#if cur?.on}
+                {#if !s.enabled}
+                  <p class="hint indent">
+                    This connection is disabled, so the agent can't use it. <button type="button" class="linkish" onclick={onopenconnections}>Enable it in Connections…</button>
+                  </p>
+                {/if}
+                {#if sum?.allowed}
+                  <p class="hint indent" class:warn={sum.risky > 0}>
+                    {sum.allowed} tool{sum.allowed === 1 ? "" : "s"} run without asking{sum.risky ? ` — ${sum.risky} of them can make changes` : ""}.
+                  </p>
+                {/if}
+                {#if openTools === s.id}
                   <div class="tools">
-                    {#each names as t (t)}
-                      {@const info = s.tools.find((x) => x.name === t)}
-                      <label class="tool" class:off={info?.policy === "block"} title={info?.description ?? (info ? t : "Not currently offered by the server")}>
-                        <input type="checkbox" checked={cur.tools.includes(t)} onchange={(e) => toggleTool(s.id, t, e.currentTarget.checked)} />
-                        <span class="tname">{info?.title ?? t}</span>
-                        {#if !info}<span class="tag">unavailable</span>{:else if info.policy === "block"}<span class="tag">disabled</span>{:else if info.policy === "ask"}<span class="tag">asks</span>{/if}
-                      </label>
+                    {#each s.tools as t (t.name)}
+                      {@const on = toolOn(cur.access, t.name)}
+                      <div class="tool" class:off={t.policy === "block" || !on} title={t.description ?? t.name}>
+                        {#if t.policy === "block"}
+                          <span class="tname">{t.title ?? t.name}</span>
+                          <ToolAccessBadge access={t.access} />
+                          <span class="tag" title="Disabled in Connections — it stays disabled for every chat and agent">disabled in Connections</span>
+                        {:else}
+                          <input type="checkbox" checked={on} aria-label="Use {t.name}" onchange={(e) => editTool(s, t, e.currentTarget.checked ? "on" : "block")} />
+                          <span class="tname">{t.title ?? t.name}</span>
+                          <ToolAccessBadge access={t.access} />
+                          {#if on}
+                            <ToolPolicySelect value={toolPolicy(cur.access, t.name)} allowDisable={false} label="Permission for {t.name}" onchange={(p) => editTool(s, t, p)} />
+                          {/if}
+                        {/if}
+                      </div>
                     {:else}
-                      <p class="hint">Connect this server to list its tools.</p>
+                      <p class="hint">Connect this server (Connections → Save &amp; test) to list its tools.</p>
                     {/each}
                   </div>
+                  <div class="toolacts">
+                    <button type="button" class="btn-ghost btn-sm" onclick={() => resetServer(s)} title="Copy the current permissions from Connections again">Reset to connection defaults</button>
+                    <button type="button" class="btn-ghost btn-sm" onclick={() => (openTools = null)}>Done</button>
+                  </div>
                 {:else}
-                  <button type="button" class="btn-ghost btn-sm expand" onclick={() => (openTools = s.id)}>Edit tool selection…</button>
+                  <button type="button" class="btn-ghost btn-sm expand" onclick={() => (openTools = s.id)}>Edit tools &amp; permissions…</button>
                 {/if}
               {/if}
             </li>
@@ -269,10 +343,15 @@
   .sname { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sstatus { font-size: 11.5px; color: var(--fg-faint); }
   .scount { margin-left: auto; font-size: 11.5px; color: var(--fg-muted); }
-  .mode { width: auto; padding: 3px 8px; font-size: 12px; }
-  .tools { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 2px 12px; padding: 6px 0 4px 24px; }
+  .newtools { display: inline-flex; flex-direction: row; align-items: center; gap: 6px; font-size: 11.5px; color: var(--fg-faint); }
+  .newtools select { width: auto; padding: 3px 8px; font-size: 12px; }
+  .indent { padding-left: 24px; }
+  .hint.warn { color: var(--warning); }
+  .linkish { padding: 0; font-size: 12px; color: var(--accent); text-decoration: underline; }
+  .tools { display: grid; gap: 2px; padding: 6px 0 4px 24px; max-height: 320px; overflow-y: auto; }
   .tool { display: flex; flex-direction: row; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg); min-width: 0; }
-  .tool.off { opacity: 0.55; }
+  .tool.off .tname { opacity: 0.55; }
+  .toolacts { display: flex; justify-content: space-between; padding-left: 16px; }
   .tname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tag { font-size: 10.5px; color: var(--fg-faint); flex: none; }
   .expand { margin: 2px 0 2px 16px; }

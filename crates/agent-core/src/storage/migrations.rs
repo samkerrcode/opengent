@@ -78,6 +78,8 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE chats ADD COLUMN agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL;
     ALTER TABLE chats ADD COLUMN schedule_id TEXT;
     CREATE INDEX chats_agent ON chats(agent_id);",
+    // v3: per-chat tool permission overrides (JSON `ChatToolOverrides`; NULL = none).
+    "ALTER TABLE chats ADD COLUMN tool_overrides TEXT;",
 ];
 
 pub fn apply(conn: &mut Connection) -> Result<()> {
