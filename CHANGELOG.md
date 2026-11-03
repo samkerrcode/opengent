@@ -6,6 +6,25 @@ planned work lives in the [README roadmap](README.md#roadmap).
 
 ## Unreleased — Phase 4 (OAuth)
 
+- Scoped tool permissions. Connection permissions are now defaults: the composer's ⚒ Tools
+  menu sets per-chat overrides (turn a server off for one chat without disconnecting it;
+  Allow / Ask / Disable per tool) and, in agent chats, edits the agent. Agents own their tools
+  and permissions — copied from the defaults when a connection is added, with Allow kept only
+  for read-only tools and new tools asking. The approval card's *Always allow* saves to the
+  chat or agent, not globally. A tool disabled in Connections is a hard ceiling; signature
+  pins are kept per scope; a deleted chat's or agent's runs fail closed.
+- Connections dialog: an Enabled switch (a connection turned off from the ⚒ Tools menu
+  can be turned back on here); Reconnect is hidden and **Save & test** (was *Save &
+  connect*) is greyed out while disabled; Save & test waits for the result and reports
+  connected/failed with the discovered tool count; a plain Save no longer reconnects
+  unless the command, URL, environment or headers changed. A new **Tool permissions**
+  section lists every discovered tool with a Read-only / Write / Destructive / Unannotated
+  badge and an Allow / Ask / Disable choice, plus "Reset all to default".
+- The last tool list per server is cached in `mcp.json`, so permissions stay editable while
+  a server is disabled or offline. Always-allow grants (including a server default of
+  Allow) now pin the tool's definition when granted or first listed, not at first use.
+- Tool cards show a single access badge; read-only tools no longer also show
+  "destructive".
 - Fixed the attachment picker hiding text files for vision-capable models: the dialog no
   longer uses extension filters, one unusable file in a multi-select is skipped with a
   per-file reason instead of failing the whole pick, and images left pending after

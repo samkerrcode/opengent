@@ -8,4 +8,6 @@ pub use events::{
 };
 pub use ids::{AgentId, ChatId, RunId, ScheduleId};
 pub use message::{ContentBlock, Message, Role};
-pub use tool::{tool_result_text, ApprovalDecision, ToolCallInfo, ToolCallStatus, ToolPolicy};
+pub use tool::{
+    tool_result_text, ApprovalDecision, ToolAccess, ToolCallInfo, ToolCallStatus, ToolPolicy,
+};

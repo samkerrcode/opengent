@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod manager;
+pub mod permissions;
 pub mod stdio;
 
 use std::collections::HashMap;
@@ -21,7 +22,10 @@ pub use config::{
     split_command, KeyValueEntry, KeyValueInput, McpServerConfig, McpServerInput, McpStore,
     McpTransport,
 };
-pub use manager::{McpManager, McpServerStatus, McpServerView, ToolInfo};
+pub use manager::{
+    McpManager, McpServerStatus, McpServerView, ScopedServerView, ScopedToolView, ToolInfo,
+};
+pub use permissions::{ChatToolOverrides, PermissionScope, ScopePolicies};
 
 /// Launch configuration for a stdio MCP server. No shell is involved: `command` is executed
 /// directly with `args`, a minimal allow-listed environment and an explicit working directory.

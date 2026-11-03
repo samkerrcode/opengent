@@ -1,5 +1,6 @@
-//! Connection manager: owns live MCP sessions, tool catalogs and dispatch. Implements the
-//! agent loop's `ToolHost` seam so policy checks and calls happen here in Rust.
+//! Connection manager: owns live MCP sessions, tool catalogs and dispatch. Runs get a
+//! scoped `ToolHost` (chat or agent permissions) so policy checks and calls happen here in
+//! Rust.
 //!
 //! Status changes are pushed to the host through an `on_change` callback (the Tauri layer
 //! emits an app event; the UI refetches `list_mcp_servers`).
@@ -22,13 +23,14 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 
-use super::config::{McpServerConfig, McpStore, McpTransport};
+use super::config::{KnownTool, McpServerConfig, McpStore, McpTransport};
+use super::permissions::{PermissionScope, PinSource, ScopePolicies};
 use super::{client_config, StdioServerSpec};
 use crate::agent::context::{estimate_tokens, tools_prompt, ServerBrief};
 use crate::agent::tools::{
-    resolve_on_demand, RunTools, ToolEntry, ToolFilter, ToolFuture, ToolHost, ToolNamer, ToolOutput,
+    resolve_on_demand, RunTools, ToolEntry, ToolFuture, ToolHost, ToolNamer, ToolOutput,
 };
-use crate::domain::{Message, ToolPolicy};
+use crate::domain::{Message, ToolAccess, ToolPolicy};
 use crate::providers::ToolSpec;
 
 /// Wait for the MCP handshake + initial `tools/list` before marking a server connected.
@@ -94,9 +96,8 @@ pub struct ToolInfo {
     pub title: Option<String>,
     pub description: Option<String>,
     pub policy: ToolPolicy,
-    /// MCP annotation hints (untrusted metadata, shown for information only).
-    pub read_only: bool,
-    pub destructive: bool,
+    /// From MCP annotation hints (untrusted metadata, shown for information only).
+    pub access: ToolAccess,
     /// An `always_allow` grant exists but the tool's definition changed since it was
     /// granted; it currently behaves as `ask` until re-approved.
     #[serde(default)]
@@ -112,6 +113,8 @@ pub struct McpServerView {
     pub status: McpServerStatus,
     pub server_info: Option<String>,
     pub tools: Vec<ToolInfo>,
+    /// `tools` is the last list seen (server disabled, offline or failed), not live.
+    pub tools_cached: bool,
     /// Recent stderr lines for stdio servers that failed to start.
     pub stderr_tail: Vec<String>,
 }
@@ -157,6 +160,24 @@ pub(crate) fn tool_signature(t: &rmcp::model::Tool) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(h.finalize())
 }
 
+/// The cacheable summary of a live tool definition.
+fn known_tool(t: &rmcp::model::Tool) -> KnownTool {
+    let ann = t.annotations.as_ref();
+    KnownTool {
+        name: t.name.to_string(),
+        title: t
+            .title
+            .clone()
+            .or_else(|| ann.and_then(|a| a.title.clone())),
+        description: t.description.as_deref().map(str::to_owned),
+        access: ToolAccess::from_hints(
+            ann.and_then(|a| a.read_only_hint),
+            ann.and_then(|a| a.destructive_hint),
+        ),
+        signature: tool_signature(t),
+    }
+}
+
 /// Client-side MCP handler: declares our identity/capabilities and forwards
 /// `tools/list_changed` notifications to a channel the manager drains.
 struct AppClientHandler {
@@ -174,6 +195,39 @@ impl ClientHandler for AppClientHandler {
     }
 }
 
+/// Persists a scope after an approval-card grant changed it (installed by the host app,
+/// which owns the database).
+pub type GrantHook = Box<dyn Fn(PermissionScope, ScopePolicies) + Send + Sync>;
+
+/// A tool as seen from one permission scope (chat or agent).
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct ScopedToolView {
+    pub name: String,
+    /// Offered to this scope (agent legacy allow-lists can exclude tools).
+    pub in_scope: bool,
+    /// The scope's stored policy (before signature verification).
+    pub policy: ToolPolicy,
+    /// Set explicitly by the scope rather than inherited.
+    pub overridden: bool,
+    /// Disabled in Connections — a ceiling the scope can't loosen.
+    pub ceiling: bool,
+    /// An `always_allow` whose pinned definition no longer matches; it asks again.
+    pub changed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct ScopedServerView {
+    pub server_id: String,
+    /// Used by this scope (chat: not turned off; agent: included).
+    pub in_scope: bool,
+    /// Agent scope: the agent's policy for tools without an entry; `None` for chats and
+    /// legacy agents (which follow the connection).
+    pub default_policy: Option<ToolPolicy>,
+    pub tools: Vec<ScopedToolView>,
+}
+
 pub struct McpManager {
     store: McpStore,
     inner: Mutex<Inner>,
@@ -182,6 +236,11 @@ pub struct McpManager {
     /// context (setup hook, sync commands run on the main thread).
     handle: tokio::runtime::Handle,
     on_change: Box<dyn Fn() + Send + Sync>,
+    /// Permissions of chats/agents with runs or open menus, refreshed by the host app on
+    /// every change so dispatch reads the current values. A scope that isn't registered
+    /// resolves as `ScopePolicies::Missing` (fail closed).
+    scopes: Mutex<HashMap<PermissionScope, ScopePolicies>>,
+    grant_hook: Mutex<Option<GrantHook>>,
 }
 
 impl McpManager {
@@ -197,7 +256,191 @@ impl McpManager {
             http,
             handle,
             on_change: Box::new(on_change),
+            scopes: Mutex::new(HashMap::new()),
+            grant_hook: Mutex::new(None),
         })
+    }
+
+    pub fn set_grant_hook(
+        &self,
+        hook: impl Fn(PermissionScope, ScopePolicies) + Send + Sync + 'static,
+    ) {
+        *self.grant_hook.lock().expect("hook lock") = Some(Box::new(hook));
+    }
+
+    /// Tools known for a server: the live list when connected, else the cached one.
+    fn known_tools(&self, inner: &Inner, server_id: &str) -> (Vec<KnownTool>, bool) {
+        match inner.live.get(server_id) {
+            Some(l) => (
+                l.tools
+                    .lock()
+                    .expect("tools lock")
+                    .iter()
+                    .map(known_tool)
+                    .collect(),
+                false,
+            ),
+            None => (self.store.catalog(server_id), true),
+        }
+    }
+
+    fn known_signature(&self, server_id: &str, tool: &str) -> Option<String> {
+        self.current_signature(server_id, tool)
+            .or_else(|| self.store.cached_signature(server_id, tool))
+    }
+
+    /// Installs (or refreshes) a scope's permissions and reconciles its signature pins.
+    pub fn set_scope(&self, scope: PermissionScope, policies: ScopePolicies) {
+        let grants = {
+            let inner = self.inner.lock().expect("mcp lock");
+            policies.scoped_allows(|server| {
+                self.known_tools(&inner, server)
+                    .0
+                    .into_iter()
+                    .map(|t| t.name)
+                    .collect()
+            })
+        };
+        let grants = grants
+            .into_iter()
+            .map(|(s, t)| {
+                let sig = self.known_signature(&s, &t);
+                (s, t, sig)
+            })
+            .collect();
+        self.store.sync_scope_pins(&scope.key(), grants);
+        // No `notify()`: listing a scope installs it too, and the UI refetches on change
+        // events — callers that change permissions refresh their own views.
+        self.scopes
+            .lock()
+            .expect("scopes lock")
+            .insert(scope, policies);
+    }
+
+    /// Forgets a deleted chat's/agent's permissions and pins. Runs still holding the scope
+    /// fall back to `Missing` (every tool asks).
+    pub fn remove_scope(&self, scope: PermissionScope) {
+        self.scopes.lock().expect("scopes lock").remove(&scope);
+        self.store.forget_scope(&scope.key());
+    }
+
+    fn scope_policies(&self, scope: &PermissionScope) -> ScopePolicies {
+        self.scopes
+            .lock()
+            .expect("scopes lock")
+            .get(scope)
+            .cloned()
+            .unwrap_or(ScopePolicies::Missing)
+    }
+
+    /// Dispatch-time policy for a tool in a scope, re-checking the scope's current on/off
+    /// state (out of scope or a disabled connection → `Block`) and verifying `AlwaysAllow`
+    /// against the pin of whichever level granted it.
+    pub fn scoped_policy(
+        &self,
+        scope: &PermissionScope,
+        server_id: &str,
+        tool: &str,
+        current_sig: Option<&str>,
+    ) -> ToolPolicy {
+        if !self.store.get(server_id).is_ok_and(|c| c.enabled) {
+            return ToolPolicy::Block;
+        }
+        let global = self.store.policy_for(server_id, tool);
+        let Some(r) = self.scope_policies(scope).resolve(server_id, tool, global) else {
+            return ToolPolicy::Block;
+        };
+        match (r.policy, r.pin) {
+            (ToolPolicy::AlwaysAllow, PinSource::Global) => {
+                self.store.verify_global_allow(server_id, tool, current_sig)
+            }
+            (ToolPolicy::AlwaysAllow, PinSource::Scope) => {
+                self.store
+                    .verify_scoped_allow(&scope.key(), server_id, tool, current_sig)
+            }
+            (p, _) => p,
+        }
+    }
+
+    /// Approval-card grant in a scope: updates the live permissions, pins the definition
+    /// the user just approved, and hands the scope to the grant hook for persistence.
+    fn grant(&self, scope: &PermissionScope, server_id: &str, tool: &str, policy: ToolPolicy) {
+        let updated = {
+            let mut scopes = self.scopes.lock().expect("scopes lock");
+            scopes
+                .get_mut(scope)
+                .and_then(|p| p.grant(server_id, tool, policy).then(|| p.clone()))
+        };
+        let Some(updated) = updated else {
+            tracing::warn!(scope = %scope, "grant for an unknown scope ignored");
+            return;
+        };
+        if policy == ToolPolicy::AlwaysAllow {
+            self.store.pin_scoped(
+                &scope.key(),
+                server_id,
+                tool,
+                self.current_signature(server_id, tool),
+            );
+        }
+        if let Some(hook) = self.grant_hook.lock().expect("hook lock").as_ref() {
+            hook(*scope, updated);
+        }
+        self.notify();
+    }
+
+    /// Permissions of every server as seen from `scope`, for the Tools menu and the
+    /// agent editor. The scope must have been installed with `set_scope`.
+    pub fn list_scoped(&self, scope: &PermissionScope) -> Vec<ScopedServerView> {
+        let policies = self.scope_policies(scope);
+        let key = scope.key();
+        let inner = self.inner.lock().expect("mcp lock");
+        self.store
+            .list()
+            .into_iter()
+            .map(|config| {
+                let (known, _) = self.known_tools(&inner, &config.id);
+                let tools = known
+                    .into_iter()
+                    .map(|t| {
+                        let global = self.store.policy_for(&config.id, &t.name);
+                        let r = policies.policy_for(&config.id, &t.name, global);
+                        let changed = r.policy == ToolPolicy::AlwaysAllow
+                            && match r.pin {
+                                PinSource::Global => {
+                                    self.store.grant_stale(&config.id, &t.name, &t.signature)
+                                }
+                                PinSource::Scope => self.store.scoped_grant_stale(
+                                    &key,
+                                    &config.id,
+                                    &t.name,
+                                    &t.signature,
+                                ),
+                            };
+                        ScopedToolView {
+                            in_scope: policies.allows_tool(&config.id, &t.name),
+                            policy: r.policy,
+                            overridden: r.overridden,
+                            ceiling: r.ceiling,
+                            changed,
+                            name: t.name,
+                        }
+                    })
+                    .collect();
+                ScopedServerView {
+                    in_scope: policies.allows_server(&config.id),
+                    default_policy: match &policies {
+                        ScopePolicies::Agent(servers) => servers
+                            .iter()
+                            .find(|s| s.server_id == config.id)
+                            .and_then(|s| s.default_policy),
+                        _ => None,
+                    },
+                    server_id: config.id,
+                    tools,
+                }
+            })
+            .collect()
     }
 
     fn notify(&self) {
@@ -243,14 +486,27 @@ impl McpManager {
         tools.iter().find(|t| t.name == tool).map(tool_signature)
     }
 
-    /// Persists a tool policy and, when the server is connected, the tool's current
-    /// definition signature so an `AlwaysAllow` grant stays verifiable.
+    /// Persists a tool policy plus the definition signature it was granted against — live
+    /// when connected, else the last listed one — so an `AlwaysAllow` grant stays
+    /// verifiable even when made while the server is offline.
     pub fn set_policy(&self, server_id: &str, tool: &str, policy: ToolPolicy) {
-        let sig = self.current_signature(server_id, tool);
+        let sig = self
+            .current_signature(server_id, tool)
+            .or_else(|| self.store.cached_signature(server_id, tool));
         if let Err(e) = self.store.set_tool_policy(server_id, tool, policy, sig) {
             tracing::warn!(error = %e, "failed to persist tool policy");
         }
         self.notify();
+    }
+
+    /// Caches the listed tools (and pins newly seen default-allowed ones).
+    fn record_catalog(&self, server_id: &str, tools: &[rmcp::model::Tool]) {
+        if let Err(e) = self
+            .store
+            .set_catalog(server_id, tools.iter().map(known_tool).collect())
+        {
+            tracing::warn!(error = %e, "failed to persist tool catalog");
+        }
     }
 
     /// Enabled servers whose first connection attempt hasn't settled (connected or failed).
@@ -292,41 +548,35 @@ impl McpManager {
             .into_iter()
             .map(|config| {
                 let live = inner.live.get(&config.id);
-                let tools = live
-                    .map(|l| {
-                        let mut namer = ToolNamer::new();
-                        l.tools
-                            .lock()
-                            .expect("tools lock")
-                            .iter()
-                            .map(|t| {
-                                let ann = t.annotations.as_ref();
-                                let policy = self.store.policy_for(&config.id, &t.name);
-                                ToolInfo {
-                                    name: t.name.to_string(),
-                                    exposed: namer.name(&config.name, &t.name),
-                                    title: t
-                                        .title
-                                        .clone()
-                                        .or_else(|| ann.and_then(|a| a.title.clone())),
-                                    description: t.description.as_deref().map(str::to_owned),
-                                    policy,
-                                    read_only: ann.and_then(|a| a.read_only_hint).unwrap_or(false),
-                                    destructive: ann
-                                        .and_then(|a| a.destructive_hint)
-                                        .unwrap_or(true),
-                                    changed: policy == ToolPolicy::AlwaysAllow
-                                        && self.store.grant_stale(
-                                            &config.id,
-                                            &t.name,
-                                            &tool_signature(t),
-                                        ),
-                                }
-                            })
-                            .collect()
+                let known: Vec<KnownTool> = match live {
+                    Some(l) => l
+                        .tools
+                        .lock()
+                        .expect("tools lock")
+                        .iter()
+                        .map(known_tool)
+                        .collect(),
+                    None => self.store.catalog(&config.id),
+                };
+                let mut namer = ToolNamer::new();
+                let tools = known
+                    .into_iter()
+                    .map(|t| {
+                        let policy = self.store.policy_for(&config.id, &t.name);
+                        ToolInfo {
+                            exposed: namer.name(&config.name, &t.name),
+                            policy,
+                            access: t.access,
+                            changed: policy == ToolPolicy::AlwaysAllow
+                                && self.store.grant_stale(&config.id, &t.name, &t.signature),
+                            name: t.name,
+                            title: t.title,
+                            description: t.description,
+                        }
                     })
-                    .unwrap_or_default();
+                    .collect();
                 McpServerView {
+                    tools_cached: live.is_none(),
                     status: if config.enabled {
                         inner
                             .status
@@ -424,7 +674,11 @@ impl McpManager {
                     return;
                 }
                 let live = Arc::new(live);
-                let count = live.tools.lock().expect("tools lock").len() as u32;
+                let count = {
+                    let tools = live.tools.lock().expect("tools lock");
+                    self.record_catalog(id, &tools);
+                    tools.len() as u32
+                };
                 self.inner
                     .lock()
                     .expect("mcp lock")
@@ -525,6 +779,7 @@ impl McpManager {
                     let count = {
                         let mut t = live.tools.lock().expect("tools lock");
                         *t = tools;
+                        this.record_catalog(&id, &t);
                         t.len() as u32
                     };
                     this.set_status(&id, McpServerStatus::Connected { tool_count: count });
@@ -695,15 +950,18 @@ impl McpManager {
 
     /// The run-facing snapshot: a catalog of non-blocked tools from connected, enabled
     /// servers plus the system-prompt addition and the estimated definition cost.
-    /// `history` restores the on-demand loaded set. `filter` (agents) restricts the catalog
-    /// to some servers/tools. Returns `None` when nothing is callable.
+    /// `history` restores the on-demand loaded set. `scope` (the run's chat or agent, which
+    /// must be installed with `set_scope`) decides which servers/tools are offered and
+    /// their policies; calls are checked again against it at dispatch. Returns `None` when
+    /// nothing is callable.
     pub fn prepare_tools(
         self: &Arc<Self>,
         history: &[Message],
         context_window: u32,
-        filter: Option<&ToolFilter>,
+        scope: &PermissionScope,
     ) -> Option<(RunTools, String, u32)> {
-        if filter.is_some_and(ToolFilter::is_empty) {
+        let policies = self.scope_policies(scope);
+        if matches!(&policies, ScopePolicies::Agent(s) if s.is_empty()) {
             return None;
         }
         let settings = self.store.settings();
@@ -720,8 +978,7 @@ impl McpManager {
                 let Some(live) = inner.live.get(&config.id) else {
                     continue;
                 };
-                let in_filter = |tool: &str| filter.is_none_or(|f| f.allows_tool(&config.id, tool));
-                if filter.is_some_and(|f| !f.allows_server(&config.id)) {
+                if !policies.allows_server(&config.id) {
                     // Still feed the namer so exposed names match unfiltered runs.
                     for t in live.tools.lock().expect("tools lock").iter() {
                         namer.name(&config.name, &t.name);
@@ -736,10 +993,11 @@ impl McpManager {
                     // Name every tool in list order so exposed names stay stable when tools
                     // are disabled or skipped.
                     let exposed = namer.name(&config.name, &t.name);
-                    if !in_filter(&t.name) {
+                    let global = self.store.policy_for(&config.id, &t.name);
+                    let Some(resolved) = policies.resolve(&config.id, &t.name, global) else {
                         continue;
-                    }
-                    if self.store.policy_for(&config.id, &t.name) == ToolPolicy::Block {
+                    };
+                    if resolved.policy == ToolPolicy::Block {
                         // Named but never defined: the model can explain it's disabled.
                         if disabled.len() < MAX_DISABLED_LISTED {
                             disabled.push(exposed.clone());
@@ -786,7 +1044,11 @@ impl McpManager {
                 if skipped > 0 {
                     tracing::warn!(server = %config.name, skipped, "skipped tools with oversized schemas");
                 }
-                if count == 0 && disabled.is_empty() && disabled_extra == 0 && filter.is_some() {
+                if count == 0
+                    && disabled.is_empty()
+                    && disabled_extra == 0
+                    && matches!(policies, ScopePolicies::Agent(_))
+                {
                     continue;
                 }
                 briefs.push(ServerBrief {
@@ -802,8 +1064,12 @@ impl McpManager {
             return None;
         }
         let on_demand = resolve_on_demand(&settings, &catalog, context_window);
+        let host = ScopedHost {
+            mcp: Arc::clone(self),
+            scope: *scope,
+        };
         let tools = RunTools::new(
-            Arc::clone(self) as Arc<dyn ToolHost>,
+            Arc::new(host) as Arc<dyn ToolHost>,
             catalog,
             on_demand,
             settings.search_limit as usize,
@@ -816,21 +1082,40 @@ impl McpManager {
     }
 }
 
-/// `McpManager` implements `ToolHost`; runs hold it as `Arc<dyn ToolHost>`.
-impl ToolHost for McpManager {
+/// A run's view of the manager: policies resolve in the run's permission scope (chat or
+/// agent) at dispatch time, and approval-card grants are written to that scope.
+struct ScopedHost {
+    mcp: Arc<McpManager>,
+    scope: PermissionScope,
+}
+
+impl ToolHost for ScopedHost {
     fn policy(&self, server_id: &str, tool: &str) -> ToolPolicy {
-        let sig = self.current_signature(server_id, tool);
-        self.store.effective_policy(server_id, tool, sig.as_deref())
+        let sig = self.mcp.current_signature(server_id, tool);
+        self.mcp
+            .scoped_policy(&self.scope, server_id, tool, sig.as_deref())
     }
 
     fn set_policy(&self, server_id: &str, tool: &str, policy: ToolPolicy) {
-        McpManager::set_policy(self, server_id, tool, policy)
+        self.mcp.grant(&self.scope, server_id, tool, policy)
     }
 
+    fn call(
+        &self,
+        server_id: &str,
+        tool: &str,
+        arguments: Value,
+        cancel: CancellationToken,
+    ) -> ToolFuture {
+        self.mcp.call_tool(server_id, tool, arguments, cancel)
+    }
+}
+
+impl McpManager {
     /// `call_tool` abandons its request on drop, which makes rmcp send
     /// `notifications/cancelled` — so the coordinator's timeout/cancel path (which drops
     /// this future) already notifies the server; `_cancel` only short-circuits locally.
-    fn call(
+    fn call_tool(
         &self,
         server_id: &str,
         tool: &str,
@@ -919,6 +1204,148 @@ mod tests {
             "a superseded connect must fail the currency check"
         );
         assert!(!m.is_current("never-connected", u64::MAX));
+    }
+
+    fn server(m: &McpManager, name: &str, tools: &[(&str, &str)]) -> String {
+        let id = m
+            .store()
+            .save(super::super::McpServerInput {
+                id: None,
+                name: name.into(),
+                transport: McpTransport::Stdio,
+                command: "true".into(),
+                env: Vec::new(),
+                cwd: None,
+                url: String::new(),
+                headers: Vec::new(),
+                default_policy: ToolPolicy::Ask,
+                call_timeout_secs: 60,
+            })
+            .unwrap()
+            .id;
+        m.store()
+            .set_catalog(
+                &id,
+                tools
+                    .iter()
+                    .map(|(n, sig)| KnownTool {
+                        name: (*n).into(),
+                        title: None,
+                        description: None,
+                        access: ToolAccess::Unannotated,
+                        signature: (*sig).into(),
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn scoped_policies_pin_per_scope_and_respect_the_ceiling() {
+        use super::super::permissions::ChatToolOverrides;
+        use crate::domain::ChatId;
+        let m = manager();
+        let id = server(&m, "fs", &[("read", "sig-r"), ("rm", "sig-rm")]);
+        let chat = PermissionScope::Chat(ChatId::new());
+        let mut o = ChatToolOverrides::default();
+        o.set_tool(&id, "read", Some(ToolPolicy::AlwaysAllow));
+        o.set_tool(&id, "rm", Some(ToolPolicy::AlwaysAllow));
+        m.store()
+            .set_tool_policy(&id, "rm", ToolPolicy::Block, None)
+            .unwrap();
+        m.set_scope(chat, ScopePolicies::Chat(o.clone()));
+        // Pinned from the cached definition when the scope was installed.
+        assert_eq!(
+            m.scoped_policy(&chat, &id, "read", Some("sig-r")),
+            ToolPolicy::AlwaysAllow
+        );
+        assert_eq!(
+            m.scoped_policy(&chat, &id, "read", Some("changed")),
+            ToolPolicy::Ask
+        );
+        assert_eq!(
+            m.scoped_policy(&chat, &id, "rm", Some("sig-rm")),
+            ToolPolicy::Block,
+            "a global Disable is a ceiling"
+        );
+        // Global stays Ask: the chat grant didn't leak.
+        assert_eq!(
+            m.store().effective_policy(&id, "read", Some("sig-r")),
+            ToolPolicy::Ask
+        );
+        // Turned off in the chat (e.g. mid-run): blocked at dispatch.
+        o.set_server_off(&id, true);
+        m.set_scope(chat, ScopePolicies::Chat(o));
+        assert_eq!(
+            m.scoped_policy(&chat, &id, "read", Some("sig-r")),
+            ToolPolicy::Block
+        );
+        // Unknown scope fails closed.
+        let gone = PermissionScope::Chat(ChatId::new());
+        assert_eq!(
+            m.scoped_policy(&gone, &id, "read", Some("sig-r")),
+            ToolPolicy::Ask
+        );
+        // Disabled connection: nothing is callable.
+        m.store().set_enabled(&id, false).unwrap();
+        m.set_scope(gone, ScopePolicies::Chat(Default::default()));
+        assert_eq!(
+            m.scoped_policy(&gone, &id, "read", Some("sig-r")),
+            ToolPolicy::Block
+        );
+    }
+
+    #[tokio::test]
+    async fn scope_grant_copies_a_stale_global_pin() {
+        use crate::agents::AgentServerAccess;
+        use crate::domain::AgentId;
+        let m = manager();
+        let id = server(&m, "fs", &[("t", "sig-old")]);
+        // Global allow pinned at sig-old; the tool then changed to sig-new.
+        m.store()
+            .set_tool_policy(&id, "t", ToolPolicy::AlwaysAllow, Some("sig-old".into()))
+            .unwrap();
+        m.store()
+            .set_catalog(
+                &id,
+                vec![KnownTool {
+                    name: "t".into(),
+                    title: None,
+                    description: None,
+                    access: ToolAccess::ReadOnly,
+                    signature: "sig-new".into(),
+                }],
+            )
+            .unwrap();
+        let agent = PermissionScope::Agent(AgentId::new());
+        let mut access = AgentServerAccess {
+            server_id: id.clone(),
+            tools: None,
+            default_policy: Some(ToolPolicy::Ask),
+            policies: Default::default(),
+        };
+        access.policies.insert("t".into(), ToolPolicy::AlwaysAllow);
+        m.set_scope(agent, ScopePolicies::Agent(vec![access]));
+        assert_eq!(
+            m.scoped_policy(&agent, &id, "t", Some("sig-new")),
+            ToolPolicy::Ask,
+            "copying the connection's Allow must not re-validate a changed tool"
+        );
+        let view = m.list_scoped(&agent);
+        assert!(view[0].tools[0].changed && view[0].in_scope);
+        // An approval-card grant re-pins to what the user approved (live definition).
+        m.store()
+            .pin_scoped(&agent.key(), &id, "t", Some("sig-new".into()));
+        assert_eq!(
+            m.scoped_policy(&agent, &id, "t", Some("sig-new")),
+            ToolPolicy::AlwaysAllow
+        );
+        m.remove_scope(agent);
+        assert_eq!(
+            m.scoped_policy(&agent, &id, "t", Some("sig-new")),
+            ToolPolicy::Ask
+        );
     }
 
     #[test]

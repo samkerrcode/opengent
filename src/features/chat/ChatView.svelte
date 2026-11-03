@@ -200,6 +200,7 @@
   bind:this={composer}
   busy={chat.activeRunId !== null}
   pending={chat.pending}
+  chatId={chat.summary.id}
   {agent}
   supportsImages={chatStore.supportsImages(chat)}
   onopenagent={() => agent && nav.editAgent(agent.id)}

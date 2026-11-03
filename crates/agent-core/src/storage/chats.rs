@@ -4,6 +4,7 @@ use ts_rs::TS;
 
 use super::db::{now_ms, sql_err};
 use crate::domain::{AgentId, ChatId, ContentBlock, Message, Role, RunId, ScheduleId, Usage};
+use crate::mcp::permissions::ChatToolOverrides;
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -338,6 +339,56 @@ pub fn delete_chat(conn: &Connection, id: ChatId) -> Result<()> {
     Ok(())
 }
 
+/// The chat's tool permission overrides (empty if none were set).
+pub fn get_tool_overrides(conn: &Connection, id: ChatId) -> Result<ChatToolOverrides> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT tool_overrides FROM chats WHERE id = ?1",
+            params![id.to_string()],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql_err)?
+        .ok_or_else(|| Error::NotFound(format!("chat {id}")))?;
+    match raw {
+        Some(s) => serde_json::from_str(&s)
+            .map_err(|e| Error::Internal(format!("corrupt chat tool overrides: {e}"))),
+        None => Ok(ChatToolOverrides::default()),
+    }
+}
+
+pub fn set_tool_overrides(conn: &Connection, id: ChatId, o: &ChatToolOverrides) -> Result<()> {
+    let value = if o.servers.is_empty() {
+        None
+    } else {
+        Some(json(o)?)
+    };
+    let n = conn
+        .execute(
+            "UPDATE chats SET tool_overrides = ?2 WHERE id = ?1",
+            params![id.to_string(), value],
+        )
+        .map_err(sql_err)?;
+    if n == 0 {
+        return Err(Error::NotFound(format!("chat {id}")));
+    }
+    Ok(())
+}
+
+/// Ids of all chats, or one agent's.
+pub fn list_chat_ids(conn: &Connection, agent: Option<AgentId>) -> Result<Vec<ChatId>> {
+    let mut stmt = conn
+        .prepare_cached("SELECT id FROM chats WHERE ?1 IS NULL OR agent_id = ?1")
+        .map_err(sql_err)?;
+    let rows = stmt
+        .query_map(params![agent.map(|a| a.to_string())], |r| {
+            r.get::<_, String>(0)
+        })
+        .map_err(sql_err)?;
+    rows.map(|r| r.map_err(sql_err).and_then(|s| parse_id(s, "chat")))
+        .collect()
+}
+
 fn next_seq(conn: &Connection, chat_id: ChatId) -> Result<i64> {
     conn.query_row(
         "SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE chat_id = ?1",
@@ -495,6 +546,22 @@ mod tests {
         c.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         super::super::migrations::apply(&mut c).unwrap();
         c
+    }
+
+    #[test]
+    fn tool_overrides_round_trip() {
+        let c = conn();
+        let chat = create_chat(&c, "x").unwrap();
+        assert_eq!(get_tool_overrides(&c, chat.id).unwrap(), Default::default());
+        let mut o = ChatToolOverrides::default();
+        o.set_server_off("fs", true);
+        o.set_tool("web", "fetch", Some(crate::domain::ToolPolicy::AlwaysAllow));
+        set_tool_overrides(&c, chat.id, &o).unwrap();
+        assert_eq!(get_tool_overrides(&c, chat.id).unwrap(), o);
+        set_tool_overrides(&c, chat.id, &ChatToolOverrides::default()).unwrap();
+        assert!(get_tool_overrides(&c, chat.id).unwrap().servers.is_empty());
+        assert_eq!(list_chat_ids(&c, None).unwrap(), vec![chat.id]);
+        assert!(get_tool_overrides(&c, ChatId::new()).is_err());
     }
 
     #[test]

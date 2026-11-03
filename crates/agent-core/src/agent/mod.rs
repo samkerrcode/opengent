@@ -14,5 +14,5 @@ pub use emitter::{EmitterConfig, RunEmitter};
 pub use recorder::RunRecorder;
 pub use tools::{
     cap_result, cap_result_with, definitions_tokens, resolve_on_demand, RunTools, ToolEntry,
-    ToolFilter, ToolFuture, ToolHost, ToolLoading, ToolNamer, ToolOutput, ToolSettings, FIND_TOOLS,
+    ToolFuture, ToolHost, ToolLoading, ToolNamer, ToolOutput, ToolSettings, FIND_TOOLS,
 };

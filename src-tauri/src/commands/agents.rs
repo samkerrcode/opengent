@@ -1,6 +1,8 @@
 use agent_core::agents::{Agent, AgentInput, AgentSchedule, ScheduleInput, ScheduleOutcome};
 use agent_core::domain::{AgentId, ScheduleId};
+use agent_core::mcp::PermissionScope;
 use agent_core::storage::agents as repo;
+use agent_core::storage::chats as chats_repo;
 use agent_core::storage::ChatSummary;
 use agent_core::Error;
 use chrono::Local;
@@ -36,12 +38,30 @@ pub async fn save_agent(state: State<'_, AppState>, input: AgentInput) -> Result
     {
         check(&fb.provider_id, "fallback model")?;
     }
-    state.db.call(move |c| repo::save_agent(c, input)).await
+    let agent = state.db.call(move |c| repo::save_agent(c, input)).await?;
+    // Refresh any running agent chats and reconcile the agent's signature pins.
+    state
+        .mcp
+        .set_scope(PermissionScope::Agent(agent.id), agent.scope_policies());
+    Ok(agent)
 }
 
+/// Deletes the agent; its running chats are cancelled and its permissions forgotten (a run
+/// still holding the scope fails closed — every tool asks).
 #[tauri::command]
 pub async fn delete_agent(state: State<'_, AppState>, id: AgentId) -> Result<(), Error> {
-    state.db.call(move |c| repo::delete_agent(c, id)).await
+    let chats = state
+        .db
+        .call(move |c| chats_repo::list_chat_ids(c, Some(id)))
+        .await?;
+    for chat in chats {
+        if let Some(run) = state.coordinator.active_run(chat) {
+            state.coordinator.cancel(run);
+        }
+    }
+    state.db.call(move |c| repo::delete_agent(c, id)).await?;
+    state.mcp.remove_scope(PermissionScope::Agent(id));
+    Ok(())
 }
 
 /// All schedules, or one agent's.

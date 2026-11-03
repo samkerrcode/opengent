@@ -15,6 +15,50 @@ pub enum ToolPolicy {
     Block,
 }
 
+/// What a tool may do, from the server's MCP annotation hints. Untrusted metadata: shown to
+/// the user to inform permission choices, never used to grant anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ToolAccess {
+    /// `readOnlyHint: true` — does not modify its environment.
+    ReadOnly,
+    /// Modifies its environment, but `destructiveHint: false` — only additive changes.
+    Write,
+    /// `destructiveHint: true` — may delete or overwrite.
+    Destructive,
+    /// The server gave no read-only/destructive hints. The MCP spec defaults such tools to
+    /// destructive, so treat them as potentially destructive.
+    Unannotated,
+}
+
+impl ToolAccess {
+    pub fn from_hints(read_only: Option<bool>, destructive: Option<bool>) -> Self {
+        match (read_only, destructive) {
+            (Some(true), _) => Self::ReadOnly,
+            (_, Some(true)) => Self::Destructive,
+            (_, Some(false)) => Self::Write,
+            (_, None) => Self::Unannotated,
+        }
+    }
+}
+
+#[cfg(test)]
+mod access_tests {
+    use super::ToolAccess::*;
+    use super::*;
+
+    #[test]
+    fn access_from_hints() {
+        assert_eq!(ToolAccess::from_hints(Some(true), None), ReadOnly);
+        assert_eq!(ToolAccess::from_hints(Some(true), Some(true)), ReadOnly);
+        assert_eq!(ToolAccess::from_hints(None, Some(true)), Destructive);
+        assert_eq!(ToolAccess::from_hints(Some(false), Some(false)), Write);
+        assert_eq!(ToolAccess::from_hints(None, None), Unannotated);
+        assert_eq!(ToolAccess::from_hints(Some(false), None), Unannotated);
+    }
+}
+
 /// The user's answer to an approval prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]

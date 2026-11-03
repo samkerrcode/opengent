@@ -1,5 +1,6 @@
 // User-configured agents and their schedules. Mirrors Rust (SQLite is authoritative): every
-// mutation refetches, and the scheduler pushes `agents-changed` when it advances schedules.
+// mutation refetches, and Rust pushes `agents-changed` when the scheduler advances schedules
+// or an agent's tool permissions change outside the editor.
 import { listen } from "@tauri-apps/api/event";
 import { commands, describeError, type Agent, type AgentInput, type AgentSchedule, type ScheduleInput } from "$lib/ipc/commands";
 
@@ -29,7 +30,8 @@ class AgentStore {
   async init() {
     if (!this.listening) {
       this.listening = true;
-      await listen("agents-changed", () => void this.loadSchedules());
+      // Schedules advanced, or an agent's tools changed (Tools menu / approval grant).
+      await listen("agents-changed", () => void this.load());
     }
     await this.load();
   }
