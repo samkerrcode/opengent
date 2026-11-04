@@ -494,6 +494,9 @@ struct Delta {
     /// Reasoning models (Qwen3, DeepSeek-R1, …) stream their chain of thought here.
     #[serde(default)]
     reasoning_content: Option<String>,
+    /// mlx-lm and OpenRouter carry the same stream under `reasoning` instead.
+    #[serde(default)]
+    reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<ToolCallDelta>>,
 }
@@ -607,7 +610,8 @@ async fn run_stream(
             ));
         }
         for choice in parsed.choices {
-            if let Some(text) = choice.delta.reasoning_content.filter(|t| !t.is_empty()) {
+            let reasoning = choice.delta.reasoning_content.or(choice.delta.reasoning);
+            if let Some(text) = reasoning.filter(|t| !t.is_empty()) {
                 out.push(ProviderEvent::ReasoningDelta(text));
             }
             if let Some(text) = choice.delta.content.filter(|t| !t.is_empty()) {

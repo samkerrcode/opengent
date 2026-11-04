@@ -14,7 +14,7 @@ use crate::domain::{
 use crate::providers::{opaque_within_limit, CompletionRequest, ModelProvider, ProviderEvent};
 use crate::{Error, Result};
 
-use super::tools::{cap_result_with, RunTools, ToolOutput, FIND_TOOLS};
+use super::tools::{cap_result_with, search, RunTools, ToolOutput, FIND_TOOLS};
 use super::{EmitterConfig, RunEmitter, ToolHost};
 
 /// Maximum model↔tool round trips in one run; beyond that the run stops with a notice.
@@ -257,6 +257,7 @@ async fn stream_step<S: RunSink>(
         stop_reason: StopReason::EndTurn,
     };
     let mut produced = false;
+    let mut saw_thinking = false;
     loop {
         let flush_at = emitter.flush_deadline();
         tokio::select! {
@@ -286,8 +287,13 @@ async fn stream_step<S: RunSink>(
                     }
                 }
                 Some(ProviderEvent::ReasoningDelta(text)) => {
-                    produced = true;
-                    emitter.push_thinking(&text);
+                    // Some servers stream an empty thinking channel as whitespace-only
+                    // deltas; surfacing those would leave a blank Thinking block.
+                    if saw_thinking || !text.trim().is_empty() {
+                        saw_thinking = true;
+                        produced = true;
+                        emitter.push_thinking(&text);
+                    }
                 }
                 Some(ProviderEvent::Usage(usage)) => emitter.emit(RunEventPayload::Usage { usage }),
                 Some(ProviderEvent::ToolCall { id, name, arguments }) => {
@@ -576,38 +582,66 @@ async fn execute_call<S: RunSink>(
         };
     }
 
-    let Some(run_tools) = tools.as_ref() else {
+    let Some(run_tools) = tools.as_mut() else {
         return CallEnd::Emit {
             content: Value::Array(Vec::new()),
             is_error: true,
             status: ToolCallStatus::Failed,
         };
     };
-    let Some(entry) = run_tools.entry(&call.name) else {
+    if run_tools.entry(&call.name).is_none() {
         // Check disabled first: in on-demand mode a disabled tool must not send the model
         // looking for it with `find_tools` (which can never return it).
-        let (msg, status) = if run_tools.is_disabled(&call.name) {
-            (DISABLED_TOOL_MSG.to_owned(), ToolCallStatus::Blocked)
-        } else if run_tools.is_on_demand() {
-            (
-                format!(
-                    "Tool `{}` is not loaded. Call `{FIND_TOOLS}` to find and load tools first.",
-                    call.name
-                ),
-                ToolCallStatus::Failed,
-            )
+        if run_tools.is_disabled(&call.name) {
+            return CallEnd::Emit {
+                content: serde_json::json!([{ "type": "text", "text": DISABLED_TOOL_MSG }]),
+                is_error: true,
+                status: ToolCallStatus::Blocked,
+            };
+        }
+        if !run_tools.is_on_demand() {
+            return CallEnd::Emit {
+                content: serde_json::json!([{ "type": "text", "text": format!("Unknown tool `{}`.", call.name) }]),
+                is_error: true,
+                status: ToolCallStatus::Failed,
+            };
+        }
+        // The model guessed a real catalog name without searching: load it so the retry
+        // carries the actual definition — a find_tools round trip isn't needed.
+        if run_tools.load(&call.name) {
+            return CallEnd::Emit {
+                content: serde_json::json!([
+                    { "type": "text", "text": format!(
+                        "Tool `{}` was not loaded; it is now loaded and its definition is \
+                         available. Call it again with the correct arguments.",
+                        call.name
+                    )},
+                    { "type": "loaded_tools", "names": [call.name.clone()] },
+                ]),
+                is_error: false,
+                status: ToolCallStatus::Completed,
+            };
+        }
+        let suggestions = search(run_tools.catalog(), &call.name, 3)
+            .into_iter()
+            .map(|i| format!("`{}`", run_tools.catalog()[i].spec.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let hint = if suggestions.is_empty() {
+            String::new()
         } else {
-            (
-                format!("Unknown tool `{}`.", call.name),
-                ToolCallStatus::Failed,
-            )
+            format!(" Did you mean: {suggestions}?")
         };
         return CallEnd::Emit {
-            content: serde_json::json!([{ "type": "text", "text": msg }]),
+            content: serde_json::json!([{ "type": "text", "text": format!(
+                "Tool `{}` is not loaded. Call `{FIND_TOOLS}` to find and load tools first.{hint}",
+                call.name
+            )}]),
             is_error: true,
-            status,
+            status: ToolCallStatus::Failed,
         };
-    };
+    }
+    let entry = run_tools.entry(&call.name).expect("checked above");
     let result_cap = run_tools.result_cap;
     let host = run_tools.host.clone();
     let (server_id, tool_name) = (entry.server_id.clone(), entry.tool.clone());
@@ -1162,10 +1196,49 @@ mod tests {
             } => assert!(content.to_string().contains("disabled by the user")),
             _ => panic!("disabled tool must be Blocked"),
         }
-        // A real but not-yet-loaded tool gets the find_tools hint as a plain failure.
+        // A real but not-yet-loaded tool is loaded on the spot so the retry carries its
+        // definition; the result is not an error and marks the tool as loaded.
         let unloaded = call("fs__read");
         match execute_call(
             &unloaded,
+            &mut tools,
+            &approvals,
+            &mut emitter,
+            &cancel,
+            &mut first,
+        )
+        .await
+        {
+            CallEnd::Emit {
+                status: ToolCallStatus::Completed,
+                is_error: false,
+                content,
+            } => {
+                assert!(content.to_string().contains("now loaded"), "{content}");
+                assert!(
+                    content
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|p| p.get("type").and_then(Value::as_str) == Some("loaded_tools")),
+                    "result must carry the loaded_tools part for history restore"
+                );
+            }
+            _ => panic!("a catalog hit must auto-load, not fail"),
+        }
+        assert!(
+            tools
+                .as_ref()
+                .unwrap()
+                .specs()
+                .iter()
+                .any(|s| s.name == "fs__read"),
+            "the loaded tool is offered on the next step"
+        );
+        // A genuinely unknown name still fails with a find_tools hint.
+        let unknown = call("fs__nonexistent_tool");
+        match execute_call(
+            &unknown,
             &mut tools,
             &approvals,
             &mut emitter,
@@ -1179,8 +1252,38 @@ mod tests {
                 content,
                 ..
             } => assert!(content.to_string().contains("find_tools")),
-            _ => panic!("unloaded tool must fail with a find_tools hint"),
+            _ => panic!("unknown tool must fail with a find_tools hint"),
         }
+    }
+
+    #[tokio::test]
+    async fn whitespace_only_reasoning_produces_no_thinking_deltas() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider = ScriptedProvider {
+            steps: Mutex::new(vec![vec![
+                ProviderEvent::ReasoningDelta("\n  \n".into()),
+                ProviderEvent::ReasoningDelta("real thought".into()),
+                ProviderEvent::ReasoningDelta(" ".into()),
+                ProviderEvent::TextDelta("answer".into()),
+                ProviderEvent::Done(StopReason::EndTurn),
+            ]]),
+            requests: requests.clone(),
+        };
+        let mut req = request(ChatId::new(), Duration::ZERO);
+        req.provider = Arc::new(provider);
+        let coord = RunCoordinator::new(1, Handle::current());
+        let (tx, rx) = mpsc::unbounded_channel();
+        coord.start(req, tx).unwrap();
+        let events = collect(rx).await;
+        let thinking: String = events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                RunEventPayload::ThinkingDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        // Leading whitespace-only deltas are dropped; whitespace after real content is kept.
+        assert_eq!(thinking, "real thought ");
     }
 
     #[tokio::test]

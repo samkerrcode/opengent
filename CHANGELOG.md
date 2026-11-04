@@ -24,6 +24,12 @@ planned work lives in the [README roadmap](README.md#roadmap).
   - A whitespace-only API key now clears the stored key instead of saving an empty secret.
   - Tool names exposed to models always start with a letter or underscore (servers whose
     name starts with a digit get a `_` prefix), as some providers require.
+  - Reasoning streams read both `reasoning_content` and the `reasoning` alias used by
+    mlx-lm and OpenRouter, and whitespace-only thinking channels no longer leave an empty
+    Thinking block.
+  - In on-demand tool mode, calling a real catalog tool that isn't loaded yet loads it and
+    tells the model to retry — the failed call + `find_tools` detour is gone; truly unknown
+    names get a "did you mean" hint.
 
 - Scrolling up while a response streams now stops auto-scroll on the first upward
   wheel, trackpad, or keyboard scroll, instead of having to scroll past the bottom

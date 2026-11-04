@@ -491,6 +491,16 @@ impl RunTools {
         tokens
     }
 
+    /// Marks a catalog tool as loaded so the next request offers its definition. Returns
+    /// `false` when `name` isn't in the catalog.
+    pub fn load(&mut self, name: &str) -> bool {
+        if !self.catalog.iter().any(|e| e.spec.name == name) {
+            return false;
+        }
+        self.touch(name);
+        true
+    }
+
     /// Looks up a callable tool. In on-demand mode only loaded tools resolve, so the model
     /// cannot call a tool whose definition it has not seen.
     pub fn entry(&self, name: &str) -> Option<&ToolEntry> {

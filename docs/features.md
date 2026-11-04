@@ -136,7 +136,9 @@ tool's schema each request; **On-demand** sends only a `find_tools` search tool 
 calls it with keywords to load the matching tools, keeping prompts small when many servers
 are connected; **Auto** (default) loads all until the definitions exceed ~6k estimated
 tokens or a quarter of the context window, then switches to on-demand. Tools loaded through
-`find_tools` stay available for the rest of the conversation.
+`find_tools` stay available for the rest of the conversation. If the model calls a real
+catalog tool that isn't loaded yet, it is loaded on the spot so the retry carries its
+definition — a `find_tools` call is only needed for names that don't exist.
 
 **How it works.** The run loop is model → tool calls → (approval) → results → model (max 8
 steps, max 16 calls per step). Calls stream in as `tool_calls` fragments, execute against

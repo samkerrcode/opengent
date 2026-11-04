@@ -232,3 +232,27 @@ data: [DONE]
     assert_eq!(c.text, "the answer");
     assert_eq!(c.done, Some(StopReason::EndTurn));
 }
+
+#[tokio::test]
+async fn reasoning_alias_field_is_streamed_too() {
+    // mlx-lm and OpenRouter stream reasoning under `reasoning`, not `reasoning_content`.
+    let body: &[u8] = br#"data: {"choices":[{"index":0,"delta":{"reasoning":"let me think"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"reasoning":" about this"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"content":"the answer"},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+"#;
+    let base = serve_once("200 OK", body, 4096, Duration::ZERO).await;
+    let provider = OpenAiCompatProvider::new(
+        OpenAiCompatConfig::new("t", base),
+        agent_core::http::client().unwrap(),
+    );
+    let c = collect(&provider).await;
+    assert_eq!(c.err, None);
+    assert_eq!(c.thinking, "let me think about this");
+    assert_eq!(c.text, "the answer");
+    assert_eq!(c.done, Some(StopReason::EndTurn));
+}
