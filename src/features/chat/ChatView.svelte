@@ -34,11 +34,45 @@
     scroller.scrollTop = expectedTop;
   }
 
+  // Unpinning follows user intent: any upward scroll unpins at once. Content growth never
+  // decreases scrollTop, so a decrease away from the bottom is the user. Re-pinning stays position-based
+  // (back within 48px of the bottom) so following resumes when the user returns there.
+  let lastScrollTop = 0;
+  // A smooth "Jump to latest" scrolls down through the unpinned zone; don't unpin mid-flight.
+  let jumping = false;
+
   function onScroll() {
     if (!scroller) return;
-    if (expectedTop !== null && Math.abs(scroller.scrollTop - expectedTop) < 4) return;
+    const top = scroller.scrollTop;
+    const dist = scroller.scrollHeight - top - scroller.clientHeight;
+    // Content shrinking (e.g. the thinking trace collapsing) clamps scrollTop down but leaves
+    // the view at the bottom; only a decrease that leaves the bottom is the user.
+    const scrolledUp = top < lastScrollTop - 1 && dist > 2;
+    lastScrollTop = top;
+    const nearBottom = dist < 48;
+    if (!scrolledUp && expectedTop !== null && Math.abs(top - expectedTop) < 4) return;
     expectedTop = null;
-    pinnedToBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48;
+    if (scrolledUp) jumping = false;
+    else if (jumping) {
+      if (!nearBottom) return;
+      jumping = false;
+    }
+    pinnedToBottom = !scrolledUp && nearBottom;
+  }
+
+  // Wheel fires synchronously with the gesture, before the next streamed delta can snap the
+  // view back to the bottom and swallow the resulting scroll event — so the first upward
+  // flick unpins.
+  function onWheel(e: WheelEvent) {
+    if (!scroller || e.deltaY >= 0 || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+    if (scroller.scrollHeight <= scroller.clientHeight) return;
+    // Leave the chat pinned when an inner scroller (e.g. the thinking trace) consumes the wheel.
+    for (let el = e.target as HTMLElement | null; el && el !== scroller; el = el.parentElement) {
+      if (el.scrollTop > 0 && el.scrollHeight > el.clientHeight && /auto|scroll/.test(getComputedStyle(el).overflowY)) return;
+    }
+    jumping = false;
+    expectedTop = null;
+    pinnedToBottom = false;
   }
 
   // Follow new output while the user is pinned to the bottom. Sending a message always
@@ -87,6 +121,7 @@
 
   function jumpToLatest() {
     pinnedToBottom = true;
+    jumping = true;
     scroller?.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" });
   }
 
@@ -124,7 +159,7 @@
   {#if chat.summary.model}<span class="topbar-meta">{chat.summary.model}</span>{/if}
 </header>
 
-<div class="scroller" bind:this={scroller} onscroll={onScroll}>
+<div class="scroller" bind:this={scroller} onscroll={onScroll} onwheel={onWheel}>
   <div class="column">
     {#if !chat.loaded}
       <p class="loading">Loading…</p>
