@@ -31,6 +31,9 @@ planned work lives in the [README roadmap](README.md#roadmap).
     tells the model to retry — the failed call + `find_tools` detour is gone; truly unknown
     names get a "did you mean" hint.
 
+- The streaming caret now follows tokens into nested list items, table cells, and
+  blockquotes, instead of dropping to its own line below the list or table, and stays on
+  the current code line rather than the line after it.
 - Scrolling up while a response streams now stops auto-scroll on the first upward
   wheel, trackpad, or keyboard scroll, instead of having to scroll past the bottom
   threshold before the next token snapped the view back. Scrolling back to the bottom
