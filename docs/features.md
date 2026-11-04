@@ -18,7 +18,9 @@ document stays scannable as the app grows.
 
 Streaming conversations with Markdown-rendered replies: code highlighting, KaTeX math,
 stop/cancel (Esc), retry, live token usage, and "older messages trimmed" notices when history
-exceeds the model's context window.
+exceeds the model's context window. While a reply streams, a caret marks where the next token
+will appear: at the end of the deepest trailing text (nested list items, the last table cell,
+blockquotes, the current code line) and just after rendered math, never inside it.
 
 ## Branding & activity indicators
 

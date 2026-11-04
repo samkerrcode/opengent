@@ -2,6 +2,7 @@
   import type { AssistantTurn, TurnSegment } from "$lib/state/run-reducer";
   import { isTerminal, turnText, turnThinking } from "$lib/state/run-reducer";
   import { renderMarkdown } from "$lib/markdown";
+  import { markdownHtml } from "$lib/stream-cursor";
   import { copyText } from "$lib/clipboard";
   import ToolCallCard from "./ToolCallCard.svelte";
 
@@ -105,7 +106,7 @@
     <div class="body selectable">
       {#each turn.segments as seg, i (i)}
         {#if seg.kind === "text"}
-          <div class="markdown" class:streaming={live && i === turn.segments.length - 1}>{@html renderMarkdown(seg.text)}</div>
+          <div class="markdown" {@attach markdownHtml(renderMarkdown(seg.text), live && i === turn.segments.length - 1)}></div>
         {:else if seg.kind === "tool"}
           <ToolCallCard segment={seg} runId={turn.runId} />
         {/if}
@@ -227,11 +228,9 @@
     word-break: break-word;
     min-width: 0;
   }
-  /* Streaming cursor: rendered inside the last block element so it sits at the end of the
-     last line instead of wrapping to a fresh line below the block. */
-  .markdown.streaming > :global(:last-child:not(.code-block))::after,
-  .markdown.streaming > :global(.code-block:last-child > pre)::after {
-    content: "";
+  /* Streaming cursor: placed by placeStreamCursor at the end of the deepest trailing text, so it
+     follows tokens into nested lists, table cells, blockquotes, and code. */
+  .markdown :global(.stream-cursor) {
     display: inline-block;
     width: 8px;
     height: 1em;
@@ -313,8 +312,7 @@
     .thinking span {
       animation: none;
     }
-    .markdown.streaming > :global(:last-child:not(.code-block))::after,
-    .markdown.streaming > :global(.code-block:last-child > pre)::after {
+    .markdown :global(.stream-cursor) {
       animation: none;
     }
   }
