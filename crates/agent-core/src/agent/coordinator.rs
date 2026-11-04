@@ -11,10 +11,10 @@ use crate::domain::{
     ApprovalDecision, ChatId, ContentBlock, Message, Role, RunEvent, RunEventPayload, RunId,
     RunPhase, StopReason, ToolCallInfo, ToolCallStatus, ToolPolicy,
 };
-use crate::providers::{CompletionRequest, ModelProvider, ProviderEvent};
+use crate::providers::{opaque_within_limit, CompletionRequest, ModelProvider, ProviderEvent};
 use crate::{Error, Result};
 
-use super::tools::{cap_result_with, RunTools, ToolOutput, FIND_TOOLS};
+use super::tools::{cap_result_with, search, RunTools, ToolOutput, FIND_TOOLS};
 use super::{EmitterConfig, RunEmitter, ToolHost};
 
 /// Maximum model↔tool round trips in one run; beyond that the run stops with a notice.
@@ -35,6 +35,10 @@ const DISABLED_TOOL_MSG: &str = "This tool is disabled by the user and cannot be
 /// Returns `false` when the receiver is gone so the run can stop emitting.
 pub trait RunSink: Send + 'static {
     fn send(&self, event: RunEvent) -> bool;
+
+    /// Persist-only content that must not reach the UI (provider continuation state). Called
+    /// in stream order relative to `send`. Default: dropped (sinks without storage).
+    fn record(&self, _block: &ContentBlock) {}
 }
 
 impl RunSink for mpsc::UnboundedSender<RunEvent> {
@@ -199,10 +203,21 @@ impl RunCoordinator {
 
 /// One generation step of the agent loop.
 struct Step {
-    /// Text streamed this step (may be empty for a pure tool turn).
-    text: String,
+    /// Text, provider-opaque state and tool calls in stream order — the assistant message
+    /// replayed on the next step. Order matters to providers that bind continuation state
+    /// (thought signatures, reasoning items) to the content around it.
+    blocks: Vec<ContentBlock>,
     calls: Vec<ToolCallInfo>,
     stop_reason: StopReason,
+}
+
+impl Step {
+    fn push_text(&mut self, t: &str) {
+        match self.blocks.last_mut() {
+            Some(ContentBlock::Text { text }) => text.push_str(t),
+            _ => self.blocks.push(ContentBlock::Text { text: t.to_owned() }),
+        }
+    }
 }
 
 /// How a generation step ended.
@@ -237,11 +252,12 @@ async fn stream_step<S: RunSink>(
     });
 
     let mut step = Step {
-        text: String::new(),
+        blocks: Vec::new(),
         calls: Vec::new(),
         stop_reason: StopReason::EndTurn,
     };
     let mut produced = false;
+    let mut saw_thinking = false;
     loop {
         let flush_at = emitter.flush_deadline();
         tokio::select! {
@@ -256,18 +272,41 @@ async fn stream_step<S: RunSink>(
             ev = rx.recv() => match ev {
                 Some(ProviderEvent::TextDelta(t)) => {
                     produced = true;
-                    step.text.push_str(&t);
+                    step.push_text(&t);
                     emitter.push_text(&t);
                 }
+                // Not user-visible, so it does not count as output for fallback purposes.
+                Some(ProviderEvent::Opaque { provider, data }) => {
+                    if opaque_within_limit(&data) {
+                        let block = ContentBlock::ProviderOpaque { provider: provider.to_owned(), data };
+                        emitter.record(&block);
+                        step.blocks.push(block);
+                    } else {
+                        // Never log the payload itself: it is model state, not diagnostics.
+                        tracing::warn!(provider, "dropped oversized provider state block");
+                    }
+                }
                 Some(ProviderEvent::ReasoningDelta(text)) => {
-                    produced = true;
-                    emitter.push_thinking(&text);
+                    // Some servers stream an empty thinking channel as whitespace-only
+                    // deltas; surfacing those would leave a blank Thinking block.
+                    if saw_thinking || !text.trim().is_empty() {
+                        saw_thinking = true;
+                        produced = true;
+                        emitter.push_thinking(&text);
+                    }
                 }
                 Some(ProviderEvent::Usage(usage)) => emitter.emit(RunEventPayload::Usage { usage }),
                 Some(ProviderEvent::ToolCall { id, name, arguments }) => {
                     produced = true;
                     let arguments = serde_json::from_str::<Value>(&arguments)
                         .unwrap_or(Value::String(arguments));
+                    step.blocks.push(ContentBlock::ToolCall {
+                        id: id.clone(),
+                        name: name.clone(),
+                        arguments: arguments.clone(),
+                        server: None,
+                        tool: Some(name.clone()),
+                    });
                     step.calls.push(ToolCallInfo {
                         id,
                         name: name.clone(),
@@ -393,18 +432,12 @@ async fn run_loop<S: RunSink>(
             return;
         }
 
-        // Persist the assistant step (text + calls) in the working transcript.
-        let mut blocks = Vec::new();
-        if !step.text.trim().is_empty() {
-            blocks.push(ContentBlock::Text { text: step.text });
-        }
-        blocks.extend(step.calls.iter().map(|c| ContentBlock::ToolCall {
-            id: c.id.clone(),
-            name: c.name.clone(),
-            arguments: c.arguments.clone(),
-            server: c.server.clone(),
-            tool: Some(c.tool.clone()),
-        }));
+        // Persist the assistant step in the working transcript, in stream order.
+        let blocks = step
+            .blocks
+            .into_iter()
+            .filter(|b| !matches!(b, ContentBlock::Text { text } if text.trim().is_empty()))
+            .collect();
         completion.messages.push(Message {
             role: Role::Assistant,
             blocks,
@@ -549,38 +582,66 @@ async fn execute_call<S: RunSink>(
         };
     }
 
-    let Some(run_tools) = tools.as_ref() else {
+    let Some(run_tools) = tools.as_mut() else {
         return CallEnd::Emit {
             content: Value::Array(Vec::new()),
             is_error: true,
             status: ToolCallStatus::Failed,
         };
     };
-    let Some(entry) = run_tools.entry(&call.name) else {
+    if run_tools.entry(&call.name).is_none() {
         // Check disabled first: in on-demand mode a disabled tool must not send the model
         // looking for it with `find_tools` (which can never return it).
-        let (msg, status) = if run_tools.is_disabled(&call.name) {
-            (DISABLED_TOOL_MSG.to_owned(), ToolCallStatus::Blocked)
-        } else if run_tools.is_on_demand() {
-            (
-                format!(
-                    "Tool `{}` is not loaded. Call `{FIND_TOOLS}` to find and load tools first.",
-                    call.name
-                ),
-                ToolCallStatus::Failed,
-            )
+        if run_tools.is_disabled(&call.name) {
+            return CallEnd::Emit {
+                content: serde_json::json!([{ "type": "text", "text": DISABLED_TOOL_MSG }]),
+                is_error: true,
+                status: ToolCallStatus::Blocked,
+            };
+        }
+        if !run_tools.is_on_demand() {
+            return CallEnd::Emit {
+                content: serde_json::json!([{ "type": "text", "text": format!("Unknown tool `{}`.", call.name) }]),
+                is_error: true,
+                status: ToolCallStatus::Failed,
+            };
+        }
+        // The model guessed a real catalog name without searching: load it so the retry
+        // carries the actual definition — a find_tools round trip isn't needed.
+        if run_tools.load(&call.name) {
+            return CallEnd::Emit {
+                content: serde_json::json!([
+                    { "type": "text", "text": format!(
+                        "Tool `{}` was not loaded; it is now loaded and its definition is \
+                         available. Call it again with the correct arguments.",
+                        call.name
+                    )},
+                    { "type": "loaded_tools", "names": [call.name.clone()] },
+                ]),
+                is_error: false,
+                status: ToolCallStatus::Completed,
+            };
+        }
+        let suggestions = search(run_tools.catalog(), &call.name, 3)
+            .into_iter()
+            .map(|i| format!("`{}`", run_tools.catalog()[i].spec.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let hint = if suggestions.is_empty() {
+            String::new()
         } else {
-            (
-                format!("Unknown tool `{}`.", call.name),
-                ToolCallStatus::Failed,
-            )
+            format!(" Did you mean: {suggestions}?")
         };
         return CallEnd::Emit {
-            content: serde_json::json!([{ "type": "text", "text": msg }]),
+            content: serde_json::json!([{ "type": "text", "text": format!(
+                "Tool `{}` is not loaded. Call `{FIND_TOOLS}` to find and load tools first.{hint}",
+                call.name
+            )}]),
             is_error: true,
-            status,
+            status: ToolCallStatus::Failed,
         };
-    };
+    }
+    let entry = run_tools.entry(&call.name).expect("checked above");
     let result_cap = run_tools.result_cap;
     let host = run_tools.host.clone();
     let (server_id, tool_name) = (entry.server_id.clone(), entry.tool.clone());
@@ -903,6 +964,150 @@ mod tests {
         );
     }
 
+    /// Replays one scripted event list per step and captures every request it receives.
+    struct ScriptedProvider {
+        steps: Mutex<Vec<Vec<ProviderEvent>>>,
+        requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    }
+
+    impl ModelProvider for ScriptedProvider {
+        fn id(&self) -> &str {
+            "scripted"
+        }
+        fn capabilities(&self) -> crate::providers::Capabilities {
+            Default::default()
+        }
+        fn family(&self) -> Option<&'static str> {
+            Some("test_family")
+        }
+        fn stream(
+            &self,
+            request: &CompletionRequest,
+            _cancel: CancellationToken,
+        ) -> Result<mpsc::Receiver<ProviderEvent>> {
+            self.requests.lock().unwrap().push(request.clone());
+            let events = self.steps.lock().unwrap().remove(0);
+            let (tx, rx) = mpsc::channel(32);
+            tokio::spawn(async move {
+                for e in events {
+                    let _ = tx.send(e).await;
+                }
+            });
+            Ok(rx)
+        }
+    }
+
+    /// Forwards UI events to a channel and captures persist-only blocks separately.
+    struct RecordingSink {
+        tx: mpsc::UnboundedSender<RunEvent>,
+        recorded: Arc<Mutex<Vec<ContentBlock>>>,
+    }
+
+    impl RunSink for RecordingSink {
+        fn send(&self, event: RunEvent) -> bool {
+            self.tx.send(event).is_ok()
+        }
+        fn record(&self, block: &ContentBlock) {
+            self.recorded.lock().unwrap().push(block.clone());
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_state_is_replayed_in_order_and_never_reaches_the_ui() {
+        use crate::agent::tools::tests as tool_tests;
+        let opaque = |sig: &str| ProviderEvent::Opaque {
+            provider: "test_family",
+            data: serde_json::json!({ "sig": sig }),
+        };
+        let huge = "x".repeat(crate::providers::MAX_OPAQUE_BYTES + 1);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider = ScriptedProvider {
+            steps: Mutex::new(vec![
+                vec![
+                    ProviderEvent::TextDelta("Let me ".into()),
+                    ProviderEvent::TextDelta("check.".into()),
+                    opaque("sig-1"),
+                    ProviderEvent::ToolCall {
+                        id: "c1".into(),
+                        name: "fs__read".into(),
+                        arguments: "{}".into(),
+                    },
+                    ProviderEvent::Done(StopReason::ToolUse),
+                ],
+                vec![
+                    ProviderEvent::TextDelta("done".into()),
+                    opaque(&huge),
+                    opaque("sig-2"),
+                    ProviderEvent::Done(StopReason::EndTurn),
+                ],
+            ]),
+            requests: requests.clone(),
+        };
+        let mut namer = crate::agent::tools::ToolNamer::new();
+        let catalog = vec![tool_tests::entry("fs", "read", "Read", &mut namer)];
+        let mut req = request(ChatId::new(), Duration::ZERO);
+        req.provider = Arc::new(provider);
+        req.tools = Some(RunTools::new(
+            Arc::new(tool_tests::NoopHost),
+            catalog,
+            false,
+            5,
+            &[],
+            8192,
+        ));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let coord = RunCoordinator::new(1, Handle::current());
+        coord
+            .start(
+                req,
+                RecordingSink {
+                    tx,
+                    recorded: recorded.clone(),
+                },
+            )
+            .unwrap();
+        let events = collect(rx).await;
+        assert!(matches!(
+            events.last().unwrap().payload,
+            RunEventPayload::Completed { .. }
+        ));
+
+        let block = |sig: &str| ContentBlock::ProviderOpaque {
+            provider: "test_family".into(),
+            data: serde_json::json!({ "sig": sig }),
+        };
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let n = requests[1].messages.len();
+        let assistant = &requests[1].messages[n - 2];
+        assert_eq!(assistant.role, Role::Assistant);
+        assert_eq!(
+            assistant.blocks,
+            vec![
+                ContentBlock::Text {
+                    text: "Let me check.".into()
+                },
+                block("sig-1"),
+                ContentBlock::ToolCall {
+                    id: "c1".into(),
+                    name: "fs__read".into(),
+                    arguments: serde_json::json!({}),
+                    server: None,
+                    tool: Some("fs__read".into()),
+                },
+            ]
+        );
+        assert_eq!(requests[1].messages[n - 1].role, Role::Tool);
+        // The oversized block was dropped; the rest were persisted in order.
+        assert_eq!(
+            *recorded.lock().unwrap(),
+            vec![block("sig-1"), block("sig-2")]
+        );
+        let wire = serde_json::to_string(&events).unwrap();
+        assert!(!wire.contains("sig-") && !wire.contains("test_family"));
+    }
+
     #[tokio::test]
     async fn malformed_arguments_never_reach_the_tool() {
         use crate::agent::tools::tests as tool_tests;
@@ -991,10 +1196,49 @@ mod tests {
             } => assert!(content.to_string().contains("disabled by the user")),
             _ => panic!("disabled tool must be Blocked"),
         }
-        // A real but not-yet-loaded tool gets the find_tools hint as a plain failure.
+        // A real but not-yet-loaded tool is loaded on the spot so the retry carries its
+        // definition; the result is not an error and marks the tool as loaded.
         let unloaded = call("fs__read");
         match execute_call(
             &unloaded,
+            &mut tools,
+            &approvals,
+            &mut emitter,
+            &cancel,
+            &mut first,
+        )
+        .await
+        {
+            CallEnd::Emit {
+                status: ToolCallStatus::Completed,
+                is_error: false,
+                content,
+            } => {
+                assert!(content.to_string().contains("now loaded"), "{content}");
+                assert!(
+                    content
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|p| p.get("type").and_then(Value::as_str) == Some("loaded_tools")),
+                    "result must carry the loaded_tools part for history restore"
+                );
+            }
+            _ => panic!("a catalog hit must auto-load, not fail"),
+        }
+        assert!(
+            tools
+                .as_ref()
+                .unwrap()
+                .specs()
+                .iter()
+                .any(|s| s.name == "fs__read"),
+            "the loaded tool is offered on the next step"
+        );
+        // A genuinely unknown name still fails with a find_tools hint.
+        let unknown = call("fs__nonexistent_tool");
+        match execute_call(
+            &unknown,
             &mut tools,
             &approvals,
             &mut emitter,
@@ -1008,8 +1252,38 @@ mod tests {
                 content,
                 ..
             } => assert!(content.to_string().contains("find_tools")),
-            _ => panic!("unloaded tool must fail with a find_tools hint"),
+            _ => panic!("unknown tool must fail with a find_tools hint"),
         }
+    }
+
+    #[tokio::test]
+    async fn whitespace_only_reasoning_produces_no_thinking_deltas() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider = ScriptedProvider {
+            steps: Mutex::new(vec![vec![
+                ProviderEvent::ReasoningDelta("\n  \n".into()),
+                ProviderEvent::ReasoningDelta("real thought".into()),
+                ProviderEvent::ReasoningDelta(" ".into()),
+                ProviderEvent::TextDelta("answer".into()),
+                ProviderEvent::Done(StopReason::EndTurn),
+            ]]),
+            requests: requests.clone(),
+        };
+        let mut req = request(ChatId::new(), Duration::ZERO);
+        req.provider = Arc::new(provider);
+        let coord = RunCoordinator::new(1, Handle::current());
+        let (tx, rx) = mpsc::unbounded_channel();
+        coord.start(req, tx).unwrap();
+        let events = collect(rx).await;
+        let thinking: String = events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                RunEventPayload::ThinkingDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        // Leading whitespace-only deltas are dropped; whitespace after real content is kept.
+        assert_eq!(thinking, "real thought ");
     }
 
     #[tokio::test]

@@ -157,6 +157,18 @@ impl<S: RunSink> RunSink for RunRecorder<S> {
         self.persist(&event.payload);
         self.inner.send(event)
     }
+
+    /// Stores provider state at its stream position. Not forwarded: it never reaches the UI.
+    /// No forced write: a following tool call forces a checkpoint and completion always
+    /// writes, so the block is durable before it can matter.
+    fn record(&self, block: &ContentBlock) {
+        let mut p = self.progress.lock().unwrap();
+        if p.finished {
+            return;
+        }
+        p.blocks.push(block.clone());
+        self.maybe_checkpoint(&mut p, false);
+    }
 }
 
 impl<S: RunSink> Drop for RunRecorder<S> {
@@ -280,6 +292,52 @@ mod tests {
             vec![ContentBlock::Text {
                 text: "part".into()
             }]
+        );
+    }
+
+    #[tokio::test]
+    async fn recorded_state_keeps_position_and_is_not_forwarded() {
+        let db = Db::in_memory().unwrap();
+        let chat = db.call(|c| create_chat(c, "t")).await.unwrap();
+        let mid = db
+            .call(move |c| begin_assistant_message(c, chat.id, RunId::new(), "p", "m"))
+            .await
+            .unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let rec = RunRecorder::new(tx, db.clone(), mid);
+        let opaque = ContentBlock::ProviderOpaque {
+            provider: "fam".into(),
+            data: serde_json::json!({ "sig": "s" }),
+        };
+        rec.send(ev(RunEventPayload::TextDelta { text: "a".into() }, 0));
+        rec.record(&opaque);
+        rec.send(ev(RunEventPayload::TextDelta { text: "b".into() }, 1));
+        rec.send(ev(
+            RunEventPayload::Completed {
+                stop_reason: StopReason::EndTurn,
+            },
+            2,
+        ));
+        drop(rec);
+        let mut forwarded = 0;
+        while rx.recv().await.is_some() {
+            forwarded += 1;
+        }
+        assert_eq!(forwarded, 3, "record() is not a UI event");
+        let m = db
+            .call(move |c| get_chat(c, chat.id))
+            .await
+            .unwrap()
+            .messages
+            .remove(0);
+        assert_eq!(
+            m.blocks,
+            vec![
+                ContentBlock::Text { text: "a".into() },
+                opaque,
+                ContentBlock::Text { text: "b".into() },
+            ],
+            "text never merges across provider state"
         );
     }
 

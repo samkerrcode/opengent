@@ -180,7 +180,11 @@ impl ToolNamer {
     }
 
     pub fn name(&mut self, server: &str, tool: &str) -> String {
-        let prefix = sanitize(&server.to_ascii_lowercase(), 24);
+        let mut prefix = sanitize(&server.to_ascii_lowercase(), 24);
+        // Some providers (Gemini) require names to start with a letter or underscore.
+        if !prefix.starts_with(|c: char| c.is_ascii_alphabetic()) {
+            prefix.insert(0, '_');
+        }
         let base: String = format!("{prefix}__{}", sanitize(tool, MAX_TOOL_NAME))
             .chars()
             .take(MAX_TOOL_NAME)
@@ -487,6 +491,16 @@ impl RunTools {
         tokens
     }
 
+    /// Marks a catalog tool as loaded so the next request offers its definition. Returns
+    /// `false` when `name` isn't in the catalog.
+    pub fn load(&mut self, name: &str) -> bool {
+        if !self.catalog.iter().any(|e| e.spec.name == name) {
+            return false;
+        }
+        self.touch(name);
+        true
+    }
+
     /// Looks up a callable tool. In on-demand mode only loaded tools resolve, so the model
     /// cannot call a tool whose definition it has not seen.
     pub fn entry(&self, name: &str) -> Option<&ToolEntry> {
@@ -618,6 +632,8 @@ pub(crate) mod tests {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
         assert_eq!(n.name("", "find_tools"), "tool__find_tools");
+        assert_eq!(n.name("1Password", "get"), "_1password__get");
+        assert_eq!(n.name("-x", "get"), "_-x__get");
     }
 
     #[test]

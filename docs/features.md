@@ -47,6 +47,26 @@ discovery via `GET /models`, context window override, TLS verification mode (sys
 / skip), and image-input policy. The model picker in the composer selects provider+model per
 message.
 
+**Provider types.** *Add provider* offers a **Type** choice once more than one protocol is
+available (native adapters land per provider; today only OpenAI-compatible is user-creatable).
+Each type's label, description, default endpoint, presets and whether an API key is required
+come from Rust (`list_provider_kinds`), so the form never hardcodes a protocol. A type with a
+default endpoint fills the base URL in for you; leaving it empty uses the default.
+
+**Context windows.** Resolution per model: your per-model override → your provider-wide
+setting (a deliberate cap) → the window the provider reports during discovery → 8K. Image
+support similarly combines your setting, server-reported flags and a name heuristic.
+
+**Provider state.** Some native APIs return opaque continuation data the next request must
+replay (Gemini thought signatures, Anthropic thinking signatures, OpenAI reasoning items).
+It is stored with the assistant message in stream order and replayed only to adapters of the
+same protocol; switching a chat to another provider simply drops it from that request. It
+never reaches the UI (not streamed, stripped from chat loads), is excluded from search, and
+each block is capped at 64 KiB.
+
+*Limits:* state from a provider family is only replayed when the selected model (or an
+agent's fallback) speaks that family.
+
 ## Connections (MCP tools)
 
 **What.** MCP servers give the model real tools. Add them in **Connections** (sidebar → ⚒):
@@ -116,7 +136,9 @@ tool's schema each request; **On-demand** sends only a `find_tools` search tool 
 calls it with keywords to load the matching tools, keeping prompts small when many servers
 are connected; **Auto** (default) loads all until the definitions exceed ~6k estimated
 tokens or a quarter of the context window, then switches to on-demand. Tools loaded through
-`find_tools` stay available for the rest of the conversation.
+`find_tools` stay available for the rest of the conversation. If the model calls a real
+catalog tool that isn't loaded yet, it is loaded on the spot so the retry carries its
+definition — a `find_tools` call is only needed for names that don't exist.
 
 **How it works.** The run loop is model → tool calls → (approval) → results → model (max 8
 steps, max 16 calls per step). Calls stream in as `tool_calls` fragments, execute against
@@ -263,7 +285,8 @@ with a reason at pick time.
 ## History & persistence
 
 Chats, messages, and attachment metadata live in SQLite (WAL) under `~/.opengent`. Sidebar
-search covers titles and message text; interrupted streams are recovered as failed turns on
+search covers titles and message text and reasoning (not tool arguments, ids or provider
+state); interrupted streams are recovered as failed turns on
 next launch. Attachment blobs are deduplicated by SHA-256 and integrity-checked on read.
 
 ## Secrets

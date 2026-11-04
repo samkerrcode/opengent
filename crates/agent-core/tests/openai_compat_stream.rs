@@ -1,58 +1,28 @@
 //! End-to-end test of the OpenAI-compatible adapter against a minimal in-process HTTP/1.1
 //! server that replays canned SSE bodies in awkward chunk sizes.
 
+mod common;
+
 use std::time::Duration;
 
 use agent_core::domain::{Message, Role, StopReason};
 use agent_core::providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use agent_core::providers::{CompletionRequest, ModelProvider, ProviderEvent};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use common::Collected;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+/// One-shot server; returns the `/v1` API root.
 async fn serve_once(
     status: &'static str,
     body: &'static [u8],
     chunk: usize,
     delay: Duration,
 ) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let (mut sock, _) = listener.accept().await.unwrap();
-        let mut buf = vec![0u8; 64 * 1024];
-        let mut req = Vec::new();
-        loop {
-            let n = sock.read(&mut buf).await.unwrap();
-            req.extend_from_slice(&buf[..n]);
-            if let Some(pos) = req.windows(4).position(|w| w == b"\r\n\r\n") {
-                let head = String::from_utf8_lossy(&req[..pos]).to_string();
-                let len = head
-                    .lines()
-                    .find_map(|l| {
-                        l.strip_prefix("content-length: ")
-                            .or_else(|| l.strip_prefix("Content-Length: "))
-                    })
-                    .and_then(|v| v.trim().parse::<usize>().ok())
-                    .unwrap_or(0);
-                if req.len() >= pos + 4 + len {
-                    break;
-                }
-            }
-        }
-        let head = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        );
-        sock.write_all(head.as_bytes()).await.unwrap();
-        for part in body.chunks(chunk.max(1)) {
-            sock.write_all(part).await.unwrap();
-            sock.flush().await.unwrap();
-            tokio::time::sleep(delay).await;
-        }
-        sock.shutdown().await.ok();
-    });
-    format!("http://127.0.0.1:{}/v1", addr.port())
+    format!(
+        "{}/v1",
+        common::serve_once(status, body, chunk, delay).await.origin
+    )
 }
 
 fn request() -> CompletionRequest {
@@ -65,42 +35,8 @@ fn request() -> CompletionRequest {
     }
 }
 
-struct Collected {
-    text: String,
-    thinking: String,
-    calls: Vec<(String, String, String)>,
-    done: Option<StopReason>,
-    err: Option<String>,
-    usage: bool,
-}
-
 async fn collect(provider: &OpenAiCompatProvider) -> Collected {
-    let mut rx = provider
-        .stream(&request(), CancellationToken::new())
-        .unwrap();
-    let mut c = Collected {
-        text: String::new(),
-        thinking: String::new(),
-        calls: Vec::new(),
-        done: None,
-        err: None,
-        usage: false,
-    };
-    while let Some(ev) = rx.recv().await {
-        match ev {
-            ProviderEvent::TextDelta(t) => c.text.push_str(&t),
-            ProviderEvent::ReasoningDelta(t) => c.thinking.push_str(&t),
-            ProviderEvent::ToolCall {
-                id,
-                name,
-                arguments,
-            } => c.calls.push((id, name, arguments)),
-            ProviderEvent::Usage(u) => c.usage = u.input_tokens.is_some(),
-            ProviderEvent::Done(r) => c.done = Some(r),
-            ProviderEvent::Error(e) => c.err = Some(e),
-        }
-    }
-    c
+    common::collect(provider, &request()).await
 }
 
 const OK_BODY: &[u8] = r#"data: {"id":"1","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
@@ -130,7 +66,10 @@ async fn streams_text_usage_and_done_across_odd_chunking() {
         assert_eq!(c.err, None, "chunk={chunk}");
         assert_eq!(c.text, "Hello → 世界", "chunk={chunk}");
         assert_eq!(c.done, Some(StopReason::EndTurn));
-        assert!(c.usage, "usage missing at chunk={chunk}");
+        assert!(
+            c.usage.is_some_and(|u| u.input_tokens.is_some()),
+            "usage missing at chunk={chunk}"
+        );
     }
 }
 
@@ -276,6 +215,30 @@ async fn reasoning_content_is_streamed_separately() {
     let body: &[u8] = br#"data: {"choices":[{"index":0,"delta":{"reasoning_content":"let me think"},"finish_reason":null}]}
 
 data: {"choices":[{"index":0,"delta":{"reasoning_content":" about this"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"content":"the answer"},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+"#;
+    let base = serve_once("200 OK", body, 4096, Duration::ZERO).await;
+    let provider = OpenAiCompatProvider::new(
+        OpenAiCompatConfig::new("t", base),
+        agent_core::http::client().unwrap(),
+    );
+    let c = collect(&provider).await;
+    assert_eq!(c.err, None);
+    assert_eq!(c.thinking, "let me think about this");
+    assert_eq!(c.text, "the answer");
+    assert_eq!(c.done, Some(StopReason::EndTurn));
+}
+
+#[tokio::test]
+async fn reasoning_alias_field_is_streamed_too() {
+    // mlx-lm and OpenRouter stream reasoning under `reasoning`, not `reasoning_content`.
+    let body: &[u8] = br#"data: {"choices":[{"index":0,"delta":{"reasoning":"let me think"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"reasoning":" about this"},"finish_reason":null}]}
 
 data: {"choices":[{"index":0,"delta":{"content":"the answer"},"finish_reason":"stop"}]}
 

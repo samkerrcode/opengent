@@ -95,7 +95,7 @@
     {/each}
     {#if truncated}<p class="notice">Response was cut off at the output token limit.</p>{/if}
 
-    {#if thinking}
+    {#if thinking.trim()}
       <details class="thinking-block" open={thinkingLive}>
         <summary>{thinkingLive ? "Thinking…" : "Thinking"}</summary>
         <div class="markdown thinking-body" bind:this={thinkingEl}>{@html renderMarkdown(thinking)}</div>

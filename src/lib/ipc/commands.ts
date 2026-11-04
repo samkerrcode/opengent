@@ -10,6 +10,9 @@ import type { ChatSummary } from "$lib/generated/bindings/ChatSummary";
 import type { ChatId } from "$lib/generated/bindings/ChatId";
 import type { Error as CoreError } from "$lib/generated/bindings/Error";
 import type { ImageSupport } from "$lib/generated/bindings/ImageSupport";
+import type { KindSpec } from "$lib/generated/bindings/KindSpec";
+import type { ProviderKind } from "$lib/generated/bindings/ProviderKind";
+import type { ProviderPreset } from "$lib/generated/bindings/ProviderPreset";
 import type { ProviderConfig } from "$lib/generated/bindings/ProviderConfig";
 import type { ProviderInput } from "$lib/generated/bindings/ProviderInput";
 import type { ProviderTestResult } from "$lib/generated/bindings/ProviderTestResult";
@@ -67,6 +70,9 @@ export type {
   CoreError,
   ImageSupport,
   KeyValueInput,
+  KindSpec,
+  ProviderKind,
+  ProviderPreset,
   McpServerInput,
   McpServerView,
   McpTransport,
@@ -136,6 +142,7 @@ export const commands = {
   probeSecretStore: () => invoke<SecretProbe>("probe_secret_store"),
 
   listProviders: () => invoke<ProviderConfig[]>("list_providers"),
+  listProviderKinds: () => invoke<KindSpec[]>("list_provider_kinds"),
   saveProvider: (input: ProviderInput) => invoke<ProviderConfig>("save_provider", { input }),
   deleteProvider: (id: string) => invoke<void>("delete_provider", { id }),
   testProvider: (id: string) => invoke<ProviderTestResult>("test_provider", { id }),

@@ -261,6 +261,9 @@ pub fn render_message(
     contents: &AttachmentContents,
     images_supported: bool,
 ) -> Message {
+    if m.role == Role::Assistant {
+        return render_assistant(m);
+    }
     let mut text_parts = Vec::new();
     let mut attachments = Vec::new();
     let mut images = Vec::new();
@@ -305,6 +308,34 @@ pub fn render_message(
     }
 }
 
+/// Assistant turns keep their block order: provider state may be bound to the content
+/// around it (reasoning before text, signatures after it). Reasoning is dropped (see
+/// `render_message`); text blocks it separated are joined. Provider state alone is not a
+/// message, so an assistant turn left with nothing else renders empty.
+fn render_assistant(m: &Message) -> Message {
+    let mut blocks: Vec<ContentBlock> = Vec::with_capacity(m.blocks.len());
+    for b in &m.blocks {
+        match (b, blocks.last_mut()) {
+            (ContentBlock::Thinking { .. }, _) => {}
+            (ContentBlock::Text { text }, Some(ContentBlock::Text { text: prev })) => {
+                prev.push_str("\n\n");
+                prev.push_str(text);
+            }
+            (o, _) => blocks.push(o.clone()),
+        }
+    }
+    if blocks
+        .iter()
+        .all(|b| matches!(b, ContentBlock::ProviderOpaque { .. }))
+    {
+        blocks.clear();
+    }
+    Message {
+        role: m.role,
+        blocks,
+    }
+}
+
 /// Renders one stored message into the provider message sequence. Assistant turns that used
 /// tools are stored as one message interleaving text, calls and results; they expand into
 /// `assistant(text + tool calls)` / `tool(results)` pairs per step. A call without a result
@@ -330,28 +361,29 @@ pub fn render_turn(
         };
     }
 
+    /// Emits one step: the assistant message (blocks in stream order) and the tool message
+    /// answering each of its calls.
     fn flush(
         out: &mut Vec<Message>,
-        text: &mut String,
-        calls: &mut Vec<ContentBlock>,
+        step: &mut Vec<ContentBlock>,
         results: &mut Vec<ContentBlock>,
     ) {
-        let mut blocks = Vec::new();
-        if !text.trim().is_empty() {
-            blocks.push(ContentBlock::Text {
-                text: std::mem::take(text),
-            });
-        }
-        text.clear();
-        let call_ids: Vec<String> = calls
+        let blocks: Vec<ContentBlock> = step
+            .drain(..)
+            .filter(|b| !matches!(b, ContentBlock::Text { text } if text.trim().is_empty()))
+            .collect();
+        let call_ids: Vec<String> = blocks
             .iter()
             .filter_map(|c| match c {
                 ContentBlock::ToolCall { id, .. } => Some(id.clone()),
                 _ => None,
             })
             .collect();
-        blocks.append(calls);
-        if !blocks.is_empty() {
+        // A step holding only provider state has nothing to replay it against.
+        if blocks
+            .iter()
+            .any(|b| !matches!(b, ContentBlock::ProviderOpaque { .. }))
+        {
             out.push(Message {
                 role: Role::Assistant,
                 blocks,
@@ -386,28 +418,46 @@ pub fn render_turn(
         }
     }
 
-    let (mut out, mut text, mut calls, mut results) =
-        (Vec::new(), String::new(), Vec::new(), Vec::new());
+    let (mut out, mut step, mut results) = (Vec::new(), Vec::<ContentBlock>::new(), Vec::new());
     for b in &m.blocks {
         match b {
             ContentBlock::Text { text: t } => {
-                if !calls.is_empty() || !results.is_empty() {
-                    flush(&mut out, &mut text, &mut calls, &mut results);
+                let after_calls = step
+                    .iter()
+                    .any(|s| matches!(s, ContentBlock::ToolCall { .. }));
+                if after_calls || !results.is_empty() {
+                    flush(&mut out, &mut step, &mut results);
                 }
-                text.push_str(t);
+                match step.last_mut() {
+                    Some(ContentBlock::Text { text }) => text.push_str(t),
+                    _ => step.push(b.clone()),
+                }
             }
-            ContentBlock::ToolCall { .. } => {
+            // Provider state stays with the step it was streamed in, in order relative to
+            // its text and calls, so it is replayed (and trimmed) together with them.
+            ContentBlock::ToolCall { .. } | ContentBlock::ProviderOpaque { .. } => {
                 if !results.is_empty() {
-                    flush(&mut out, &mut text, &mut calls, &mut results);
+                    flush(&mut out, &mut step, &mut results);
                 }
-                calls.push(b.clone());
+                step.push(b.clone());
             }
             ContentBlock::ToolResult { .. } => results.push(b.clone()),
             _ => {}
         }
     }
-    flush(&mut out, &mut text, &mut calls, &mut results);
+    flush(&mut out, &mut step, &mut results);
     out
+}
+
+/// Drops `ProviderOpaque` blocks whose family is not in `families` (in place, no copies).
+/// Adapters ignore foreign state anyway; filtering first keeps it out of the token budget.
+pub fn retain_opaque_for(history: &mut [Message], families: &[&str]) {
+    for m in history {
+        m.blocks.retain(|b| match b {
+            ContentBlock::ProviderOpaque { provider, .. } => families.contains(&provider.as_str()),
+            _ => true,
+        });
+    }
 }
 
 fn message_tokens(m: &Message) -> u32 {
@@ -747,6 +797,110 @@ mod tests {
             &out[2].blocks[0],
             ContentBlock::Text { text } if text == "Found 3 files."
         ));
+    }
+
+    fn opaque(sig: &str) -> ContentBlock {
+        ContentBlock::ProviderOpaque {
+            provider: "fam".into(),
+            data: serde_json::json!({ "sig": sig }),
+        }
+    }
+
+    #[test]
+    fn provider_state_stays_in_its_step_in_order() {
+        // Reasoning-style state precedes the text; signature-style state follows a call.
+        let msg = Message {
+            role: Role::Assistant,
+            blocks: vec![
+                opaque("r1"),
+                ContentBlock::Text {
+                    text: "Checking.".into(),
+                },
+                tool_call("c1", "fs__list"),
+                opaque("s1"),
+                tool_result("c1", "a.txt"),
+                opaque("r2"),
+                ContentBlock::Thinking { text: "hmm".into() },
+                ContentBlock::Text {
+                    text: "Found it.".into(),
+                },
+                opaque("s2"),
+            ],
+        };
+        let out = render_turn(&msg, &HashMap::new(), false);
+        assert_eq!(out.len(), 3, "assistant, tool, assistant — no split steps");
+        assert_eq!(
+            out[0].blocks,
+            vec![
+                opaque("r1"),
+                ContentBlock::Text {
+                    text: "Checking.".into()
+                },
+                tool_call("c1", "fs__list"),
+                opaque("s1"),
+            ]
+        );
+        assert_eq!(out[1].role, Role::Tool);
+        assert_eq!(
+            out[2].blocks,
+            vec![
+                opaque("r2"),
+                ContentBlock::Text {
+                    text: "Found it.".into()
+                },
+                opaque("s2"),
+            ]
+        );
+    }
+
+    #[test]
+    fn plain_assistant_turns_keep_order_and_drop_state_only_turns() {
+        let msg = Message {
+            role: Role::Assistant,
+            blocks: vec![
+                opaque("r"),
+                ContentBlock::Text { text: "a".into() },
+                ContentBlock::Thinking { text: "t".into() },
+                ContentBlock::Text { text: "b".into() },
+            ],
+        };
+        let out = render_turn(&msg, &HashMap::new(), false);
+        assert_eq!(
+            out[0].blocks,
+            vec![
+                opaque("r"),
+                ContentBlock::Text {
+                    text: "a\n\nb".into()
+                }
+            ]
+        );
+        let only_state = Message {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::Thinking { text: "t".into() }, opaque("x")],
+        };
+        assert!(render_turn(&only_state, &HashMap::new(), false).is_empty());
+    }
+
+    #[test]
+    fn foreign_provider_state_is_filtered_in_place() {
+        let mut history = vec![Message {
+            role: Role::Assistant,
+            blocks: vec![
+                opaque("mine"),
+                ContentBlock::ProviderOpaque {
+                    provider: "other".into(),
+                    data: serde_json::json!({}),
+                },
+                ContentBlock::Text { text: "a".into() },
+            ],
+        }];
+        retain_opaque_for(&mut history, &["fam"]);
+        assert_eq!(
+            history[0].blocks,
+            vec![opaque("mine"), ContentBlock::Text { text: "a".into() }]
+        );
+        retain_opaque_for(&mut history, &[]);
+        assert_eq!(history[0].blocks.len(), 1);
     }
 
     #[test]

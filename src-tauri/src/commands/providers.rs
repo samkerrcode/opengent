@@ -1,4 +1,6 @@
-use agent_core::providers::registry::{ActiveSelection, ProviderConfig, ProviderInput};
+use agent_core::providers::registry::{
+    creatable_kinds, ActiveSelection, KindSpec, ProviderConfig, ProviderInput,
+};
 use agent_core::providers::Capabilities;
 use agent_core::Error;
 use serde::Serialize;
@@ -10,6 +12,12 @@ use crate::AppState;
 #[tauri::command]
 pub fn list_providers(state: State<'_, AppState>) -> Vec<ProviderConfig> {
     state.providers.list()
+}
+
+/// Provider kinds the user can add, with the copy and defaults the settings form renders.
+#[tauri::command]
+pub fn list_provider_kinds() -> Vec<KindSpec> {
+    creatable_kinds()
 }
 
 #[tauri::command]

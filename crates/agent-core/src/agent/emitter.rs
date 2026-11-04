@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-use crate::domain::{ChatId, RunEvent, RunEventPayload, RunId, RUN_EVENT_SCHEMA_VERSION};
+use crate::domain::{
+    ChatId, ContentBlock, RunEvent, RunEventPayload, RunId, RUN_EVENT_SCHEMA_VERSION,
+};
 
 use super::RunSink;
 
@@ -102,6 +104,13 @@ impl<S: RunSink> RunEmitter<S> {
     pub fn emit(&mut self, payload: RunEventPayload) {
         self.flush();
         self.send_now(payload);
+    }
+
+    /// Hands a persist-only block to the sink at its stream position (buffered text is
+    /// flushed first). Takes no sequence number: it is not a UI event.
+    pub fn record(&mut self, block: &ContentBlock) {
+        self.flush();
+        self.sink.record(block);
     }
 
     fn send_now(&mut self, payload: RunEventPayload) {

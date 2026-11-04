@@ -14,7 +14,7 @@ use ts_rs::TS;
 use super::capabilities::{looks_like_vision_model, ImageSupport};
 use super::fake::FakeProvider;
 use super::openai_compat::{normalize_base_url, OpenAiCompatConfig, OpenAiCompatProvider};
-use super::{Capabilities, ModelProvider};
+use super::{Capabilities, DiscoveredModel, ModelProvider};
 use crate::config::DataRoot;
 use crate::secrets::{SecretRef, SecretStore};
 use crate::{Error, Result};
@@ -29,6 +29,128 @@ pub enum ProviderKind {
     /// Any server speaking the OpenAI Chat Completions protocol (Ollama, LM Studio, vLLM, gateways).
     OpenAiCompatible,
     Simulated,
+}
+
+/// Static description of a provider kind. Adding a provider = one `KindMeta` constant, one
+/// arm in `ProviderKind::meta`, and one arm in `ProviderStore::instantiate`.
+struct KindMeta {
+    label: &'static str,
+    description: &'static str,
+    /// Used when the user leaves the base URL empty; `None` = the user must supply one.
+    default_base_url: Option<&'static str>,
+    base_url_hint: &'static str,
+    base_url_placeholder: &'static str,
+    requires_api_key: bool,
+    /// Whether the "request token usage" toggle applies (OpenAI-compatible only).
+    usage_option: bool,
+    user_creatable: bool,
+    /// (label, base URL, suggested model)
+    presets: &'static [(&'static str, &'static str, &'static str)],
+}
+
+const OPENAI_COMPATIBLE: KindMeta = KindMeta {
+    label: "OpenAI-compatible",
+    description: "Any server speaking the OpenAI Chat Completions protocol — local (Ollama, \
+                  LM Studio, vLLM, llama.cpp) or hosted gateways.",
+    default_base_url: None,
+    base_url_hint: "OpenAI-compatible, ending in /v1",
+    base_url_placeholder: "http://localhost:11434/v1",
+    requires_api_key: false,
+    usage_option: true,
+    user_creatable: true,
+    presets: &[
+        ("Ollama", "http://localhost:11434/v1", "llama3.1"),
+        ("LM Studio", "http://localhost:1234/v1", ""),
+        ("vLLM / llama.cpp", "http://localhost:8000/v1", ""),
+        ("OpenRouter", "https://openrouter.ai/api/v1", ""),
+    ],
+};
+
+const SIMULATED: KindMeta = KindMeta {
+    label: "Simulated",
+    description: "Built-in offline provider for trying the app.",
+    default_base_url: None,
+    base_url_hint: "",
+    base_url_placeholder: "",
+    requires_api_key: false,
+    usage_option: false,
+    user_creatable: false,
+    presets: &[],
+};
+
+impl ProviderKind {
+    pub const ALL: [ProviderKind; 2] = [ProviderKind::OpenAiCompatible, ProviderKind::Simulated];
+
+    fn meta(self) -> &'static KindMeta {
+        match self {
+            ProviderKind::OpenAiCompatible => &OPENAI_COMPATIBLE,
+            ProviderKind::Simulated => &SIMULATED,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        self.meta().label
+    }
+
+    pub fn requires_api_key(self) -> bool {
+        self.meta().requires_api_key
+    }
+
+    /// UI description of this kind (rendered by the provider settings form).
+    pub fn spec(self) -> KindSpec {
+        let m = self.meta();
+        KindSpec {
+            kind: self,
+            label: m.label.into(),
+            description: m.description.into(),
+            default_base_url: m.default_base_url.map(Into::into),
+            base_url_hint: m.base_url_hint.into(),
+            base_url_placeholder: m.base_url_placeholder.into(),
+            requires_api_key: m.requires_api_key,
+            usage_option: m.usage_option,
+            presets: m
+                .presets
+                .iter()
+                .map(|(label, base_url, model)| ProviderPreset {
+                    label: (*label).into(),
+                    base_url: (*base_url).into(),
+                    model: (*model).into(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Kinds a user can create, in display order.
+pub fn creatable_kinds() -> Vec<KindSpec> {
+    ProviderKind::ALL
+        .into_iter()
+        .filter(|k| k.meta().user_creatable)
+        .map(ProviderKind::spec)
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct KindSpec {
+    pub kind: ProviderKind,
+    pub label: String,
+    pub description: String,
+    /// Prefilled (and used when the field is left empty); `None` = the user must enter one.
+    pub default_base_url: Option<String>,
+    pub base_url_hint: String,
+    pub base_url_placeholder: String,
+    pub requires_api_key: bool,
+    pub usage_option: bool,
+    pub presets: Vec<ProviderPreset>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct ProviderPreset {
+    pub label: String,
+    pub base_url: String,
+    pub model: String,
 }
 
 /// How strictly to verify the provider's TLS certificate.
@@ -78,6 +200,9 @@ pub struct ProviderConfig {
     /// Models the server reported as vision-capable during the last discovery (cache).
     #[serde(default)]
     pub vision_models: Vec<String>,
+    /// Per-model metadata from the last discovery (context window, vision, reasoning).
+    #[serde(default)]
+    pub discovered: HashMap<String, DiscoveredModel>,
 }
 
 fn default_true() -> bool {
@@ -151,7 +276,16 @@ fn simulated_config() -> ProviderConfig {
         tls_ca_pem: None,
         image_support: ImageSupport::Always,
         vision_models: Vec::new(),
+        discovered: HashMap::new(),
     }
+}
+
+/// Whether to resolve credentials and the TLS-configured client. Inspection (capabilities)
+/// needs neither, which keeps keychain reads and client construction off that path.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Purpose {
+    Connect,
+    Inspect,
 }
 
 impl ProviderStore {
@@ -230,9 +364,8 @@ impl ProviderStore {
     }
 
     pub fn save(&self, input: ProviderInput) -> Result<ProviderConfig> {
-        if input.kind == ProviderKind::Simulated
-            || input.id.as_deref() == Some(SIMULATED_PROVIDER_ID)
-        {
+        let meta = input.kind.meta();
+        if !meta.user_creatable || input.id.as_deref() == Some(SIMULATED_PROVIDER_ID) {
             return Err(Error::InvalidInput(
                 "the simulated provider cannot be edited".into(),
             ));
@@ -241,8 +374,13 @@ impl ProviderStore {
         if name.is_empty() || name.len() > 64 {
             return Err(Error::InvalidInput("name must be 1–64 characters".into()));
         }
-        let base_url = normalize_base_url(&input.base_url)?;
+        let base_url = match (input.base_url.trim(), meta.default_base_url) {
+            ("", Some(default)) => default.to_owned(),
+            (raw, _) => normalize_base_url(raw)?,
+        };
         let id = input.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // A whitespace-only key is a clear, not an empty secret.
+        let api_key = input.api_key.as_deref().map(str::trim);
 
         if input.tls_mode == TlsMode::CustomCa
             && input
@@ -258,18 +396,32 @@ impl ProviderStore {
 
         let mut state = self.state.lock().unwrap();
         let existing = state.providers.iter().find(|p| p.id == id).cloned();
-
-        let has_api_key = match input.api_key.as_deref() {
-            Some("") => {
-                self.secrets.delete(&key_ref)?;
-                false
-            }
-            Some(key) => {
-                self.secrets.set(&key_ref, key.trim())?;
-                true
-            }
-            None => existing.as_ref().map(|p| p.has_api_key).unwrap_or(false),
+        if existing
+            .as_ref()
+            .is_some_and(|p| !p.kind.meta().user_creatable)
+        {
+            return Err(Error::InvalidInput("this provider cannot be edited".into()));
+        }
+        // Validate before touching the keychain so a rejected save has no side effects.
+        let will_have_key = match api_key {
+            Some(key) => !key.is_empty(),
+            None => existing.as_ref().is_some_and(|p| p.has_api_key),
         };
+        if meta.requires_api_key && !will_have_key {
+            return Err(Error::InvalidInput(format!(
+                "an API key is required for {}",
+                meta.label
+            )));
+        }
+        match api_key {
+            Some("") => self.secrets.delete(&key_ref)?,
+            Some(key) => self.secrets.set(&key_ref, key)?,
+            None => {}
+        }
+        let has_api_key = will_have_key;
+        let existing_pem = existing.as_ref().and_then(|p| p.tls_ca_pem.clone());
+        // Cached discovery belongs to the previous protocol when the kind changes.
+        let cache = existing.filter(|p| p.kind == input.kind);
 
         let config = ProviderConfig {
             id: id.clone(),
@@ -280,10 +432,7 @@ impl ProviderStore {
                 .default_model
                 .map(|m| m.trim().to_owned())
                 .filter(|m| !m.is_empty()),
-            models: existing
-                .as_ref()
-                .map(|p| p.models.clone())
-                .unwrap_or_default(),
+            models: cache.as_ref().map(|p| p.models.clone()).unwrap_or_default(),
             has_api_key,
             include_usage: input.include_usage,
             context_window: input.context_window,
@@ -297,10 +446,14 @@ impl ProviderStore {
             tls_ca_pem: match input.tls_ca_pem.as_deref() {
                 Some("") => None,
                 Some(pem) => Some(pem.trim().to_owned()),
-                None => existing.as_ref().and_then(|p| p.tls_ca_pem.clone()),
+                None => existing_pem,
             },
             image_support: input.image_support,
-            vision_models: existing.map(|p| p.vision_models).unwrap_or_default(),
+            vision_models: cache
+                .as_ref()
+                .map(|p| p.vision_models.clone())
+                .unwrap_or_default(),
+            discovered: cache.map(|p| p.discovered).unwrap_or_default(),
         };
         match state.providers.iter_mut().find(|p| p.id == id) {
             Some(slot) => *slot = config.clone(),
@@ -329,17 +482,7 @@ impl ProviderStore {
         self.persist(&state)
     }
 
-    pub fn update_models(&self, id: &str, models: Vec<String>) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
-        let p = state
-            .providers
-            .iter_mut()
-            .find(|p| p.id == id)
-            .ok_or_else(|| Error::NotFound(format!("provider `{id}`")))?;
-        p.models = models;
-        self.persist(&state)
-    }
-
+    /// Overwrites the cached vision flags (tests and manual overrides).
     pub fn update_vision_models(&self, id: &str, vision_models: Vec<String>) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         let p = state
@@ -353,20 +496,43 @@ impl ProviderStore {
 
     /// Instantiates a live adapter, resolving the API key from the secret store.
     pub fn build(&self, id: &str) -> Result<Arc<dyn ModelProvider>> {
-        let config = self.get(id)?;
+        self.instantiate(&self.get(id)?, Purpose::Connect)
+    }
+
+    /// The single per-kind dispatch point. `Inspect` skips the keychain read and TLS client
+    /// construction: capability lookups run on every model change and never hit the network.
+    fn instantiate(
+        &self,
+        config: &ProviderConfig,
+        purpose: Purpose,
+    ) -> Result<Arc<dyn ModelProvider>> {
         Ok(match config.kind {
             ProviderKind::Simulated => Arc::new(FakeProvider::default()),
-            ProviderKind::OpenAiCompatible => Arc::new(self.build_openai_compat(&config)?),
+            ProviderKind::OpenAiCompatible => {
+                let mut c = OpenAiCompatConfig::new(config.id.clone(), config.base_url.clone());
+                c.include_usage = config.include_usage;
+                c.context_window = config.context_window;
+                let (key, http) = self.connection(config, purpose)?;
+                c.api_key = key;
+                Arc::new(OpenAiCompatProvider::new(c, http))
+            }
         })
     }
 
-    pub fn build_openai_compat(&self, config: &ProviderConfig) -> Result<OpenAiCompatProvider> {
-        let mut c = OpenAiCompatConfig::new(config.id.clone(), config.base_url.clone());
-        c.include_usage = config.include_usage;
-        c.context_window = config.context_window;
-        if config.has_api_key {
-            c.api_key = self.secrets.get(&api_key_ref(&config.id)?)?;
+    /// API key and HTTP client for a connection (`Inspect`: neither is resolved).
+    fn connection(
+        &self,
+        config: &ProviderConfig,
+        purpose: Purpose,
+    ) -> Result<(Option<String>, reqwest::Client)> {
+        if purpose == Purpose::Inspect {
+            return Ok((None, self.http.clone()));
         }
+        let key = if config.has_api_key {
+            self.secrets.get(&api_key_ref(&config.id)?)?
+        } else {
+            None
+        };
         let http = match config.tls_mode {
             TlsMode::System => self.http.clone(),
             TlsMode::SkipVerification => crate::http::client_insecure()?,
@@ -379,47 +545,73 @@ impl ProviderStore {
                 })?,
             )?,
         };
-        Ok(OpenAiCompatProvider::new(c, http))
+        Ok((key, http))
     }
 
-    /// Effective capabilities for a provider+model pair: adapter-level flags plus the
-    /// model-level `images` resolution (explicit tri-state → server report → heuristic).
+    /// Effective capabilities for a provider+model pair: adapter-level flags plus model-level
+    /// resolution. Context window: per-model override → provider default (a deliberate user
+    /// cap) → discovered → adapter-declared. Images: explicit tri-state, else server report
+    /// (discovered or cached) or the name heuristic.
     pub fn capabilities_for(&self, provider_id: &str, model: &str) -> Result<Capabilities> {
         let config = self.get(provider_id)?;
-        let mut caps = match config.kind {
-            ProviderKind::Simulated => FakeProvider::default().capabilities(),
-            ProviderKind::OpenAiCompatible => self.build_openai_compat(&config)?.capabilities(),
-        };
-        // Context window resolution: per-model override → provider default → adapter-declared.
+        let mut caps = self.instantiate(&config, Purpose::Inspect)?.capabilities();
+        let discovered = config.discovered.get(model);
         caps.context_window = config
             .model_context_windows
             .get(model)
             .copied()
             .or(config.context_window)
+            .or(discovered.and_then(|d| d.context_window))
             .or(caps.context_window);
         caps.images = match config.image_support {
             ImageSupport::Always => true,
             ImageSupport::Never => false,
             ImageSupport::Auto => {
-                config.vision_models.iter().any(|m| m == model) || looks_like_vision_model(model)
+                discovered.and_then(|d| d.vision) == Some(true)
+                    || config.vision_models.iter().any(|m| m == model)
+                    || looks_like_vision_model(model)
             }
         };
         Ok(caps)
     }
 
-    /// Discovers models where the protocol supports it and caches them on the config.
-    /// Also refreshes `vision_models` when the server exposes capability metadata.
+    /// Discovers models where the protocol supports it and caches them (with any reported
+    /// metadata) on the config in one write. `vision_models` is refreshed only when the
+    /// provider reported vision flags, so a failed probe keeps the previous cache.
     pub async fn discover_models(&self, id: &str) -> Result<Vec<String>> {
         let config = self.get(id)?;
-        let (models, vision) = match config.kind {
-            ProviderKind::Simulated => (config.models.clone(), None),
-            ProviderKind::OpenAiCompatible => self.build_openai_compat(&config)?.discover().await?,
-        };
-        self.update_models(id, models.clone())?;
-        if let Some(vision) = vision {
-            self.update_vision_models(id, vision)?;
+        let discovery = self
+            .instantiate(&config, Purpose::Connect)?
+            .discover()
+            .await?;
+        if config.kind == ProviderKind::Simulated {
+            return Ok(config.models);
         }
-        Ok(models)
+        let mut state = self.state.lock().unwrap();
+        let p = state
+            .providers
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| Error::NotFound(format!("provider `{id}`")))?;
+        // The config may have been edited while the request was in flight; results for a
+        // different endpoint or protocol must not be cached against it.
+        if p.kind != config.kind || p.base_url != config.base_url {
+            return Ok(discovery.models);
+        }
+        if discovery.details.values().any(|d| d.vision.is_some()) {
+            let mut vision: Vec<String> = discovery
+                .details
+                .iter()
+                .filter(|(_, d)| d.vision == Some(true))
+                .map(|(m, _)| m.clone())
+                .collect();
+            vision.sort();
+            p.vision_models = vision;
+        }
+        p.models = discovery.models.clone();
+        p.discovered = discovery.details;
+        self.persist(&state)?;
+        Ok(discovery.models)
     }
 
     pub fn secret_refs(&self) -> HashMap<String, SecretRef> {
@@ -555,6 +747,81 @@ mod tests {
         let p = s.get("p1").unwrap();
         assert_eq!(p.image_support, ImageSupport::Auto);
         assert!(p.vision_models.is_empty());
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn context_window_prefers_user_values_then_discovered() {
+        let (s, tmp) = store();
+        let p = s.save(input("X")).unwrap();
+        let window = |model: &str| s.capabilities_for(&p.id, model).unwrap().context_window;
+        assert_eq!(window("m"), None);
+        s.state
+            .lock()
+            .unwrap()
+            .providers
+            .iter_mut()
+            .find(|c| c.id == p.id)
+            .unwrap()
+            .discovered
+            .insert(
+                "m".into(),
+                DiscoveredModel {
+                    context_window: Some(1_000_000),
+                    vision: Some(true),
+                    reasoning: None,
+                },
+            );
+        assert_eq!(window("m"), Some(1_000_000), "discovered");
+        assert!(s.capabilities_for(&p.id, "m").unwrap().images);
+        let mut e = input("X");
+        e.id = Some(p.id.clone());
+        e.context_window = Some(32_768);
+        s.save(e.clone()).unwrap();
+        assert_eq!(window("m"), Some(32_768), "provider default caps");
+        assert!(
+            s.get(&p.id).unwrap().discovered.contains_key("m"),
+            "edits keep the discovery cache"
+        );
+        e.model_context_windows.insert("m".into(), 8192);
+        s.save(e.clone()).unwrap();
+        assert_eq!(window("m"), Some(8192), "per-model override wins");
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn whitespace_key_clears_and_simulated_kind_is_rejected() {
+        let (s, tmp) = store();
+        let p = s.save(input("X")).unwrap();
+        let mut e = input("X");
+        e.id = Some(p.id.clone());
+        e.api_key = Some("   ".into());
+        assert!(!s.save(e).unwrap().has_api_key);
+        let mut sim = input("S");
+        sim.kind = ProviderKind::Simulated;
+        assert!(s.save(sim).is_err());
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn kind_specs_list_only_creatable_kinds() {
+        let kinds = creatable_kinds();
+        assert!(kinds.iter().all(|k| k.kind != ProviderKind::Simulated));
+        let oc = kinds
+            .iter()
+            .find(|k| k.kind == ProviderKind::OpenAiCompatible)
+            .unwrap();
+        assert!(oc.default_base_url.is_none() && !oc.requires_api_key && oc.usage_option);
+        assert!(!oc.presets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn simulated_discovery_returns_its_models() {
+        let (s, tmp) = store();
+        assert_eq!(
+            s.discover_models(SIMULATED_PROVIDER_ID).await.unwrap(),
+            vec!["simulated-1".to_string()]
+        );
         std::fs::remove_dir_all(tmp).unwrap();
     }
 
