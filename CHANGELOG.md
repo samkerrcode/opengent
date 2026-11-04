@@ -6,6 +6,10 @@ planned work lives in the [README roadmap](README.md#roadmap).
 
 ## Unreleased — Phase 4 (OAuth)
 
+- Scrolling up while a response streams now stops auto-scroll on the first upward
+  wheel, trackpad, or keyboard scroll, instead of having to scroll past the bottom
+  threshold before the next token snapped the view back. Scrolling back to the bottom
+  (or **Jump to latest**) resumes following.
 - Bumped `katex` 0.16.47 → 0.19.1 (Dependabot alert: prototype-pollution gadget
   allowing inherited `trust` options, fixed in 0.18.2) and added an npm `overrides`
   entry so `@vscode/markdown-it-katex`'s nested copy resolves to the same version.
