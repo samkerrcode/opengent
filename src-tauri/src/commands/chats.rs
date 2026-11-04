@@ -66,7 +66,10 @@ pub async fn create_chat(
 
 #[tauri::command]
 pub async fn get_chat(state: State<'_, AppState>, id: ChatId) -> Result<ChatDetail, Error> {
-    state.db.call(move |c| repo::get_chat(c, id)).await
+    state
+        .db
+        .call(move |c| repo::get_chat(c, id).map(ChatDetail::for_display))
+        .await
 }
 
 #[tauri::command]

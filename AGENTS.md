@@ -22,6 +22,12 @@ Contributor guidelines: see CONTRIBUTING.md. Security scope: SECURITY.md.
 - `npm run tauri:build` – release bundle (unsigned unless signing is configured).
 - `npm run verify` – svelte-check, vitest, cargo fmt/clippy/test.
 - `npm run gen:types` – regenerate TS bindings after changing any `#[derive(TS)]` type, then commit them.
+- Adding a provider: new `ProviderKind` + `KindMeta` row + one `ProviderStore::instantiate` arm + an
+  adapter in `providers/` built on `providers/common.rs` (`send_checked`, `pump_sse`, `read_json`,
+  `map_status`/`map_transport`, `normalize_call_ids`, `PartialCall`). Protocol state the next request
+  must replay: emit `ProviderEvent::Opaque` in stream order; it lands as `ContentBlock::ProviderOpaque`
+  (≤ `MAX_OPAQUE_BYTES`, family-tagged, IPC-invisible). Adapter streaming tests reuse `tests/common`
+  (`serve_once`, `collect`). The settings form is driven by `list_provider_kinds` — no per-kind Svelte.
 - `npm run gen:brand` – regenerate horizontal SVGs, the social preview, and desktop icons from
   `docs/assets/logo.svg` and `product.json`; requires Inkscape and Arial (see `docs/assets/README.md`).
   Normal builds use committed assets. `npm run check && npm test && npm run build` verifies frontend/branding changes.

@@ -94,6 +94,18 @@ pub struct ChatDetail {
     pub messages: Vec<StoredMessage>,
 }
 
+impl ChatDetail {
+    /// The view sent to the webview: provider continuation state is replay data for the
+    /// model only, so it never crosses IPC.
+    pub fn for_display(mut self) -> Self {
+        for m in &mut self.messages {
+            m.blocks
+                .retain(|b| !matches!(b, ContentBlock::ProviderOpaque { .. }));
+        }
+        self
+    }
+}
+
 fn role_str(r: Role) -> &'static str {
     match r {
         Role::System => "system",
@@ -239,13 +251,19 @@ pub fn list_chats(conn: &Connection, limit: usize) -> Result<Vec<ChatSummary>> {
         .collect()
 }
 
-/// Case-insensitive substring search over titles and message text.
+/// Case-insensitive substring search over titles and message text. Only text and thinking
+/// content matches — not tool arguments, ids or provider state (base64 signatures would
+/// match almost any short query). The raw `blocks LIKE` is a cheap prefilter so JSON is
+/// only expanded for rows that can match.
 pub fn search_chats(conn: &Connection, query: &str, limit: usize) -> Result<Vec<ChatSummary>> {
     let pattern = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
     let mut stmt = conn
         .prepare_cached(&format!(
             "{SUMMARY_SELECT} WHERE c.title LIKE ?1 ESCAPE '\\' OR EXISTS (
-                SELECT 1 FROM messages m WHERE m.chat_id = c.id AND m.blocks LIKE ?1 ESCAPE '\\')
+                SELECT 1 FROM messages m, json_each(m.blocks) b
+                WHERE m.chat_id = c.id AND m.blocks LIKE ?1 ESCAPE '\\'
+                  AND json_extract(b.value, '$.type') IN ('text', 'thinking')
+                  AND json_extract(b.value, '$.text') LIKE ?1 ESCAPE '\\')
              ORDER BY c.updated_at DESC LIMIT ?2"
         ))
         .map_err(sql_err)?;
@@ -688,5 +706,59 @@ mod tests {
         let msgs = get_chat(&c, chat.id).unwrap().messages;
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].id, a);
+    }
+
+    #[test]
+    fn search_matches_message_text_only_and_display_hides_provider_state() {
+        let mut c = conn();
+        let chat = create_chat(&c, "Untitled").unwrap();
+        append_message(
+            &mut c,
+            chat.id,
+            Role::User,
+            &[ContentBlock::Text {
+                text: "hello there".into(),
+            }],
+            &[],
+        )
+        .unwrap();
+        let mid = begin_assistant_message(&mut c, chat.id, RunId::new(), "p", "m").unwrap();
+        finalize_assistant_message(
+            &c,
+            &mid,
+            &[
+                ContentBlock::Thinking {
+                    text: "pondering zebras".into(),
+                },
+                ContentBlock::ProviderOpaque {
+                    provider: "google_gemini".into(),
+                    data: serde_json::json!({ "sig": "QmFzZTY0U2lnbmF0dXJl" }),
+                },
+                ContentBlock::ToolCall {
+                    id: "call_xyz".into(),
+                    name: "fs__read".into(),
+                    arguments: serde_json::json!({ "path": "/etc/quokka" }),
+                    server: None,
+                    tool: None,
+                },
+            ],
+            MessageStatus::Complete,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(search_chats(&c, "there", 10).unwrap().len(), 1);
+        assert_eq!(search_chats(&c, "zebras", 10).unwrap().len(), 1);
+        for miss in ["U2lnbmF0", "google_gemini", "quokka", "call_xyz", "sig"] {
+            assert!(search_chats(&c, miss, 10).unwrap().is_empty(), "{miss}");
+        }
+
+        let detail = get_chat(&c, chat.id).unwrap();
+        assert_eq!(detail.messages[1].blocks.len(), 3, "storage keeps state");
+        let shown = detail.for_display();
+        assert!(!shown.messages[1]
+            .blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ProviderOpaque { .. })));
     }
 }

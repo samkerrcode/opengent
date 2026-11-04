@@ -6,6 +6,25 @@ planned work lives in the [README roadmap](README.md#roadmap).
 
 ## Unreleased — Phase 4 (OAuth)
 
+- Native provider foundation (groundwork for Phases 5–6; no new provider yet):
+  - Provider continuation state (thought signatures, reasoning items) flows through the agent
+    loop as ordered `ProviderOpaque` blocks: persisted with the message at its stream
+    position, replayed only to the same protocol family, never sent to the UI, excluded from
+    search, and capped at 64 KiB per block. Assistant turns now keep their block order when
+    replayed.
+  - The provider settings form is driven by Rust-owned type specs (`list_provider_kinds`):
+    type selector, presets, default endpoint and API-key requirement per protocol.
+  - Model discovery can report per-model context windows and capabilities; when you leave the
+    context window unset, the provider-reported value is used before the 8K fallback.
+  - Shared HTTP layer for adapters: bounded error/listing reads (64 KiB / 16 MiB), URLs
+    stripped from transport errors, and one SSE pump used by every streaming adapter.
+  - Capability lookups no longer read the keychain or build TLS clients.
+  - Sidebar search matches message text and reasoning only — tool arguments and ids no
+    longer produce false matches.
+  - A whitespace-only API key now clears the stored key instead of saving an empty secret.
+  - Tool names exposed to models always start with a letter or underscore (servers whose
+    name starts with a digit get a `_` prefix), as some providers require.
+
 - Scrolling up while a response streams now stops auto-scroll on the first upward
   wheel, trackpad, or keyboard scroll, instead of having to scroll past the bottom
   threshold before the next token snapped the view back. Scrolling back to the bottom

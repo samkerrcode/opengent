@@ -4,14 +4,19 @@
 
 use std::time::Duration;
 
-use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::sse::SseParser;
-use super::{Capabilities, CompletionRequest, ModelProvider, ProviderEvent, PROVIDER_EVENT_BUFFER};
+use super::common::{
+    extract_error_message, map_transport, normalize_call_ids, pump_sse, read_json, send_checked,
+    spawn_stream, status_error, PartialCall, StreamEnd, MAX_TOOL_ARG_CHARS,
+};
+use super::{
+    Capabilities, CompletionRequest, DiscoveredModel, ModelDiscovery, ModelProvider, ProviderEvent,
+    ProviderFuture, PROVIDER_EVENT_BUFFER,
+};
 use crate::domain::{tool_result_text, ContentBlock, Role, StopReason, Usage};
 use crate::{Error, Result};
 
@@ -163,25 +168,21 @@ impl OpenAiCompatProvider {
             .request(reqwest::Method::GET, "/models")
             .send()
             .await
-            .map_err(|e| map_transport(&self.config, e))?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(map_status(status, &body));
+            .map_err(|e| map_transport(&self.config.base_url, e))?;
+        if !resp.status().is_success() {
+            return Err(status_error(resp).await);
         }
-        resp.json()
-            .await
-            .map_err(|e| Error::Provider(format!("unexpected /models response: {e}")))
+        read_json(resp, "/models").await
     }
 
     pub async fn list_models(&self) -> Result<Vec<String>> {
-        Ok(self.discover().await?.0)
+        Ok(self.discover_models().await?.0)
     }
 
     /// `GET /models` plus a best-effort vision probe. Returns the model ids and, when the
     /// server exposes capability metadata, the subset that accepts image input (`None` =
     /// undetectable, callers keep any previously cached result).
-    pub async fn discover(&self) -> Result<(Vec<String>, Option<Vec<String>>)> {
+    pub async fn discover_models(&self) -> Result<(Vec<String>, Option<Vec<String>>)> {
         let doc = self.fetch_models_doc().await?;
         let mut ids: Vec<String> = doc
             .get("data")
@@ -231,8 +232,7 @@ impl OpenAiCompatProvider {
         }
         // Ollama answers with {"version": "…"}; a bare 200 from something else is not enough
         // to justify a /api/show request per model.
-        let looks_ollama = resp
-            .json::<Value>()
+        let looks_ollama = read_json(resp, "/api/version")
             .await
             .ok()
             .and_then(|v| v.get("version").and_then(Value::as_str).map(str::to_owned))
@@ -254,7 +254,7 @@ impl OpenAiCompatProvider {
             else {
                 continue;
             };
-            let Ok(doc) = resp.json::<Value>().await else {
+            let Ok(doc) = read_json(resp, "/api/show").await else {
                 continue;
             };
             let is_vision = doc
@@ -282,7 +282,7 @@ impl OpenAiCompatProvider {
         if !resp.status().is_success() {
             return None;
         }
-        let doc: Value = resp.json().await.ok()?;
+        let doc = read_json(resp, "/api/v0/models").await.ok()?;
         let vision: Vec<String> = doc
             .get("data")
             .and_then(Value::as_array)?
@@ -424,17 +424,9 @@ impl OpenAiCompatProvider {
     }
 }
 
-/// A tool call being assembled from streamed fragments.
-#[derive(Default)]
-struct PartialCall {
-    id: String,
-    name: String,
-    arguments: String,
-}
-
-/// A hostile or buggy server could stream a huge `index` or unbounded arguments; bound both.
+/// A hostile or buggy server could stream a huge `index`; bound it (arguments are bounded by
+/// `MAX_TOOL_ARG_CHARS`).
 const MAX_STREAMED_CALLS: usize = 64;
-const MAX_TOOL_ARG_CHARS: usize = 512_000;
 
 /// Folds one streamed `tool_calls` fragment into `calls`. Fragments are keyed by `index`;
 /// servers that omit it are handled by treating a new `id` as a new call.
@@ -475,19 +467,6 @@ fn merge_tool_call_delta(calls: &mut Vec<PartialCall>, d: ToolCallDelta) {
                 call.arguments = v.to_string();
             }
             _ => {}
-        }
-    }
-}
-
-/// Gives every call a unique non-empty id: empty ids and duplicates get a generated one.
-/// Approvals, UI cards and stored call↔result pairing all key on this id, so a model that
-/// repeats or omits ids must not alias two different calls.
-fn normalize_call_ids(calls: &mut [PartialCall]) {
-    let mut seen = std::collections::HashSet::new();
-    for (i, c) in calls.iter_mut().enumerate() {
-        if c.id.is_empty() || !seen.insert(c.id.clone()) {
-            c.id = format!("call_{i}_{}", uuid::Uuid::new_v4().simple());
-            seen.insert(c.id.clone());
         }
     }
 }
@@ -572,17 +551,32 @@ impl ModelProvider for OpenAiCompatProvider {
             .request(reqwest::Method::POST, "/chat/completions")
             .json(&body);
         let config = self.config.clone();
-
-        tokio::spawn(async move {
-            let result = tokio::select! {
-                _ = cancel.cancelled() => return,
-                r = run_stream(config, req, &tx, cancel.clone()) => r,
-            };
-            if let Err(e) = result {
-                let _ = tx.send(ProviderEvent::Error(e.to_string())).await;
-            }
+        spawn_stream(tx.clone(), cancel.clone(), async move {
+            run_stream(config, req, &tx, cancel).await
         });
         Ok(rx)
+    }
+
+    fn discover(&self) -> ProviderFuture<'_, ModelDiscovery> {
+        Box::pin(async move {
+            let (models, vision) = self.discover_models().await?;
+            // When the server reports capability metadata, every listed model gets a
+            // definite flag; otherwise details stay empty and cached flags are kept.
+            let details = match vision {
+                Some(v) => models
+                    .iter()
+                    .map(|m| {
+                        let d = DiscoveredModel {
+                            vision: Some(v.contains(m)),
+                            ..Default::default()
+                        };
+                        (m.clone(), d)
+                    })
+                    .collect(),
+                None => Default::default(),
+            };
+            Ok(ModelDiscovery { models, details })
+        })
     }
 }
 
@@ -592,82 +586,57 @@ async fn run_stream(
     tx: &mpsc::Sender<ProviderEvent>,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let resp = tokio::time::timeout(config.connect_timeout, req.send())
-        .await
-        .map_err(|_| Error::Provider(format!("timed out connecting to {}", config.base_url)))?
-        .map_err(|e| map_transport(&config, e))?;
+    let resp = send_checked(req, &config.base_url, config.connect_timeout).await?;
 
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(map_status(status, &body));
-    }
-
-    let mut resp = resp;
-    let mut parser = SseParser::new();
     let mut usage: Option<Usage> = None;
     let mut finish: Option<StopReason> = None;
     let mut saw_done = false;
     let mut calls: Vec<PartialCall> = Vec::new();
 
-    loop {
-        let chunk = tokio::select! {
-            _ = cancel.cancelled() => return Ok(()),
-            c = tokio::time::timeout(config.idle_timeout, resp.chunk()) => match c {
-                Err(_) => return Err(Error::Provider(format!("no data from provider for {:?}", config.idle_timeout))),
-                Ok(Err(e)) => return Err(Error::Provider(format!("stream error: {e}"))),
-                Ok(Ok(None)) => break,
-                Ok(Ok(Some(bytes))) => bytes,
-            },
+    let end = pump_sse(resp, config.idle_timeout, &cancel, tx, |ev, out| {
+        if ev.data.trim() == "[DONE]" {
+            saw_done = true;
+            return Ok(());
+        }
+        let Ok(parsed) = serde_json::from_str::<Chunk>(&ev.data) else {
+            return Ok(()); // tolerate keep-alive / vendor extensions we don't model
         };
-        for ev in parser
-            .feed(&chunk)
-            .map_err(|e| Error::Provider(e.to_string()))?
-        {
-            if ev.data.trim() == "[DONE]" {
-                saw_done = true;
-                continue;
+        if let Some(err) = parsed.error {
+            return Err(Error::Provider(
+                extract_error_message(&err).unwrap_or_else(|| err.to_string()),
+            ));
+        }
+        for choice in parsed.choices {
+            if let Some(text) = choice.delta.reasoning_content.filter(|t| !t.is_empty()) {
+                out.push(ProviderEvent::ReasoningDelta(text));
             }
-            let parsed: Chunk = match serde_json::from_str(&ev.data) {
-                Ok(c) => c,
-                Err(_) => continue, // tolerate keep-alive / vendor extensions we don't model
-            };
-            if let Some(err) = parsed.error {
-                return Err(Error::Provider(
-                    extract_error_message(&err).unwrap_or_else(|| err.to_string()),
-                ));
+            if let Some(text) = choice.delta.content.filter(|t| !t.is_empty()) {
+                out.push(ProviderEvent::TextDelta(text));
             }
-            for choice in parsed.choices {
-                if let Some(text) = choice.delta.reasoning_content.filter(|t| !t.is_empty()) {
-                    if tx.send(ProviderEvent::ReasoningDelta(text)).await.is_err() {
-                        return Ok(());
-                    }
-                }
-                if let Some(text) = choice.delta.content.filter(|t| !t.is_empty()) {
-                    if tx.send(ProviderEvent::TextDelta(text)).await.is_err() {
-                        return Ok(());
-                    }
-                }
-                for d in choice.delta.tool_calls.into_iter().flatten() {
-                    merge_tool_call_delta(&mut calls, d);
-                }
-                if let Some(reason) = choice.finish_reason {
-                    finish = Some(match reason.as_str() {
-                        "length" => StopReason::MaxTokens,
-                        "tool_calls" | "function_call" => StopReason::ToolUse,
-                        _ => StopReason::EndTurn,
-                    });
-                }
+            for d in choice.delta.tool_calls.into_iter().flatten() {
+                merge_tool_call_delta(&mut calls, d);
             }
-            if let Some(u) = parsed.usage {
-                usage = Some(Usage {
-                    input_tokens: u.prompt_tokens,
-                    output_tokens: u.completion_tokens,
-                    cache_read_tokens: u.prompt_tokens_details.and_then(|d| d.cached_tokens),
-                    cache_write_tokens: None,
+            if let Some(reason) = choice.finish_reason {
+                finish = Some(match reason.as_str() {
+                    "length" => StopReason::MaxTokens,
+                    "tool_calls" | "function_call" => StopReason::ToolUse,
+                    _ => StopReason::EndTurn,
                 });
             }
         }
+        if let Some(u) = parsed.usage {
+            usage = Some(Usage {
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
+                cache_read_tokens: u.prompt_tokens_details.and_then(|d| d.cached_tokens),
+                cache_write_tokens: None,
+            });
+        }
+        Ok(())
+    })
+    .await?;
+    if end == StreamEnd::Abandoned {
+        return Ok(());
     }
 
     // Some servers (older Ollama, some vLLM templates) finish with "stop" even when they
@@ -707,74 +676,6 @@ async fn run_stream(
             "stream ended without a completion marker".into(),
         )),
     }
-}
-
-/// Walks the error source chain looking for a TLS certificate failure. These surface as
-/// connect-phase errors in reqwest, so they must be distinguished from "server unreachable".
-fn tls_cert_error(e: &reqwest::Error) -> bool {
-    let mut src = std::error::Error::source(&e);
-    while let Some(s) = src {
-        if s.downcast_ref::<rustls::Error>().is_some() {
-            return true;
-        }
-        // The platform verifier may wrap OS-specific errors (e.g. Security.framework codes)
-        // rather than rustls::Error; fall back to the message.
-        let msg = s.to_string().to_lowercase();
-        if msg.contains("certificate") || msg.contains("self signed") || msg.contains("self-signed")
-        {
-            return true;
-        }
-        src = s.source();
-    }
-    false
-}
-
-fn map_transport(config: &OpenAiCompatConfig, e: reqwest::Error) -> Error {
-    if tls_cert_error(&e) {
-        Error::Provider(format!(
-            "TLS certificate verification failed for {} — the server presents a self-signed or \
-             untrusted certificate. Trust its certificate in the OS, paste it as a custom CA in \
-             provider settings, or set TLS verification to 'skip verification'.",
-            config.base_url
-        ))
-    } else if e.is_connect() {
-        Error::Provider(format!(
-            "could not connect to {} — is the server running?",
-            config.base_url
-        ))
-    } else if e.is_timeout() {
-        Error::Provider(format!("request to {} timed out", config.base_url))
-    } else {
-        Error::Provider(format!("request failed: {e}"))
-    }
-}
-
-fn map_status(status: StatusCode, body: &str) -> Error {
-    let detail = serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|v| extract_error_message(&v))
-        .unwrap_or_else(|| body.chars().take(300).collect::<String>().trim().to_owned());
-    let hint = match status {
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-            "authentication failed — check the API key"
-        }
-        StatusCode::NOT_FOUND => "endpoint or model not found — check the base URL and model name",
-        StatusCode::TOO_MANY_REQUESTS => "rate limited by the provider",
-        s if s.is_server_error() => "provider server error",
-        _ => "provider rejected the request",
-    };
-    if detail.is_empty() {
-        Error::Provider(format!("{hint} (HTTP {})", status.as_u16()))
-    } else {
-        Error::Provider(format!("{hint} (HTTP {}): {detail}", status.as_u16()))
-    }
-}
-
-fn extract_error_message(v: &Value) -> Option<String> {
-    v.get("error")
-        .and_then(|e| e.get("message").or(Some(e)))
-        .or_else(|| v.get("message"))
-        .and_then(|m| m.as_str().map(str::to_owned))
 }
 
 #[cfg(test)]
@@ -968,32 +869,46 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_and_empty_call_ids_are_replaced() {
-        let mut calls = vec![
-            PartialCall {
-                id: "same".into(),
-                name: "a".into(),
-                arguments: String::new(),
-            },
-            PartialCall {
-                id: "same".into(),
-                name: "b".into(),
-                arguments: String::new(),
-            },
-            PartialCall {
-                id: String::new(),
-                name: "c".into(),
-                arguments: String::new(),
-            },
-        ];
-        normalize_call_ids(&mut calls);
-        let ids: Vec<_> = calls.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(ids[0], "same");
-        assert!(ids.iter().all(|i| !i.is_empty()));
-        assert_eq!(
-            ids.iter().collect::<std::collections::HashSet<_>>().len(),
-            3
-        );
+    fn opaque_provider_state_is_never_sent() {
+        let opaque = || ContentBlock::ProviderOpaque {
+            provider: "google_gemini".into(),
+            data: json!({ "sig": "c2VjcmV0LXNpZw==" }),
+        };
+        let req = CompletionRequest {
+            model: "m".into(),
+            system: None,
+            messages: vec![
+                Message::text(Role::User, "hi"),
+                Message {
+                    role: Role::Assistant,
+                    blocks: vec![
+                        ContentBlock::Text { text: "ok".into() },
+                        opaque(),
+                        ContentBlock::ToolCall {
+                            id: "c1".into(),
+                            name: "t".into(),
+                            arguments: json!({}),
+                            server: None,
+                            tool: None,
+                        },
+                    ],
+                },
+                Message {
+                    role: Role::Assistant,
+                    blocks: vec![
+                        ContentBlock::Text {
+                            text: "done".into(),
+                        },
+                        opaque(),
+                    ],
+                },
+            ],
+            max_output_tokens: None,
+            tools: Vec::new(),
+        };
+        let body = OpenAiCompatProvider::build_body(&req, false).to_string();
+        assert!(!body.contains("c2VjcmV0LXNpZw=="), "{body}");
+        assert!(!body.contains("google_gemini"), "{body}");
     }
 
     #[test]
@@ -1047,15 +962,5 @@ mod tests {
             vision_flags_from_models(&doc),
             Some(vec!["ggml-org/gemma-4-26B-A4B-it-GGUF:Q4_0".to_string()])
         );
-    }
-
-    #[test]
-    fn status_mapping_extracts_message() {
-        let e = map_status(
-            StatusCode::UNAUTHORIZED,
-            r#"{"error":{"message":"bad key","type":"auth"}}"#,
-        );
-        assert!(e.to_string().contains("bad key"));
-        assert!(e.to_string().contains("401"));
     }
 }

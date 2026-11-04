@@ -1,11 +1,13 @@
 <script lang="ts">
   import { providerStore } from "./provider-store.svelte";
-  import { describeError, type ImageSupport, type ProviderConfig, type ProviderInput, type ProviderTestResult, type TlsMode } from "$lib/ipc/commands";
+  import { describeError, type ImageSupport, type KindSpec, type ProviderConfig, type ProviderInput, type ProviderKind, type ProviderPreset, type ProviderTestResult, type TlsMode } from "$lib/ipc/commands";
+  import { product } from "$lib/generated/product";
 
   let { onclose }: { onclose: () => void } = $props();
 
   type Form = {
     id: string | null;
+    kind: ProviderKind;
     name: string;
     base_url: string;
     default_model: string;
@@ -26,14 +28,10 @@
   const CONTEXT_SIZES = [4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576];
   const fmtCtx = (n: number) => (n >= 1048576 ? `${n / 1048576}M` : `${n / 1024}K`);
 
-  const presets = [
-    { label: "Ollama", base_url: "http://localhost:11434/v1", model: "llama3.1" },
-    { label: "LM Studio", base_url: "http://localhost:1234/v1", model: "" },
-    { label: "vLLM / llama.cpp", base_url: "http://localhost:8000/v1", model: "" },
-    { label: "OpenRouter", base_url: "https://openrouter.ai/api/v1", model: "" },
-  ];
-
   let editing = $state<Form | null>(null);
+  /** Rust-owned description of the kind being edited: labels, defaults, presets. */
+  const spec = $derived<KindSpec | undefined>(editing ? providerStore.kindSpec(editing.kind) : undefined);
+  const baseUrlReady = $derived(!!editing && (!!editing.base_url.trim() || !!spec?.default_base_url));
   let busy = $state(false);
   let notice = $state<{ ok: boolean; text: string } | null>(null);
   let testResult = $state<ProviderTestResult | null>(null);
@@ -52,19 +50,35 @@
     return [...names];
   });
 
-  function blankForm(): Form {
-    return { id: null, name: "", base_url: "", default_model: "", api_key: "", key_touched: false, include_usage: true, context_window: "", model_context: {}, tls_mode: "system", tls_ca_pem: "", ca_touched: false, image_support: "auto" };
+  function blankForm(kind: ProviderKind): Form {
+    const base_url = providerStore.kindSpec(kind)?.default_base_url ?? "";
+    return { id: null, kind, name: "", base_url, default_model: "", api_key: "", key_touched: false, include_usage: true, context_window: "", model_context: {}, tls_mode: "system", tls_ca_pem: "", ca_touched: false, image_support: "auto" };
   }
 
   function startNew() {
-    editing = blankForm();
+    editing = blankForm(providerStore.kinds[0]?.kind ?? "open_ai_compatible");
     notice = null;
     testResult = null;
+  }
+
+  /** Switching type on a new provider resets kind-specific fields but keeps the name. */
+  function changeKind(kind: ProviderKind) {
+    if (!editing || editing.id) return;
+    editing = { ...blankForm(kind), name: editing.name };
+  }
+
+  /** List subtitle: the endpoint host, or the kind label when using the kind's default endpoint. */
+  function subtitle(p: ProviderConfig): string {
+    if (p.kind === "simulated") return "built-in";
+    const s = providerStore.kindSpec(p.kind);
+    if (s?.default_base_url && p.base_url === s.default_base_url) return s.label;
+    return p.base_url.replace(/^https?:\/\//, "");
   }
 
   function startEdit(p: ProviderConfig) {
     editing = {
       id: p.id,
+      kind: p.kind,
       name: p.name,
       base_url: p.base_url,
       default_model: p.default_model ?? "",
@@ -82,7 +96,7 @@
     testResult = null;
   }
 
-  function applyPreset(preset: (typeof presets)[number]) {
+  function applyPreset(preset: ProviderPreset) {
     if (!editing) return;
     editing.base_url = preset.base_url;
     if (!editing.name) editing.name = preset.label;
@@ -94,7 +108,7 @@
     return {
       id: f.id,
       name: f.name,
-      kind: "open_ai_compatible",
+      kind: f.kind,
       base_url: f.base_url,
       default_model: f.default_model.trim() || null,
       // Rust semantics: null = keep existing key, "" = clear, value = replace.
@@ -187,7 +201,7 @@
             disabled={p.kind === "simulated"}
           >
             <span class="item-name">{p.name}</span>
-            <span class="item-sub">{p.kind === "simulated" ? "built-in" : p.base_url.replace(/^https?:\/\//, "")}</span>
+            <span class="item-sub">{subtitle(p)}</span>
           </button>
         {/each}
         <button class="btn-outline add" onclick={startNew}>+ Add provider</button>
@@ -195,19 +209,30 @@
 
       <div class="form">
         {#if editing}
-          <div class="presets">
-            {#each presets as preset (preset.label)}
-              <button class="chip" type="button" onclick={() => applyPreset(preset)}>{preset.label}</button>
-            {/each}
-          </div>
+          {#if !editing.id && providerStore.kinds.length > 1}
+            <label>
+              <span>Type</span>
+              <select value={editing.kind} onchange={(e) => changeKind(e.currentTarget.value as ProviderKind)}>
+                {#each providerStore.kinds as k (k.kind)}<option value={k.kind}>{k.label}</option>{/each}
+              </select>
+              {#if spec}<small class="field-help">{spec.description}</small>{/if}
+            </label>
+          {/if}
+          {#if spec?.presets.length}
+            <div class="presets">
+              {#each spec.presets as preset (preset.label)}
+                <button class="chip" type="button" onclick={() => applyPreset(preset)}>{preset.label}</button>
+              {/each}
+            </div>
+          {/if}
 
           <label>
             <span>Name</span>
-            <input type="text" bind:value={editing.name} placeholder="My local Ollama" maxlength="64" />
+            <input type="text" bind:value={editing.name} placeholder={spec?.label ?? "My provider"} maxlength="64" />
           </label>
           <label>
-            <span>Base URL <small>(OpenAI-compatible, ending in /v1)</small></span>
-            <input type="url" bind:value={editing.base_url} placeholder="http://localhost:11434/v1" />
+            <span>Base URL <small>({spec ? (spec.default_base_url ? "leave as is unless you use a proxy" : spec.base_url_hint) : "endpoint URL"})</small></span>
+            <input type="url" bind:value={editing.base_url} placeholder={spec?.default_base_url ?? spec?.base_url_placeholder} />
           </label>
           <label>
             <span>Default model</span>
@@ -231,7 +256,7 @@
               type="password"
               bind:value={editing.api_key}
               oninput={() => editing && (editing.key_touched = true)}
-              placeholder="optional for local servers"
+              placeholder={spec?.requires_api_key ? "required" : "optional for local servers"}
               autocomplete="off"
             />
           </label>
@@ -239,18 +264,20 @@
             <label>
               <span>Context window <small>(optional)</small></span>
               <select bind:value={editing.context_window}>
-                <option value="">Assume 8K tokens</option>
+                <option value="">Reported by the provider, else 8K</option>
                 {#each CONTEXT_SIZES as n (n)}<option value={String(n)}>{fmtCtx(n)} tokens</option>{/each}
               </select>
               <small class="field-help">
-                Caps how much of the conversation is sent each turn. Servers don't report
-                this — when unset, OpenGent assumes 8K tokens.
+                Caps how much of the conversation is sent each turn. When unset, {product.displayName}
+                uses the window the provider reports for each model, or assumes 8K tokens.
               </small>
             </label>
-            <label class="check">
-              <input type="checkbox" bind:checked={editing.include_usage} />
-              <span>Request token usage</span>
-            </label>
+            {#if spec?.usage_option}
+              <label class="check">
+                <input type="checkbox" bind:checked={editing.include_usage} />
+                <span>Request token usage</span>
+              </label>
+            {/if}
           </div>
           {#if ctxModels.length}
             <div class="ctx-overrides">
@@ -315,13 +342,13 @@
               {/if}
             {/if}
             <span class="spacer"></span>
-            <button class="btn-outline" onclick={() => save(true)} disabled={busy || !editing.base_url}>Save & test</button>
-            <button class="btn-primary" onclick={() => save(false)} disabled={busy || !editing.base_url || !editing.name}>Save</button>
+            <button class="btn-outline" onclick={() => save(true)} disabled={busy || !baseUrlReady}>Save & test</button>
+            <button class="btn-primary" onclick={() => save(false)} disabled={busy || !baseUrlReady || !editing.name}>Save</button>
           </footer>
         {:else}
           <div class="placeholder">
-            <p>Add a connection to any OpenAI-compatible server — local (Ollama, LM Studio, vLLM) or hosted.</p>
-            <p class="muted">Native OpenAI, Anthropic, Google, Bedrock and Hugging Face adapters arrive in later phases.</p>
+            <p>Add a model provider connection.</p>
+            {#each providerStore.kinds as k (k.kind)}<p class="muted">{k.label}: {k.description}</p>{/each}
             <button class="btn-primary" onclick={startNew}>Add provider</button>
           </div>
         {/if}

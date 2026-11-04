@@ -180,7 +180,11 @@ impl ToolNamer {
     }
 
     pub fn name(&mut self, server: &str, tool: &str) -> String {
-        let prefix = sanitize(&server.to_ascii_lowercase(), 24);
+        let mut prefix = sanitize(&server.to_ascii_lowercase(), 24);
+        // Some providers (Gemini) require names to start with a letter or underscore.
+        if !prefix.starts_with(|c: char| c.is_ascii_alphabetic()) {
+            prefix.insert(0, '_');
+        }
         let base: String = format!("{prefix}__{}", sanitize(tool, MAX_TOOL_NAME))
             .chars()
             .take(MAX_TOOL_NAME)
@@ -618,6 +622,8 @@ pub(crate) mod tests {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
         assert_eq!(n.name("", "find_tools"), "tool__find_tools");
+        assert_eq!(n.name("1Password", "get"), "_1password__get");
+        assert_eq!(n.name("-x", "get"), "_-x__get");
     }
 
     #[test]

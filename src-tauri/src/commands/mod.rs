@@ -324,11 +324,21 @@ pub(crate) async fn launch_run<S: RunSink>(
         .ok_or_else(|| Error::Internal("assistant message vanished".into()))?;
 
     // History = everything complete/interrupted before the placeholder, as domain messages.
-    let history: Vec<_> = messages
+    let mut history: Vec<_> = messages
         .iter()
         .filter(|m| m.id != assistant_id && !m.blocks.is_empty())
         .map(StoredMessage::to_message)
         .collect();
+    // Provider state only replays to its own protocol family; drop the rest before
+    // budgeting so it costs neither tokens nor request bytes.
+    let families: Vec<&str> = [
+        provider.family(),
+        fallback.as_ref().and_then(|f| f.provider.family()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    context::retain_opaque_for(&mut history, &families);
 
     // Tool snapshot: catalog from connected servers (skipped when the model can't call
     // tools), the system-prompt section, and a token reservation for the definitions.

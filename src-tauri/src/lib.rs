@@ -38,6 +38,7 @@ pub fn run() {
             commands::cancel_run,
             commands::probe_secret_store,
             commands::list_providers,
+            commands::list_provider_kinds,
             commands::save_provider,
             commands::delete_provider,
             commands::get_active_selection,
