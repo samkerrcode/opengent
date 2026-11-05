@@ -43,6 +43,9 @@ const API_REVISION: &str = "2026-05-20";
 const MAX_LISTING_PAGES: usize = 10;
 /// Bounds per-stream bookkeeping against a hostile server inventing step indices.
 const MAX_OPEN_STEPS: usize = 256;
+const MAX_CLOSED_STEPS: usize = 4096;
+/// Thought summaries are a handful of paragraphs; this only bounds a misbehaving server.
+const MAX_SUMMARY_ITEMS: usize = 256;
 /// Model families on the listing endpoint that are not chat models.
 const NON_CHAT_MARKERS: &[&str] = &[
     "embedding",
@@ -80,6 +83,11 @@ impl GeminiConfig {
             idle_timeout: Duration::from_secs(180),
         }
     }
+
+    /// Whole-request deadline; the idle timeout governs streaming, this bounds the worst case.
+    fn request_timeout(&self) -> Duration {
+        self.idle_timeout.max(self.connect_timeout) * 4
+    }
 }
 
 pub struct GeminiProvider {
@@ -116,7 +124,7 @@ impl GeminiProvider {
             &self.http,
             method,
             url,
-            self.config.idle_timeout.max(self.config.connect_timeout) * 4,
+            self.config.request_timeout(),
         )
     }
 
@@ -428,71 +436,58 @@ async fn run_interactions(
     tx: &mpsc::Sender<ProviderEvent>,
     cancel: CancellationToken,
 ) -> Result<()> {
-    enum Conn {
-        Create,
-        Resume { id: String, last: String },
-    }
-    let create = |body: &Value| {
-        build_request(
-            config,
-            http,
-            reqwest::Method::POST,
-            format!("{}/interactions", config.base_url),
-            config.idle_timeout.max(config.connect_timeout) * 4,
-        )
-        .header(reqwest::header::ACCEPT, "text/event-stream")
-        .json(body)
+    let request = |method, url: String| {
+        build_request(config, http, method, url, config.request_timeout())
+            .header(reqwest::header::ACCEPT, "text/event-stream")
     };
-    let resume = |id: &str, last: &str| -> Result<reqwest::RequestBuilder> {
-        let mut url = reqwest::Url::parse(&format!("{}/interactions/{id}", config.base_url))
-            .map_err(|e| Error::InvalidInput(format!("invalid interaction URL: {e}")))?;
+    /// `GET /interactions/{id}?stream=true&last_event_id=…`; the id is a path segment, so
+    /// a server-supplied value cannot rewrite the path.
+    fn resume_url(base: &str, id: &str, last: &str) -> Option<reqwest::Url> {
+        let mut url = reqwest::Url::parse(&format!("{base}/interactions/")).ok()?;
+        url.path_segments_mut().ok()?.pop_if_empty().push(id);
         url.query_pairs_mut()
             .append_pair("stream", "true")
             .append_pair("last_event_id", last);
-        Ok(build_request(
-            config,
-            http,
-            reqwest::Method::GET,
-            url.into(),
-            config.idle_timeout.max(config.connect_timeout) * 4,
-        )
-        .header(reqwest::header::ACCEPT, "text/event-stream"))
-    };
+        Some(url)
+    }
 
     let mut state = StreamState::default();
-    let mut conn = Conn::Create;
+    let mut resume: Option<reqwest::Url> = None;
     let mut resumes = 0;
     let mut restarts = 0;
     loop {
-        let resuming = !matches!(conn, Conn::Create);
-        let req = match &conn {
-            Conn::Create => create(&body),
-            Conn::Resume { id, last } => match resume(id, last) {
-                Ok(r) => r,
-                Err(_) => return Err(Error::Provider("could not resume the stream".into())),
-            },
+        let resuming = resume.is_some();
+        let req = match resume.take() {
+            Some(url) => request(reqwest::Method::GET, url.into()),
+            None => request(
+                reqwest::Method::POST,
+                format!("{}/interactions", config.base_url),
+            )
+            .json(&body),
         };
-        let resp = match send_checked(req, &config.base_url, config.connect_timeout).await {
-            Ok(r) => r,
+        let end = match send_checked(req, &config.base_url, config.connect_timeout).await {
+            Ok(resp) => {
+                match pump_sse(resp, config.idle_timeout, &cancel, tx, |ev, out| {
+                    state.handle(ev, out)
+                })
+                .await
+                {
+                    Ok(StreamEnd::Abandoned) => return Ok(()),
+                    Ok(StreamEnd::Eof) => state.end_of_stream()?,
+                    // The server's own `error` event is a verdict, not a dropped connection.
+                    Err(e) if state.failed => return Err(e),
+                    // Idle timeout / transport error mid-stream: resume like a dropped connection.
+                    Err(_) => End::Resume,
+                }
+            }
             // Resuming is best-effort (store:false may not retain the interaction): a failed
-            // resume GET retries the interaction instead of failing the run.
+            // resume GET falls through to the restart budget instead of failing the run.
             Err(e) if resuming => {
                 tracing::debug!(error = %e, "stream resume failed; restarting the interaction");
-                conn = Conn::Create;
                 state.reset();
-                continue;
+                End::Resume
             }
             Err(e) => return Err(e),
-        };
-        let end = match pump_sse(resp, config.idle_timeout, &cancel, tx, |ev, out| {
-            state.handle(ev, out)
-        })
-        .await
-        {
-            Ok(StreamEnd::Abandoned) => return Ok(()),
-            Ok(StreamEnd::Eof) => state.end_of_stream()?,
-            // Idle timeout / transport error mid-stream: resume like a dropped connection.
-            Err(_) => End::Resume,
         };
         match end {
             End::Complete(events) => {
@@ -511,31 +506,23 @@ async fn run_interactions(
                 }
                 body["continuation_token"] = json!(token);
                 state.reset();
-                conn = Conn::Create;
             }
             End::Resume => {
-                let target = match (&state.interaction_id, &state.last_event_id) {
+                resume = match (&state.interaction_id, &state.last_event_id) {
                     (Some(id), Some(last)) if resumes < MAX_RESUMES => {
-                        resumes += 1;
-                        Some(Conn::Resume {
-                            id: id.clone(),
-                            last: last.clone(),
-                        })
+                        resume_url(&config.base_url, id, last)
                     }
                     _ => None,
                 };
-                match target {
-                    Some(c) => conn = c,
-                    None if restarts < MAX_RESTARTS => {
-                        restarts += 1;
-                        state.reset();
-                        conn = Conn::Create;
-                    }
-                    None => {
-                        return Err(Error::Provider(
-                            "stream ended before the interaction completed".into(),
-                        ))
-                    }
+                if resume.is_some() {
+                    resumes += 1;
+                } else if restarts < MAX_RESTARTS {
+                    restarts += 1;
+                    state.reset();
+                } else {
+                    return Err(Error::Provider(
+                        "stream ended before the interaction completed".into(),
+                    ));
                 }
             }
         }
@@ -548,7 +535,9 @@ enum OpenStep {
     Thought {
         base: Value,
         signature: String,
-        summary: Vec<Value>,
+        /// `None` once the summary outgrew `MAX_OPAQUE_BYTES`: it could not be replayed
+        /// intact anyway, so it stops being buffered.
+        summary: Option<Vec<Value>>,
     },
     Call {
         id: String,
@@ -563,20 +552,23 @@ enum OpenStep {
 
 /// Interactions SSE state machine. Thought and call steps are emitted when they stop, so
 /// stored blocks keep the exact order the server produced them in. The resume fields let a
-/// dropped stream continue where it left off; `emitted` guards against the server
-/// re-delivering a closed step on a resumed or continued stream.
+/// dropped stream continue where it left off; `closed` guards against a resumed connection
+/// re-delivering a step that already stopped.
 #[derive(Default)]
 struct StreamState {
     open: BTreeMap<u64, OpenStep>,
+    /// Indices of steps that stopped in the current interaction.
+    closed: HashSet<u64>,
+    /// Every call id emitted so far, across connections — ids must stay unique per turn.
     call_ids: HashSet<String>,
-    /// Call ids already emitted as `ToolCall`, across connections.
-    emitted: HashSet<String>,
     calls: usize,
     usage: Option<Usage>,
     status: Option<String>,
     interaction_id: Option<String>,
     last_event_id: Option<String>,
     continuation: Option<String>,
+    /// The server sent an `error` event: the stream must not be resumed or retried.
+    failed: bool,
 }
 
 fn str_at<'a>(v: &'a Value, key: &str) -> &'a str {
@@ -616,9 +608,14 @@ impl StreamState {
                     self.interaction_id = Some(id.to_owned());
                 }
             }
+            // Steps that already stopped are replays from a resumed connection.
+            _ if self.closed.contains(&index) && kind.starts_with("step.") => {}
             "step.start" => self.start(index, v.get("step").unwrap_or(&Value::Null), out),
             "step.delta" => self.delta(index, v.get("delta").unwrap_or(&Value::Null), out),
             "step.stop" => {
+                if self.closed.len() < MAX_CLOSED_STEPS {
+                    self.closed.insert(index);
+                }
                 if let Some(step) = self.open.remove(&index) {
                     self.close(step, out);
                 }
@@ -635,12 +632,12 @@ impl StreamState {
                 }
             }
             "error" => {
+                self.failed = true;
                 return Err(Error::Provider(
                     extract_error_message(&v).unwrap_or_else(|| "Gemini stream error".into()),
-                ))
+                ));
             }
-            // `interaction.created`, status updates: nothing to do. `event_id` (stream resume)
-            // is not used yet.
+            // Status updates and anything newer than this adapter: nothing to do.
             _ => {}
         }
         Ok(())
@@ -655,13 +652,15 @@ impl StreamState {
         // item, or a call's id/name/arguments.
         let open = match str_at(step, "type") {
             "thought" => {
-                let summary: Vec<Value> = step
+                let mut summary = Some(Vec::new());
+                for item in step
                     .get("summary")
                     .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                for item in &summary {
+                    .into_iter()
+                    .flatten()
+                {
                     push_reasoning(item, out);
+                    push_summary(&mut summary, item);
                 }
                 OpenStep::Thought {
                     base: step.clone(),
@@ -669,16 +668,22 @@ impl StreamState {
                     summary,
                 }
             }
-            "function_call" => OpenStep::Call {
-                id: str_at(step, "id").to_owned(),
-                name: str_at(step, "name").to_owned(),
-                arguments: match step.get("arguments") {
-                    Some(a @ Value::Object(o)) if !o.is_empty() => a.to_string(),
-                    Some(Value::String(s)) => s.chars().take(MAX_TOOL_ARG_CHARS).collect(),
-                    _ => String::new(),
-                },
-                signature: str_at(step, "signature").to_owned(),
-            },
+            "function_call" => {
+                let mut arguments = String::new();
+                match step.get("arguments") {
+                    Some(a @ Value::Object(o)) if !o.is_empty() => {
+                        push_bounded(&mut arguments, &a.to_string(), MAX_TOOL_ARG_CHARS)
+                    }
+                    Some(Value::String(s)) => push_bounded(&mut arguments, s, MAX_TOOL_ARG_CHARS),
+                    _ => {}
+                }
+                OpenStep::Call {
+                    id: str_at(step, "id").to_owned(),
+                    name: str_at(step, "name").to_owned(),
+                    arguments,
+                    signature: str_at(step, "signature").to_owned(),
+                }
+            }
             "model_output" => {
                 for item in step
                     .get("content")
@@ -707,7 +712,7 @@ impl StreamState {
                 "thought_summary" => {
                     if let Some(item) = delta.get("content") {
                         push_reasoning(item, out);
-                        summary.push(item.clone());
+                        push_summary(summary, item);
                     }
                 }
                 "thought_signature" => push_bounded(
@@ -751,7 +756,8 @@ impl StreamState {
                 signature,
                 summary,
             } => {
-                if signature.is_empty() && summary.is_empty() {
+                let summary = summary.filter(|s| !s.is_empty());
+                if signature.is_empty() && summary.is_none() {
                     return;
                 }
                 let mut step = match base {
@@ -765,7 +771,7 @@ impl StreamState {
                     step.insert("signature".into(), json!(signature));
                 }
                 let lean = json!({ "step": step.clone() });
-                if !summary.is_empty() {
+                if let Some(summary) = summary {
                     step.insert("summary".into(), Value::Array(summary));
                 }
                 let full = json!({ "step": step });
@@ -792,13 +798,9 @@ impl StreamState {
                     return;
                 }
                 // Approvals and result pairing key on the id: replace empty or repeated ones.
-                if id.is_empty() || self.call_ids.contains(&id) {
+                if id.is_empty() || !self.call_ids.insert(id.clone()) {
                     id = format!("call_{}_{}", self.calls, uuid::Uuid::new_v4().simple());
-                }
-                self.call_ids.insert(id.clone());
-                // A resumed/continued stream may re-close a call already emitted.
-                if !self.emitted.insert(id.clone()) {
-                    return;
+                    self.call_ids.insert(id.clone());
                 }
                 self.calls += 1;
                 if !signature.is_empty() {
@@ -821,11 +823,12 @@ impl StreamState {
         }
     }
 
-    /// Forgets this connection's open steps and outcome while keeping the dedup sets; used
+    /// Forgets the current interaction's steps and outcome while keeping `call_ids`; used
     /// before resending the create request (continuation or a full retry), which starts a
-    /// new interaction.
+    /// new interaction with its own step indices.
     fn reset(&mut self) {
         self.open.clear();
+        self.closed.clear();
         self.status = None;
         self.usage = None;
         self.continuation = None;
@@ -889,6 +892,21 @@ fn push_reasoning(item: &Value, out: &mut Vec<ProviderEvent>) {
         let text = str_at(item, "text");
         if !text.is_empty() {
             out.push(ProviderEvent::ReasoningDelta(text.to_owned()));
+        }
+    }
+}
+
+/// Buffers a summary item for replay until the summary alone exceeds the opaque cap; past
+/// that the whole summary is abandoned (a partial one would fail signature validation).
+fn push_summary(summary: &mut Option<Vec<Value>>, item: &Value) {
+    if let Some(items) = summary {
+        let bytes: usize = items.iter().map(|i| str_at(i, "text").len()).sum();
+        if items.len() >= MAX_SUMMARY_ITEMS
+            || bytes + str_at(item, "text").len() > super::MAX_OPAQUE_BYTES
+        {
+            *summary = None;
+        } else {
+            items.push(item.clone());
         }
     }
 }
@@ -1228,6 +1246,52 @@ mod tests {
             &out[1],
             ProviderEvent::Opaque { data, .. } if data == &json!({ "call_signature": { "id": "a", "signature": "CS" } })
         ));
+        assert_eq!(
+            complete(end).last(),
+            Some(&ProviderEvent::Done(StopReason::ToolUse))
+        );
+    }
+
+    #[test]
+    fn redelivered_closed_steps_are_ignored() {
+        // A resumed stream may replay events for a step that already stopped on the
+        // previous connection: same index, same call id.
+        let call = || {
+            sse(
+                "step.start",
+                json!({ "index": 1, "step": { "type": "function_call", "id": "a", "name": "fs__read",
+                    "arguments": { "path": "a" } } }),
+            )
+        };
+        let text = || {
+            sse(
+                "step.delta",
+                json!({ "index": 0, "delta": { "type": "text", "text": "hi" } }),
+            )
+        };
+        let (out, end) = run(vec![
+            sse(
+                "step.start",
+                json!({ "index": 0, "step": { "type": "model_output" } }),
+            ),
+            text(),
+            sse("step.stop", json!({ "index": 0 })),
+            call(),
+            sse("step.stop", json!({ "index": 1 })),
+            text(),
+            call(),
+            sse("step.stop", json!({ "index": 1 })),
+            completed("requires_action"),
+        ]);
+        let calls = out
+            .iter()
+            .filter(|e| matches!(e, ProviderEvent::ToolCall { .. }))
+            .count();
+        let texts = out
+            .iter()
+            .filter(|e| matches!(e, ProviderEvent::TextDelta(_)))
+            .count();
+        assert_eq!((calls, texts), (1, 1), "{out:?}");
         assert_eq!(
             complete(end).last(),
             Some(&ProviderEvent::Done(StopReason::ToolUse))

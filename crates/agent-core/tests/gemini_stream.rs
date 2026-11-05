@@ -356,6 +356,24 @@ data: {"interaction":{"status":"completed","usage":{"total_input_tokens":4}},"ev
     );
 }
 
+/// A server-sent `error` is a verdict, not a dropped connection: it must surface as-is
+/// instead of being retried into a generic failure.
+#[tokio::test]
+async fn error_event_is_not_retried() {
+    let body: &'static str = r#"event: interaction.created
+data: {"interaction":{"id":"i_1","status":"in_progress"},"event_id":"e0","event_type":"interaction.created"}
+
+event: error
+data: {"error":{"code":"RESOURCE_EXHAUSTED","message":"quota exceeded"},"event_id":"e1","event_type":"error"}
+
+"#;
+    let (origin, requests) = serve_many(vec![body]).await;
+    let c = common::collect(&provider_at(origin), &request()).await;
+    let err = c.err.expect("stream must fail");
+    assert!(err.contains("quota exceeded"), "{err}");
+    assert_eq!(requests.await.unwrap().len(), 1, "no resume or retry");
+}
+
 #[tokio::test]
 async fn requires_continuation_resends_the_token() {
     let first: &'static str = r#"event: interaction.created
