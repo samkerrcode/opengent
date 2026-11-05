@@ -6,7 +6,23 @@ planned work lives in the [README roadmap](README.md#roadmap).
 
 ## Unreleased — Phase 4 (OAuth)
 
-- Native **Google Gemini** provider (Phase 6, first item): add it with an AI Studio API key
+- Native **OpenAI** provider (Phase 5 — native providers): add it with an OpenAI API key
+  (Type → OpenAI). Uses the Responses API statelessly (`store: false`) — chosen over Chat
+  Completions, where OpenAI's newer models restrict or drop tool calling — with streaming,
+  reasoning summaries in the Thinking block, parallel tool calls, image input, and model
+  discovery that filters out non-chat models and fills in per-family context windows and
+  output caps (GPT-6 1.05M / 128K out).
+  Encrypted reasoning items are stored as provider state and replayed verbatim, so reasoning
+  carries across tool calls; an assistant message's `phase` is replayed too. Tools are sent
+  non-strict so MCP schemas are accepted. The mock OpenAI server now also speaks the
+  Responses API, with replay validation and a `mock-reasoning` model.
+- Provider layer, built to scale with more adapters: capability lookups (every model change
+  and run start) no longer construct an adapter or clone the provider config — adapter
+  capabilities are declared once per type; HTTP clients for custom/skip TLS modes are cached
+  per provider instead of rebuilt (trust store and all) on every run; shared adapter helpers
+  (`CallIds`, bounded string appends, opaque-state lookup, argument shaping, model-listing
+  filters) and a shared multi-request test server replace per-adapter copies.
+- Native **Google Gemini** provider (Phase 5 — native providers, first item): add it with an AI Studio API key
   (Type → Google Gemini). Uses the stable Interactions API (`/v1`) in stateless mode
   (`store: false`), with streaming, thought summaries in the Thinking block, parallel tool
   calls, image input, and model discovery with per-model context windows. Thought steps and
@@ -24,7 +40,9 @@ planned work lives in the [README roadmap](README.md#roadmap).
 - Fixed: text a model streams after a tool call in the same response no longer splits the
   step, which gave the call a synthetic "did not complete" result and dropped its real result
   from the next request.
-- Native provider foundation (groundwork for Phases 5–6; no new provider yet):
+- Roadmap: Phases 5–6 are reorganized into **Phase 5 – Native providers** (one row per
+  provider, shipped independently) and **Phase 6 – Provider context & caching**.
+- Native provider foundation (groundwork for Phase 5; no new provider yet):
   - Provider continuation state (thought signatures, reasoning items) flows through the agent
     loop as ordered `ProviderOpaque` blocks: persisted with the message at its stream
     position, replayed only to the same protocol family, never sent to the UI, excluded from

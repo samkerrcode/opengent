@@ -2,6 +2,7 @@
 //! body reads, tool-call id hygiene, and the SSE pump that drives a streaming response. An
 //! adapter supplies only its request body and a per-event handler.
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::time::Duration;
 
@@ -12,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::sse::{SseEvent, SseParser};
 use super::ProviderEvent;
+use crate::domain::ContentBlock;
 use crate::{Error, Result};
 
 /// A hostile or buggy server could stream unbounded tool arguments; adapters cap them here.
@@ -146,6 +148,12 @@ where
     }
 }
 
+/// Whole-request deadline for a streaming call: the idle timeout governs the stream itself,
+/// this only bounds the worst case.
+pub fn request_timeout(connect: Duration, idle: Duration) -> Duration {
+    idle.max(connect) * 4
+}
+
 /// A tool call assembled from a stream, before it is emitted.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct PartialCall {
@@ -154,17 +162,96 @@ pub struct PartialCall {
     pub arguments: String,
 }
 
-/// Gives every call a unique non-empty id: empty ids and duplicates get a generated one.
-/// Approvals, UI cards and stored call↔result pairing all key on this id, so a model that
-/// repeats or omits ids must not alias two different calls.
-pub fn normalize_call_ids(calls: &mut [PartialCall]) {
-    let mut seen = std::collections::HashSet::new();
-    for (i, c) in calls.iter_mut().enumerate() {
-        if c.id.is_empty() || !seen.insert(c.id.clone()) {
-            c.id = format!("call_{i}_{}", uuid::Uuid::new_v4().simple());
-            seen.insert(c.id.clone());
-        }
+/// Hands out unique, non-empty tool-call ids for one model turn. Approvals, UI cards and
+/// stored call↔result pairing all key on the id, so a model that repeats or omits ids must
+/// not alias two different calls. Also counts the calls seen (stop-reason decisions).
+#[derive(Debug, Default)]
+pub struct CallIds {
+    seen: HashSet<String>,
+    count: usize,
+}
+
+impl CallIds {
+    /// `id` itself when new and non-empty, else a generated `call_<n>_<uuid>`.
+    pub fn unique(&mut self, id: String) -> String {
+        let id = if id.is_empty() || self.seen.contains(&id) {
+            format!("call_{}_{}", self.count, uuid::Uuid::new_v4().simple())
+        } else {
+            id
+        };
+        self.seen.insert(id.clone());
+        self.count += 1;
+        id
     }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
+}
+
+/// `CallIds::unique` over an assembled batch.
+pub fn normalize_call_ids(calls: &mut [PartialCall]) {
+    let mut ids = CallIds::default();
+    for c in calls {
+        c.id = ids.unique(std::mem::take(&mut c.id));
+    }
+}
+
+/// `v[key]` as a string, or `""`.
+pub fn str_at<'a>(v: &'a Value, key: &str) -> &'a str {
+    v.get(key).and_then(Value::as_str).unwrap_or("")
+}
+
+/// Appends at most `limit` total bytes (on a char boundary); a hostile server must not grow
+/// adapter state without bound.
+pub fn push_bounded(buf: &mut String, s: &str, limit: usize) {
+    let room = limit.saturating_sub(buf.len());
+    if s.len() <= room {
+        buf.push_str(s);
+    } else {
+        let mut end = room;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        buf.push_str(&s[..end]);
+    }
+}
+
+/// The payload of an opaque block produced by the adapter of `family`.
+pub fn own_opaque<'a>(b: &'a ContentBlock, family: &str) -> Option<&'a Value> {
+    match b {
+        ContentBlock::ProviderOpaque { provider, data } if provider == family => Some(data),
+        _ => None,
+    }
+}
+
+/// Stored tool-call arguments as a JSON object, for protocols that require one. Arguments
+/// are an object when the model produced valid JSON, else the raw text (which may parse).
+pub fn arguments_object(arguments: &Value) -> Value {
+    match arguments {
+        Value::Object(_) => arguments.clone(),
+        Value::String(s) => serde_json::from_str::<Value>(s)
+            .ok()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| Value::Object(Default::default())),
+        _ => Value::Object(Default::default()),
+    }
+}
+
+/// Stored tool-call arguments as a JSON *string*, for protocols that carry them as text: raw
+/// text passes through as-is (a malformed blob stays raw), real objects are serialized.
+pub fn arguments_string(arguments: &Value) -> String {
+    match arguments {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Whether a listed model id contains none of `markers` (lowercase fragments of families
+/// that are not chat models: embeddings, speech, image generation, …).
+pub fn is_chat_model(id: &str, markers: &[&str]) -> bool {
+    let lower = id.to_ascii_lowercase();
+    !markers.iter().any(|m| lower.contains(m))
 }
 
 /// Walks the error source chain looking for a TLS certificate failure. These surface as
@@ -267,6 +354,36 @@ mod tests {
             ids.iter().collect::<std::collections::HashSet<_>>().len(),
             3
         );
+    }
+
+    #[test]
+    fn call_ids_count_and_replace_repeats() {
+        let mut ids = CallIds::default();
+        assert_eq!(ids.unique("a".into()), "a");
+        let repeat = ids.unique("a".into());
+        assert!(repeat.starts_with("call_1_"), "{repeat}");
+        assert!(ids.unique(String::new()).starts_with("call_2_"));
+        assert_eq!(ids.count(), 3);
+    }
+
+    #[test]
+    fn bounded_push_respects_char_boundaries() {
+        let mut s = String::from("ab");
+        push_bounded(&mut s, "é€x", 5);
+        assert_eq!(s, "abé", "a 3-byte char that does not fit is not split");
+        push_bounded(&mut s, "zz", 5);
+        assert_eq!(s, "abéz");
+    }
+
+    #[test]
+    fn argument_shapes() {
+        use serde_json::json;
+        assert_eq!(arguments_object(&json!("{\"a\":1}")), json!({ "a": 1 }));
+        assert_eq!(arguments_object(&json!("not json")), json!({}));
+        assert_eq!(arguments_string(&json!({ "a": 1 })), r#"{"a":1}"#);
+        assert_eq!(arguments_string(&json!("raw {")), "raw {");
+        assert!(!is_chat_model("text-Embedding-3", &["embedding"]));
+        assert!(is_chat_model("gpt-5", &["embedding"]));
     }
 
     #[test]

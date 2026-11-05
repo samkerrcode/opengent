@@ -10,8 +10,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::common::{
-    extract_error_message, map_transport, normalize_call_ids, pump_sse, read_json, send_checked,
-    spawn_stream, status_error, PartialCall, StreamEnd, MAX_TOOL_ARG_CHARS,
+    arguments_string, extract_error_message, map_transport, normalize_call_ids, pump_sse,
+    read_json, request_timeout, send_checked, spawn_stream, status_error, PartialCall, StreamEnd,
+    MAX_TOOL_ARG_CHARS,
 };
 use super::{
     Capabilities, CompletionRequest, DiscoveredModel, ModelDiscovery, ModelProvider, ProviderEvent,
@@ -139,7 +140,10 @@ impl OpenAiCompatProvider {
         let mut req = self
             .http
             .request(method, format!("{}{path}", self.config.base_url))
-            .timeout(self.config.idle_timeout.max(self.config.connect_timeout) * 4);
+            .timeout(request_timeout(
+                self.config.connect_timeout,
+                self.config.idle_timeout,
+            ));
         if let Some(key) = &self.config.api_key {
             req = req.bearer_auth(key);
         }
@@ -332,15 +336,7 @@ impl OpenAiCompatProvider {
                     } => Some(json!({
                         "id": id,
                         "type": "function",
-                        // `arguments` must be a JSON *string*: pass raw text through as-is
-                        // (a malformed blob stays raw) and serialize only real objects.
-                        "function": {
-                            "name": name,
-                            "arguments": match arguments {
-                                Value::String(s) => s.clone(),
-                                other => other.to_string(),
-                            },
-                        },
+                        "function": { "name": name, "arguments": arguments_string(arguments) },
                     })),
                     _ => None,
                 })
@@ -535,11 +531,8 @@ impl ModelProvider for OpenAiCompatProvider {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            streaming: true,
-            tools: true,
-            parallel_tool_calls: true,
             context_window: self.config.context_window,
-            ..Default::default()
+            ..super::registry::ProviderKind::OpenAiCompatible.capabilities()
         }
     }
 

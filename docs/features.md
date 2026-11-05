@@ -43,19 +43,86 @@ be uploaded manually. Asset exports and regeneration instructions live in
 ## Providers & models
 
 Any server speaking the OpenAI Chat Completions protocol — Ollama, LM Studio, vLLM, hosted
-gateways such as OpenRouter — native **Google Gemini**, plus a built-in simulated provider
-that needs no account. Per provider: base URL (HTTPS required off-loopback), API key in the OS
+gateways such as OpenRouter — native **OpenAI** and **Google Gemini**, plus a built-in
+simulated provider that needs no account. Per provider: base URL (HTTPS required off-loopback), API key in the OS
 keychain, model discovery via `GET /models`, context window override, TLS verification mode
 (system / pinned CA / skip), and image-input policy. The model picker in the composer selects
 provider+model per message.
 
-**Provider types.** *Add provider* offers a **Type** choice (OpenAI-compatible, Google
-Gemini). Each type's label, description, default endpoint, presets, model-name examples,
+**Provider types.** *Add provider* offers a **Type** choice (OpenAI-compatible, OpenAI,
+Google Gemini). Each type's label, description, default endpoint, presets, model-name examples,
 API-key help text and whether a key is required come from Rust (`list_provider_kinds`), so
 the form never hardcodes a protocol. A type with a default endpoint is pre-named after its
 type, fills the base URL in for you (leaving it empty uses the default), and tucks Base URL
 and TLS settings behind **Advanced — proxy or custom endpoint**; the section opens on its own
 when a saved provider uses a non-default endpoint or TLS mode.
+
+**How it works (all providers).** Adapter-level capabilities (streaming, tools, parallel
+calls) are declared once per type in Rust, so resolving a model's capabilities — done on every
+model change and run start — reads the saved config in place without building an adapter,
+touching the keychain or cloning the model list. HTTP clients for *pinned CA* / *skip
+verification* TLS modes are built once per provider and reused until its TLS settings change.
+
+### OpenAI
+
+**What.** OpenAI models (GPT-4.1, GPT-5 and later, o-series) through the **Responses API**,
+with streaming, reasoning summaries in the Thinking block, parallel tool calls and image
+input. Reasoning is carried across tool calls, so the model doesn't re-derive its plan after
+every tool result.
+
+**How to use.** Create a key at [platform.openai.com](https://platform.openai.com) → *API
+keys*. In Provider settings choose *Add provider* → Type **OpenAI**, paste the key and **Save
+& test**: the model list is fetched and you pick a default model (e.g. `gpt-5-mini`). The
+endpoint defaults to `https://api.openai.com/v1`; open *Advanced* only for a proxy or a
+Responses-compatible gateway. (To use Chat Completions against OpenAI instead, add an
+*OpenAI-compatible* provider pointed at the same URL.)
+
+**How it works.** `crates/agent-core/src/providers/openai.rs`.
+- **Why Responses, not Chat Completions.** OpenAI's newer models restrict tool calling on
+  Chat Completions (GPT-5.4+ only with reasoning off; GPT-6 not at all) and expose reasoning
+  summaries only on Responses. Responses is used **statelessly**: `store: false`, the full
+  local history is sent each turn and OpenAI keeps nothing.
+- Requests go to `POST {base}/responses` with `stream: true` and the key in the
+  `Authorization` header. The system prompt is sent as `instructions`; history becomes an
+  ordered list of input items: your messages → `message` (`input_text` + `input_image`), the
+  model's text → assistant `message`, tool calls → `function_call`, results →
+  `function_call_output` (paired by `call_id`). Tools are sent with `strict: false`, since MCP
+  schemas rarely meet strict-mode rules.
+- **Reasoning models** (o-series, GPT-5+, `codex`; not `-chat` variants) get
+  `reasoning: {summary: "auto"}` and `include: ["reasoning.encrypted_content"]`. Each finished
+  `reasoning` item (encrypted content + summary) is stored as provider state at its stream
+  position and replayed verbatim next turn. Item ids are never stored or sent — with
+  `store: false` there is no server state for them to reference. An assistant message's
+  `phase` (commentary vs final answer, on newer models) is stored and replayed with it.
+- **Reasoning storage decision.** If an item would exceed the 64 KiB provider-state cap, its
+  summary is dropped (the text is kept in the Thinking block); if the encrypted content alone
+  is still too large, the item isn't stored and the model simply reasons afresh next turn.
+- Calls and reasoning items are emitted when their item finishes, so stored blocks keep the
+  server's order. A call cut off by the output limit (`status: incomplete`) is dropped rather
+  than run with truncated arguments.
+- Usage: input, output (reasoning tokens are already included) and cached input tokens.
+  `response.completed` → end of turn or tool use; `response.incomplete` → output limit, or an
+  error for the content filter; `response.failed` / `error` events → error with the server's
+  message.
+- Discovery: `GET {base}/models`, minus non-chat families (embeddings, TTS/transcription,
+  image/video generation, realtime/audio, moderation, search/deep-research, computer use,
+  legacy completions). OpenAI's listing reports no limits, so a built-in table supplies
+  per-family context windows (e.g. GPT-6 1.05M, GPT-4.1 ≈ 1M, GPT-5 272K input, o-series 200K,
+  GPT-4o 128K) plus vision and reasoning flags; your per-model setting always wins. The
+  compiler's 25%-of-window output budget is clamped to each model's real output cap so large
+  windows never trigger a rejected `max_output_tokens`.
+- The stream idle timeout is 180 s, since reasoning models can think silently for a while.
+
+*Limits:* API keys only (no Azure OpenAI endpoints, organization/project headers or OAuth).
+No server-side state (`previous_response_id` chaining, conversations, background mode) and no
+stream resume: a dropped connection fails the turn. OpenAI's built-in tools (web search, file
+search, code interpreter, computer use, remote MCP) and structured outputs aren't offered.
+Reasoning effort and verbosity are the model defaults. Context windows for models newer than
+the built-in table fall back to your setting or 8K. Images inside tool results are sent as
+text, as with other providers.
+
+Offline testing: `node scripts/dev/mock-openai-server.mjs` serves the Responses API too (see
+AGENTS.md).
 
 ### Google Gemini
 
@@ -119,7 +186,8 @@ setting (a deliberate cap) → the window the provider reports during discovery 
 support similarly combines your setting, server-reported flags and a name heuristic.
 
 **Provider state.** Some native APIs return opaque continuation data the next request must
-replay (Gemini thought signatures, Anthropic thinking signatures, OpenAI reasoning items).
+replay (Gemini thought signatures, OpenAI encrypted reasoning items, Anthropic thinking
+signatures).
 It is stored with the assistant message in stream order and replayed only to adapters of the
 same protocol; switching a chat to another provider simply drops it from that request. It
 never reaches the UI (not streamed, stripped from chat loads), is excluded from search, and
