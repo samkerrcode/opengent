@@ -6,6 +6,24 @@ planned work lives in the [README roadmap](README.md#roadmap).
 
 ## Unreleased — Phase 4 (OAuth)
 
+- Native **Google Gemini** provider (Phase 6, first item): add it with an AI Studio API key
+  (Type → Google Gemini). Uses the stable Interactions API (`/v1`) in stateless mode
+  (`store: false`), with streaming, thought summaries in the Thinking block, parallel tool
+  calls, image input, and model discovery with per-model context windows. Thought steps and
+  function-call signatures are stored as provider state and replayed verbatim, in order;
+  long thought summaries are dropped from stored state (signature kept) rather than losing
+  the block. Thought tokens are counted as output in usage. Streams that close before
+  `interaction.completed` (seen on long responses) resume from the last event id, continue
+  via `continuation_token`, or retry once — the run no longer fails. Offline mock:
+  `scripts/dev/mock-gemini-server.mjs`.
+- Provider settings: model-name examples and API-key help text now come from each provider
+  type; types with a built-in endpoint are pre-named and keep Base URL/TLS under
+  **Advanced — proxy or custom endpoint**.
+- Google-style auth errors (HTTP 400 `API_KEY_INVALID`, `UNAUTHENTICATED`,
+  `PERMISSION_DENIED`) are reported as "authentication failed — check the API key".
+- Fixed: text a model streams after a tool call in the same response no longer splits the
+  step, which gave the call a synthetic "did not complete" result and dropped its real result
+  from the next request.
 - Native provider foundation (groundwork for Phases 5–6; no new provider yet):
   - Provider continuation state (thought signatures, reasoning items) flows through the agent
     loop as ordered `ProviderOpaque` blocks: persisted with the message at its stream

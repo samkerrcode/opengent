@@ -43,17 +43,76 @@ be uploaded manually. Asset exports and regeneration instructions live in
 ## Providers & models
 
 Any server speaking the OpenAI Chat Completions protocol — Ollama, LM Studio, vLLM, hosted
-gateways such as OpenRouter — plus a built-in simulated provider that needs no account. Per
-provider: base URL (HTTPS required off-loopback), optional API key in the OS keychain, model
-discovery via `GET /models`, context window override, TLS verification mode (system / pinned CA
-/ skip), and image-input policy. The model picker in the composer selects provider+model per
-message.
+gateways such as OpenRouter — native **Google Gemini**, plus a built-in simulated provider
+that needs no account. Per provider: base URL (HTTPS required off-loopback), API key in the OS
+keychain, model discovery via `GET /models`, context window override, TLS verification mode
+(system / pinned CA / skip), and image-input policy. The model picker in the composer selects
+provider+model per message.
 
-**Provider types.** *Add provider* offers a **Type** choice once more than one protocol is
-available (native adapters land per provider; today only OpenAI-compatible is user-creatable).
-Each type's label, description, default endpoint, presets and whether an API key is required
-come from Rust (`list_provider_kinds`), so the form never hardcodes a protocol. A type with a
-default endpoint fills the base URL in for you; leaving it empty uses the default.
+**Provider types.** *Add provider* offers a **Type** choice (OpenAI-compatible, Google
+Gemini). Each type's label, description, default endpoint, presets, model-name examples,
+API-key help text and whether a key is required come from Rust (`list_provider_kinds`), so
+the form never hardcodes a protocol. A type with a default endpoint is pre-named after its
+type, fills the base URL in for you (leaving it empty uses the default), and tucks Base URL
+and TLS settings behind **Advanced — proxy or custom endpoint**; the section opens on its own
+when a saved provider uses a non-default endpoint or TLS mode.
+
+### Google Gemini
+
+**What.** Gemini models (and Gemma models served by the Gemini API) through Google's
+Interactions API, with streaming, thought summaries, parallel tool calls and image input.
+
+**How to use.** Create an API key in [Google AI Studio](https://aistudio.google.com) → *Get
+API key*. In Provider settings choose *Add provider* → Type **Google Gemini**, paste the key and
+**Save & test**: the model list is fetched and you pick a default model (e.g.
+`gemini-flash-latest`). The endpoint defaults to the stable API
+(`https://generativelanguage.googleapis.com/v1`); open *Advanced* only for a proxy or to use
+`…/v1beta`.
+
+**How it works.** `crates/agent-core/src/providers/gemini.rs`.
+- Requests go to `POST {base}/interactions` with `store: false` (Google keeps nothing; the
+  chat history stays local and the full history is sent each turn) and `stream: true`. The
+  key is sent in the `x-goog-api-key` header, never in the URL.
+- History becomes an ordered list of steps: your messages → `user_input` (text + images), the
+  model's text → `model_output`, tool calls → `function_call` (arguments as an object), tool
+  results → `function_result` (with the tool name).
+- Reasoning arrives as `thought` steps; summaries (`thinking_summaries: "auto"`, not requested
+  for Gemma models) stream into the Thinking block. Google requires model steps to be
+  replayed exactly as received, so each `thought` step is stored verbatim as provider state
+  and re-sent at its original position, and a signature on a `function_call` step is stored
+  and re-attached to that call. Steps are emitted as they finish, so interleaved
+  thought/call sequences keep their order.
+- **Thought storage decision.** The complete thought step (signature + summary) is stored,
+  because the API asks for verbatim replay. When a long summary would push the block past the
+  64 KiB provider-state cap, the summary is dropped and only the signature is kept: the
+  signature is what the server validates, and the readable summary is still stored in the
+  message's Thinking block. A thought step with neither signature nor summary is not stored.
+- Usage: input, output **including thought tokens** (billed as output), and cached tokens.
+  Status `completed`/`requires_action` → end of turn or tool use, `incomplete` → output limit,
+  `failed`/`cancelled` → error.
+- **Stream recovery.** Google's stream can close before `interaction.completed` on long
+  responses. The adapter recovers transparently: a `requires_continuation` status resends
+  the request with its `continuation_token`; a dropped connection resumes with
+  `GET /interactions/{id}?last_event_id=…` (each event carries a resumable id; skipped when
+  `store: false` yields no interaction id); and as a last resort the interaction is retried
+  once. Only when all of that fails does the run error.
+- Discovery pages through `GET {base}/models`, keeps chat models (those supporting
+  `generateContent`, minus embedding, TTS, image/video/music and similar families), and caches
+  each model's input-token limit as its context window and its `thinking` flag. Listed models
+  count as vision-capable unless you set *Image input* to *Not supported*.
+- A bad key (Google answers HTTP 400 `API_KEY_INVALID`) is reported as an authentication
+  failure. The stream idle timeout is 180 s, since Pro models can think silently for a while.
+
+*Limits:* AI Studio API keys only — no Vertex AI, OAuth or ADC. No server-side state
+(`previous_interaction_id`) or background runs; a resumed/restarted stream may briefly
+repeat output the earlier connection already delivered. Google's built-in tools (Search, code execution,
+URL context, file search, MCP) and structured output aren't offered. Thinking level is the
+server default. Images inside tool results are sent as text placeholders, as with other
+providers (sending them as image content is a possible follow-up). Mid-turn switches from
+another provider into Gemini (e.g. an agent fallback during a tool loop) replay the earlier
+calls without signatures; whether Google accepts that for every model is unverified.
+
+Offline testing: `node scripts/dev/mock-gemini-server.mjs` (see AGENTS.md).
 
 **Context windows.** Resolution per model: your per-model override → your provider-wide
 setting (a deliberate cap) → the window the provider reports during discovery → 8K. Image

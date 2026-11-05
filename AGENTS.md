@@ -35,6 +35,12 @@ Contributor guidelines: see CONTRIBUTING.md. Security scope: SECURITY.md.
   (`OPENGENT_TEST_MCP_COMMAND="npx -y @modelcontextprotocol/server-everything"`); provider round trip
   (`OPENGENT_TEST_OPENAI_BASE_URL=http://localhost:8787/v1` with `node scripts/dev/mock-openai-server.mjs`).
 - `node scripts/dev/mock-openai-server.mjs` – fake OpenAI-compatible server for manual UI testing (`/v1`, models `mock-fast`, `mock-slow`; API key `bad` triggers a 401). Send "use tool <name>" to exercise tool calling.
+- `node scripts/dev/mock-gemini-server.mjs [port]` – fake Gemini Interactions API (`http://localhost:8789/v1`, models
+  `mock-gemini-fast`, `mock-gemini-thinking`, `mock-gemini-slow`; any key except `bad`, which gets Google's 400
+  `API_KEY_INVALID`). "use tool <name>" returns a signed `function_call`; it rejects requests whose replayed thought/call
+  signatures were altered or reordered. Live/offline round trip: `OPENGENT_TEST_GEMINI_API_KEY=x
+  OPENGENT_TEST_GEMINI_BASE_URL=http://localhost:8789/v1 OPENGENT_TEST_GEMINI_MODEL=mock-gemini-thinking
+  cargo test -p agent-core --test provider_store_live -- --ignored gemini` (drop the base URL/model for real Gemini).
 - `node scripts/dev/mock-mcp-server.mjs` – fake MCP server (tools: echo, add, get_time, fail, slow).
   Stdio by default (use `node <abs path>` as a stdio command); `--http 8788` serves Streamable HTTP at `/mcp`; `--many 50` adds filler tools for on-demand loading tests.
 

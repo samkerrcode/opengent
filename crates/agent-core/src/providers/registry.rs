@@ -13,6 +13,7 @@ use ts_rs::TS;
 
 use super::capabilities::{looks_like_vision_model, ImageSupport};
 use super::fake::FakeProvider;
+use super::gemini::{self, GeminiConfig, GeminiProvider};
 use super::openai_compat::{normalize_base_url, OpenAiCompatConfig, OpenAiCompatProvider};
 use super::{Capabilities, DiscoveredModel, ModelProvider};
 use crate::config::DataRoot;
@@ -28,6 +29,8 @@ pub const SIMULATED_PROVIDER_ID: &str = "simulated";
 pub enum ProviderKind {
     /// Any server speaking the OpenAI Chat Completions protocol (Ollama, LM Studio, vLLM, gateways).
     OpenAiCompatible,
+    /// Google Gemini via the Interactions API with a Google AI Studio API key.
+    GoogleGemini,
     Simulated,
 }
 
@@ -40,7 +43,11 @@ struct KindMeta {
     default_base_url: Option<&'static str>,
     base_url_hint: &'static str,
     base_url_placeholder: &'static str,
+    /// Example model names for the default-model field.
+    model_placeholder: &'static str,
     requires_api_key: bool,
+    /// Help text under the API key field (where to get one); empty = none.
+    api_key_hint: &'static str,
     /// Whether the "request token usage" toggle applies (OpenAI-compatible only).
     usage_option: bool,
     user_creatable: bool,
@@ -55,7 +62,9 @@ const OPENAI_COMPATIBLE: KindMeta = KindMeta {
     default_base_url: None,
     base_url_hint: "OpenAI-compatible, ending in /v1",
     base_url_placeholder: "http://localhost:11434/v1",
+    model_placeholder: "e.g. llama3.1, gpt-4o-mini",
     requires_api_key: false,
+    api_key_hint: "Only needed for hosted gateways or servers started with an API key.",
     usage_option: true,
     user_creatable: true,
     presets: &[
@@ -66,24 +75,46 @@ const OPENAI_COMPATIBLE: KindMeta = KindMeta {
     ],
 };
 
+const GOOGLE_GEMINI: KindMeta = KindMeta {
+    label: "Google Gemini",
+    description: "Gemini models through Google's Gemini API (Interactions API), using an API key \
+                  from Google AI Studio.",
+    default_base_url: Some(gemini::DEFAULT_BASE_URL),
+    base_url_hint: "Gemini API root, ending in /v1",
+    base_url_placeholder: gemini::DEFAULT_BASE_URL,
+    model_placeholder: "e.g. gemini-flash-latest, gemini-pro-latest",
+    requires_api_key: true,
+    api_key_hint: "Create a key in Google AI Studio (aistudio.google.com → Get API key).",
+    usage_option: false,
+    user_creatable: true,
+    presets: &[],
+};
+
 const SIMULATED: KindMeta = KindMeta {
     label: "Simulated",
     description: "Built-in offline provider for trying the app.",
     default_base_url: None,
     base_url_hint: "",
     base_url_placeholder: "",
+    model_placeholder: "",
     requires_api_key: false,
+    api_key_hint: "",
     usage_option: false,
     user_creatable: false,
     presets: &[],
 };
 
 impl ProviderKind {
-    pub const ALL: [ProviderKind; 2] = [ProviderKind::OpenAiCompatible, ProviderKind::Simulated];
+    pub const ALL: [ProviderKind; 3] = [
+        ProviderKind::OpenAiCompatible,
+        ProviderKind::GoogleGemini,
+        ProviderKind::Simulated,
+    ];
 
     fn meta(self) -> &'static KindMeta {
         match self {
             ProviderKind::OpenAiCompatible => &OPENAI_COMPATIBLE,
+            ProviderKind::GoogleGemini => &GOOGLE_GEMINI,
             ProviderKind::Simulated => &SIMULATED,
         }
     }
@@ -106,7 +137,9 @@ impl ProviderKind {
             default_base_url: m.default_base_url.map(Into::into),
             base_url_hint: m.base_url_hint.into(),
             base_url_placeholder: m.base_url_placeholder.into(),
+            model_placeholder: m.model_placeholder.into(),
             requires_api_key: m.requires_api_key,
+            api_key_hint: m.api_key_hint.into(),
             usage_option: m.usage_option,
             presets: m
                 .presets
@@ -140,7 +173,10 @@ pub struct KindSpec {
     pub default_base_url: Option<String>,
     pub base_url_hint: String,
     pub base_url_placeholder: String,
+    pub model_placeholder: String,
     pub requires_api_key: bool,
+    /// Help text under the API key field; empty = none.
+    pub api_key_hint: String,
     pub usage_option: bool,
     pub presets: Vec<ProviderPreset>,
 }
@@ -516,6 +552,12 @@ impl ProviderStore {
                 c.api_key = key;
                 Arc::new(OpenAiCompatProvider::new(c, http))
             }
+            ProviderKind::GoogleGemini => {
+                let mut c = GeminiConfig::new(config.id.clone(), config.base_url.clone());
+                let (key, http) = self.connection(config, purpose)?;
+                c.api_key = key;
+                Arc::new(GeminiProvider::new(c, http))
+            }
         })
     }
 
@@ -813,6 +855,35 @@ mod tests {
             .unwrap();
         assert!(oc.default_base_url.is_none() && !oc.requires_api_key && oc.usage_option);
         assert!(!oc.presets.is_empty());
+        let g = kinds
+            .iter()
+            .find(|k| k.kind == ProviderKind::GoogleGemini)
+            .unwrap();
+        assert_eq!(
+            g.default_base_url.as_deref(),
+            Some(gemini::DEFAULT_BASE_URL)
+        );
+        assert!(g.requires_api_key && !g.usage_option);
+        assert!(!g.model_placeholder.is_empty() && !g.api_key_hint.is_empty());
+    }
+
+    #[test]
+    fn gemini_requires_key_defaults_url_and_reports_family() {
+        let (s, tmp) = store();
+        let mut g = input("Gemini");
+        g.kind = ProviderKind::GoogleGemini;
+        g.base_url = String::new();
+        g.api_key = None;
+        assert!(s.save(g.clone()).is_err(), "key required");
+        g.api_key = Some("AIza-test".into());
+        let saved = s.save(g).unwrap();
+        assert_eq!(saved.base_url, gemini::DEFAULT_BASE_URL);
+        assert_eq!(s.build(&saved.id).unwrap().family(), Some(gemini::FAMILY));
+        let caps = s
+            .capabilities_for(&saved.id, "gemini-flash-latest")
+            .unwrap();
+        assert!(caps.tools && caps.images, "name heuristic covers gemini");
+        std::fs::remove_dir_all(tmp).unwrap();
     }
 
     #[tokio::test]
