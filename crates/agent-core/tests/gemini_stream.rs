@@ -12,6 +12,9 @@ use agent_core::domain::{ContentBlock, Message, Role, StopReason};
 use agent_core::providers::gemini::{GeminiConfig, GeminiProvider, FAMILY};
 use agent_core::providers::{CompletionRequest, ModelProvider};
 use serde_json::{json, Value};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 
 fn request() -> CompletionRequest {
     CompletionRequest {
@@ -117,7 +120,7 @@ async fn invalid_key_maps_to_auth_hint() {
 }
 
 #[tokio::test]
-async fn missing_completion_is_an_error() {
+async fn missing_completion_fails_after_retry() {
     let body: &[u8] = br#"event: step.start
 data: {"index":0,"step":{"type":"model_output","content":[{"type":"text","text":"partial"}]},"event_type":"step.start"}
 
@@ -126,7 +129,9 @@ data: {"index":0,"step":{"type":"model_output","content":[{"type":"text","text":
     let c = common::collect(&p, &request()).await;
     assert_eq!(c.text, "partial");
     assert_eq!(c.done, None);
-    assert!(c.err.unwrap().contains("before the interaction completed"));
+    // No interaction id, so the adapter retries the create; the one-shot server is gone by
+    // then, so some error (connect or truncated stream) must surface, not a silent success.
+    assert!(c.err.is_some());
 }
 
 const TOOL_BODY: &[u8] = br#"event: step.start
@@ -258,4 +263,130 @@ async fn discovery_lists_chat_models() {
     assert!(raw
         .to_ascii_lowercase()
         .contains("x-goog-api-key: test-key"));
+}
+
+/// Accepts one connection per entry, serving `responses[i]` (an SSE body) to request `i`.
+/// Returns the origin and every captured request.
+async fn serve_many(responses: Vec<&'static str>) -> (String, oneshot::Receiver<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let (tx, rx) = oneshot::channel();
+    tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for body in responses {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            let mut buf = vec![0u8; 64 * 1024];
+            let mut req = Vec::new();
+            loop {
+                match sock.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        req.extend_from_slice(&buf[..n]);
+                        if let Some(pos) = req.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&req[..pos]).to_string();
+                            let len = head
+                                .lines()
+                                .find_map(|l| {
+                                    let (k, v) = l.split_once(':')?;
+                                    k.eq_ignore_ascii_case("content-length").then_some(v)
+                                })
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            if req.len() >= pos + 4 + len {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            requests.push(String::from_utf8_lossy(&req).into_owned());
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            if sock.write_all(head.as_bytes()).await.is_err()
+                || sock.write_all(body.as_bytes()).await.is_err()
+            {
+                break;
+            }
+        }
+        let _ = tx.send(requests);
+    });
+    (origin, rx)
+}
+
+fn provider_at(origin: String) -> GeminiProvider {
+    let mut config = GeminiConfig::new("g", format!("{origin}/v1"));
+    config.api_key = Some("test-key".into());
+    GeminiProvider::new(config, agent_core::http::client().unwrap())
+}
+
+#[tokio::test]
+async fn dropped_stream_resumes_from_last_event_id() {
+    let truncated: &'static str = r#"event: interaction.created
+data: {"interaction":{"id":"i_1","status":"in_progress"},"event_id":"e0","event_type":"interaction.created"}
+
+event: step.start
+data: {"index":0,"step":{"type":"model_output","content":[{"type":"text","text":"par"}]},"event_id":"e1","event_type":"step.start"}
+
+"#;
+    let resumed: &'static str = r#"event: step.delta
+data: {"index":0,"delta":{"type":"text","text":"tial"},"event_id":"e2","event_type":"step.delta"}
+
+event: step.stop
+data: {"index":0,"event_id":"e3","event_type":"step.stop"}
+
+event: interaction.completed
+data: {"interaction":{"status":"completed","usage":{"total_input_tokens":4}},"event_type":"interaction.completed"}
+
+"#;
+    let (origin, requests) = serve_many(vec![truncated, resumed]).await;
+    let c = common::collect(&provider_at(origin), &request()).await;
+    let requests = requests.await.unwrap();
+    assert_eq!(c.err, None, "requests: {requests:?}");
+    assert_eq!(c.text, "partial");
+    assert_eq!(c.done, Some(StopReason::EndTurn));
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].starts_with("GET /v1/interactions/i_1?stream=true&last_event_id=e1 "),
+        "{}",
+        requests[1]
+    );
+}
+
+#[tokio::test]
+async fn requires_continuation_resends_the_token() {
+    let first: &'static str = r#"event: interaction.created
+data: {"interaction":{"id":"i_1","status":"in_progress"},"event_id":"e0","event_type":"interaction.created"}
+
+event: interaction.completed
+data: {"interaction":{"status":"requires_continuation","continuation_token":"tok-42"},"event_type":"interaction.completed"}
+
+"#;
+    let rest: &'static str = r#"event: step.start
+data: {"index":0,"step":{"type":"model_output","content":[{"type":"text","text":"done."}]},"event_type":"step.start"}
+
+event: step.stop
+data: {"index":0,"event_type":"step.stop"}
+
+event: interaction.completed
+data: {"interaction":{"status":"completed"},"event_type":"interaction.completed"}
+
+"#;
+    let (origin, requests) = serve_many(vec![first, rest]).await;
+    let c = common::collect(&provider_at(origin), &request()).await;
+    let requests = requests.await.unwrap();
+    assert_eq!(c.err, None);
+    assert_eq!(c.text, "done.");
+    assert_eq!(c.done, Some(StopReason::EndTurn));
+    let second: Value =
+        serde_json::from_str(&requests[1][requests[1].find("\r\n\r\n").unwrap() + 4..]).unwrap();
+    assert_eq!(second["continuation_token"], "tok-42");
+    assert!(
+        requests[1].starts_with("POST /v1/interactions "),
+        "{}",
+        requests[1]
+    );
 }

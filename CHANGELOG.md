@@ -12,7 +12,9 @@ planned work lives in the [README roadmap](README.md#roadmap).
   calls, image input, and model discovery with per-model context windows. Thought steps and
   function-call signatures are stored as provider state and replayed verbatim, in order;
   long thought summaries are dropped from stored state (signature kept) rather than losing
-  the block. Thought tokens are counted as output in usage. Offline mock:
+  the block. Thought tokens are counted as output in usage. Streams that close before
+  `interaction.completed` (seen on long responses) resume from the last event id, continue
+  via `continuation_token`, or retry once — the run no longer fails. Offline mock:
   `scripts/dev/mock-gemini-server.mjs`.
 - Provider settings: model-name examples and API-key help text now come from each provider
   type; types with a built-in endpoint are pre-named and keep Base URL/TLS under

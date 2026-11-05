@@ -90,6 +90,12 @@ API key*. In Provider settings choose *Add provider* → Type **Google Gemini**,
 - Usage: input, output **including thought tokens** (billed as output), and cached tokens.
   Status `completed`/`requires_action` → end of turn or tool use, `incomplete` → output limit,
   `failed`/`cancelled` → error.
+- **Stream recovery.** Google's stream can close before `interaction.completed` on long
+  responses. The adapter recovers transparently: a `requires_continuation` status resends
+  the request with its `continuation_token`; a dropped connection resumes with
+  `GET /interactions/{id}?last_event_id=…` (each event carries a resumable id; skipped when
+  `store: false` yields no interaction id); and as a last resort the interaction is retried
+  once. Only when all of that fails does the run error.
 - Discovery pages through `GET {base}/models`, keeps chat models (those supporting
   `generateContent`, minus embedding, TTS, image/video/music and similar families), and caches
   each model's input-token limit as its context window and its `thinking` flag. Listed models
@@ -98,8 +104,8 @@ API key*. In Provider settings choose *Add provider* → Type **Google Gemini**,
   failure. The stream idle timeout is 180 s, since Pro models can think silently for a while.
 
 *Limits:* AI Studio API keys only — no Vertex AI, OAuth or ADC. No server-side state
-(`previous_interaction_id`), background runs or stream resume; a `requires_continuation`
-response is reported as an error to retry. Google's built-in tools (Search, code execution,
+(`previous_interaction_id`) or background runs; a resumed/restarted stream may briefly
+repeat output the earlier connection already delivered. Google's built-in tools (Search, code execution,
 URL context, file search, MCP) and structured output aren't offered. Thinking level is the
 server default. Images inside tool results are sent as text placeholders, as with other
 providers (sending them as image content is a possible follow-up). Mid-turn switches from

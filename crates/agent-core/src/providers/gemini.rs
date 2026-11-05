@@ -87,22 +87,37 @@ pub struct GeminiProvider {
     http: reqwest::Client,
 }
 
+/// The key travels in a header, never the query string, so it can't leak into logs.
+fn build_request(
+    config: &GeminiConfig,
+    http: &reqwest::Client,
+    method: reqwest::Method,
+    url: String,
+    timeout: Duration,
+) -> reqwest::RequestBuilder {
+    let mut req = http
+        .request(method, url)
+        .timeout(timeout)
+        .header("Api-Revision", API_REVISION);
+    if let Some(key) = &config.api_key {
+        req = req.header("x-goog-api-key", key);
+    }
+    req
+}
+
 impl GeminiProvider {
     pub fn new(config: GeminiConfig, http: reqwest::Client) -> Self {
         Self { config, http }
     }
 
     fn request(&self, method: reqwest::Method, url: String) -> reqwest::RequestBuilder {
-        // The key travels in a header, never the query string, so it can't leak into logs.
-        let mut req = self
-            .http
-            .request(method, url)
-            .timeout(self.config.idle_timeout.max(self.config.connect_timeout) * 4)
-            .header("Api-Revision", API_REVISION);
-        if let Some(key) = &self.config.api_key {
-            req = req.header("x-goog-api-key", key);
-        }
-        req
+        build_request(
+            &self.config,
+            &self.http,
+            method,
+            url,
+            self.config.idle_timeout.max(self.config.connect_timeout) * 4,
+        )
     }
 
     /// Builds the `interactions.create` body. Pure, so the step mapping is unit-tested.
@@ -335,30 +350,11 @@ impl ModelProvider for GeminiProvider {
         cancel: CancellationToken,
     ) -> Result<mpsc::Receiver<ProviderEvent>> {
         let (tx, rx) = mpsc::channel(PROVIDER_EVENT_BUFFER);
-        let req = self
-            .request(
-                reqwest::Method::POST,
-                format!("{}/interactions", self.config.base_url),
-            )
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .json(&Self::build_body(request));
+        let base_body = Self::build_body(request);
         let config = self.config.clone();
+        let http = self.http.clone();
         spawn_stream(tx.clone(), cancel.clone(), async move {
-            let resp = send_checked(req, &config.base_url, config.connect_timeout).await?;
-            let mut state = StreamState::default();
-            let end = pump_sse(resp, config.idle_timeout, &cancel, &tx, |ev, out| {
-                state.handle(ev, out)
-            })
-            .await?;
-            if end == StreamEnd::Abandoned {
-                return Ok(());
-            }
-            for ev in state.finish()? {
-                if tx.send(ev).await.is_err() {
-                    break;
-                }
-            }
-            Ok(())
+            run_interactions(&config, &http, base_body, &tx, cancel).await
         });
         Ok(rx)
     }
@@ -400,6 +396,152 @@ impl ModelProvider for GeminiProvider {
     }
 }
 
+/// Reconnects after a dropped stream; a clean terminal event ends the loop.
+const MAX_RESUMES: usize = 8;
+/// Full redoes of the interaction itself (last resort — the model regenerates everything
+/// already streamed).
+const MAX_RESTARTS: usize = 1;
+/// How one stream connection ended.
+#[derive(Debug)]
+enum End {
+    /// Terminal status reached; these tail events (usage, `Done`) finish the run.
+    Complete(Vec<ProviderEvent>),
+    /// `requires_continuation` — resend the create request with this token; the events are
+    /// steps that closed at the end of the current stream.
+    Continue(String, Vec<ProviderEvent>),
+    /// The body closed (or the connection failed) before `interaction.completed`.
+    Resume,
+}
+
+/// Drives `interactions.create`, recovering from the ways Google's stream can end before
+/// `interaction.completed` (a real issue on long decodes):
+///
+/// 1. `requires_continuation` — resend the same request with `continuation_token`.
+/// 2. Dropped connection — resume with `GET /interactions/{id}?stream=true&last_event_id=…`,
+///    which replays only events after the last one received. Needs `store: false` to still
+///    carry an interaction id; when it doesn't (or resume fails), falls through to 3.
+/// 3. One full retry of the interaction — better a duplicate answer than a failed run.
+async fn run_interactions(
+    config: &GeminiConfig,
+    http: &reqwest::Client,
+    mut body: Value,
+    tx: &mpsc::Sender<ProviderEvent>,
+    cancel: CancellationToken,
+) -> Result<()> {
+    enum Conn {
+        Create,
+        Resume { id: String, last: String },
+    }
+    let create = |body: &Value| {
+        build_request(
+            config,
+            http,
+            reqwest::Method::POST,
+            format!("{}/interactions", config.base_url),
+            config.idle_timeout.max(config.connect_timeout) * 4,
+        )
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .json(body)
+    };
+    let resume = |id: &str, last: &str| -> Result<reqwest::RequestBuilder> {
+        let mut url = reqwest::Url::parse(&format!("{}/interactions/{id}", config.base_url))
+            .map_err(|e| Error::InvalidInput(format!("invalid interaction URL: {e}")))?;
+        url.query_pairs_mut()
+            .append_pair("stream", "true")
+            .append_pair("last_event_id", last);
+        Ok(build_request(
+            config,
+            http,
+            reqwest::Method::GET,
+            url.into(),
+            config.idle_timeout.max(config.connect_timeout) * 4,
+        )
+        .header(reqwest::header::ACCEPT, "text/event-stream"))
+    };
+
+    let mut state = StreamState::default();
+    let mut conn = Conn::Create;
+    let mut resumes = 0;
+    let mut restarts = 0;
+    loop {
+        let resuming = !matches!(conn, Conn::Create);
+        let req = match &conn {
+            Conn::Create => create(&body),
+            Conn::Resume { id, last } => match resume(id, last) {
+                Ok(r) => r,
+                Err(_) => return Err(Error::Provider("could not resume the stream".into())),
+            },
+        };
+        let resp = match send_checked(req, &config.base_url, config.connect_timeout).await {
+            Ok(r) => r,
+            // Resuming is best-effort (store:false may not retain the interaction): a failed
+            // resume GET retries the interaction instead of failing the run.
+            Err(e) if resuming => {
+                tracing::debug!(error = %e, "stream resume failed; restarting the interaction");
+                conn = Conn::Create;
+                state.reset();
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        let end = match pump_sse(resp, config.idle_timeout, &cancel, tx, |ev, out| {
+            state.handle(ev, out)
+        })
+        .await
+        {
+            Ok(StreamEnd::Abandoned) => return Ok(()),
+            Ok(StreamEnd::Eof) => state.end_of_stream()?,
+            // Idle timeout / transport error mid-stream: resume like a dropped connection.
+            Err(_) => End::Resume,
+        };
+        match end {
+            End::Complete(events) => {
+                for ev in events {
+                    if tx.send(ev).await.is_err() {
+                        break;
+                    }
+                }
+                return Ok(());
+            }
+            End::Continue(token, events) => {
+                for ev in events {
+                    if tx.send(ev).await.is_err() {
+                        return Ok(());
+                    }
+                }
+                body["continuation_token"] = json!(token);
+                state.reset();
+                conn = Conn::Create;
+            }
+            End::Resume => {
+                let target = match (&state.interaction_id, &state.last_event_id) {
+                    (Some(id), Some(last)) if resumes < MAX_RESUMES => {
+                        resumes += 1;
+                        Some(Conn::Resume {
+                            id: id.clone(),
+                            last: last.clone(),
+                        })
+                    }
+                    _ => None,
+                };
+                match target {
+                    Some(c) => conn = c,
+                    None if restarts < MAX_RESTARTS => {
+                        restarts += 1;
+                        state.reset();
+                        conn = Conn::Create;
+                    }
+                    None => {
+                        return Err(Error::Provider(
+                            "stream ended before the interaction completed".into(),
+                        ))
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// A step between `step.start` and `step.stop`.
 enum OpenStep {
     /// The step object as received (unknown fields preserved) plus streamed deltas.
@@ -420,14 +562,21 @@ enum OpenStep {
 }
 
 /// Interactions SSE state machine. Thought and call steps are emitted when they stop, so
-/// stored blocks keep the exact order the server produced them in.
+/// stored blocks keep the exact order the server produced them in. The resume fields let a
+/// dropped stream continue where it left off; `emitted` guards against the server
+/// re-delivering a closed step on a resumed or continued stream.
 #[derive(Default)]
 struct StreamState {
     open: BTreeMap<u64, OpenStep>,
     call_ids: HashSet<String>,
+    /// Call ids already emitted as `ToolCall`, across connections.
+    emitted: HashSet<String>,
     calls: usize,
     usage: Option<Usage>,
     status: Option<String>,
+    interaction_id: Option<String>,
+    last_event_id: Option<String>,
+    continuation: Option<String>,
 }
 
 fn str_at<'a>(v: &'a Value, key: &str) -> &'a str {
@@ -445,6 +594,14 @@ impl StreamState {
         let Ok(v) = serde_json::from_str::<Value>(&ev.data) else {
             return Ok(()); // keep-alives and anything we don't model
         };
+        // Resume anchor: every event carries an id the stream can restart after.
+        if let Some(id) = v
+            .get("event_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            self.last_event_id = Some(id.to_owned());
+        }
         let kind = v
             .get("event_type")
             .and_then(Value::as_str)
@@ -452,6 +609,13 @@ impl StreamState {
             .unwrap_or("");
         let index = v.get("index").and_then(Value::as_u64).unwrap_or(0);
         match kind {
+            "interaction.created" => {
+                // `id` may be absent under store:false — resume is skipped then.
+                let id = str_at(v.get("interaction").unwrap_or(&Value::Null), "id");
+                if !id.is_empty() {
+                    self.interaction_id = Some(id.to_owned());
+                }
+            }
             "step.start" => self.start(index, v.get("step").unwrap_or(&Value::Null), out),
             "step.delta" => self.delta(index, v.get("delta").unwrap_or(&Value::Null), out),
             "step.stop" => {
@@ -464,6 +628,10 @@ impl StreamState {
                 self.status = Some(str_at(interaction, "status").to_owned());
                 if let Some(u) = interaction.get("usage") {
                     self.usage = Some(parse_usage(u));
+                }
+                let token = str_at(interaction, "continuation_token");
+                if !token.is_empty() {
+                    self.continuation = Some(token.to_owned());
                 }
             }
             "error" => {
@@ -479,7 +647,8 @@ impl StreamState {
     }
 
     fn start(&mut self, index: u64, step: &Value, out: &mut Vec<ProviderEvent>) {
-        if self.open.len() >= MAX_OPEN_STEPS {
+        // A resumed stream may redeliver the start of a step still open.
+        if self.open.len() >= MAX_OPEN_STEPS || self.open.contains_key(&index) {
             return;
         }
         // `step.start` already carries content: the first text chunk, the first summary
@@ -627,6 +796,10 @@ impl StreamState {
                     id = format!("call_{}_{}", self.calls, uuid::Uuid::new_v4().simple());
                 }
                 self.call_ids.insert(id.clone());
+                // A resumed/continued stream may re-close a call already emitted.
+                if !self.emitted.insert(id.clone()) {
+                    return;
+                }
                 self.calls += 1;
                 if !signature.is_empty() {
                     out.push(ProviderEvent::Opaque {
@@ -648,18 +821,28 @@ impl StreamState {
         }
     }
 
-    /// End of body: close steps the server left open, then report usage and the outcome.
-    fn finish(mut self) -> Result<Vec<ProviderEvent>> {
+    /// Forgets this connection's open steps and outcome while keeping the dedup sets; used
+    /// before resending the create request (continuation or a full retry), which starts a
+    /// new interaction.
+    fn reset(&mut self) {
+        self.open.clear();
+        self.status = None;
+        self.usage = None;
+        self.continuation = None;
+        self.interaction_id = None;
+        self.last_event_id = None;
+    }
+
+    /// The connection closed: either a terminal outcome or a signal to recover.
+    fn end_of_stream(&mut self) -> Result<End> {
         let Some(status) = self.status.take() else {
-            return Err(Error::Provider(
-                "stream ended before the interaction completed".into(),
-            ));
+            return Ok(End::Resume);
         };
         let mut out = Vec::new();
         for (_, step) in std::mem::take(&mut self.open) {
             self.close(step, &mut out);
         }
-        let reason = match status.as_str() {
+        match status.as_str() {
             "failed" => {
                 return Err(Error::Provider(
                     "Gemini reported the interaction failed".into(),
@@ -667,21 +850,30 @@ impl StreamState {
             }
             "cancelled" => return Err(Error::Provider("Gemini cancelled the interaction".into())),
             "requires_continuation" => {
-                return Err(Error::Provider(
-                    "Gemini paused a long response for continuation, which is not supported yet \
-                     — retry, or lower the output length"
-                        .into(),
-                ))
+                return match self.continuation.take() {
+                    Some(token) if !token.is_empty() => Ok(End::Continue(token, out)),
+                    _ => Err(Error::Provider(
+                        "Gemini paused a long response for continuation but sent no \
+                         continuation token — retry the message"
+                            .into(),
+                    )),
+                };
             }
-            _ if self.calls > 0 => StopReason::ToolUse,
-            "incomplete" => StopReason::MaxTokens,
-            _ => StopReason::EndTurn,
+            _ => {}
+        }
+        let reason = if self.calls > 0 {
+            StopReason::ToolUse
+        } else if status == "incomplete" {
+            StopReason::MaxTokens
+        } else {
+            StopReason::EndTurn
         };
-        if let Some(u) = self.usage {
+        // `out` holds events from steps closed at end of body; they precede usage and Done.
+        if let Some(u) = self.usage.take() {
             out.push(ProviderEvent::Usage(u));
         }
         out.push(ProviderEvent::Done(reason));
-        Ok(out)
+        Ok(End::Complete(out))
     }
 }
 
@@ -877,7 +1069,7 @@ mod tests {
         }
     }
 
-    fn run(events: Vec<SseEvent>) -> (Vec<ProviderEvent>, Result<Vec<ProviderEvent>>) {
+    fn run(events: Vec<SseEvent>) -> (Vec<ProviderEvent>, Result<End>) {
         let mut state = StreamState::default();
         let mut out = Vec::new();
         for ev in events {
@@ -885,8 +1077,16 @@ mod tests {
                 return (out, Err(e));
             }
         }
-        let end = state.finish();
+        let end = state.end_of_stream();
         (out, end)
+    }
+
+    /// Unwraps `End::Complete` into its event tail.
+    fn complete(end: Result<End>) -> Vec<ProviderEvent> {
+        match end {
+            Ok(End::Complete(events)) => events,
+            _ => panic!("expected End::Complete"),
+        }
     }
 
     fn completed(status: &str) -> SseEvent {
@@ -903,7 +1103,7 @@ mod tests {
         let (out, end) = run(vec![
             sse(
                 "interaction.created",
-                json!({ "interaction": { "status": "in_progress" } }),
+                json!({ "interaction": { "status": "in_progress", "id": "i1" }, "event_id": "e0" }),
             ),
             sse(
                 "step.start",
@@ -932,7 +1132,7 @@ mod tests {
             sse("step.stop", json!({ "index": 1 })),
             completed("completed"),
         ]);
-        let end = end.unwrap();
+        let end = complete(end);
         assert_eq!(
             out,
             vec![
@@ -1029,7 +1229,7 @@ mod tests {
             ProviderEvent::Opaque { data, .. } if data == &json!({ "call_signature": { "id": "a", "signature": "CS" } })
         ));
         assert_eq!(
-            end.unwrap().last(),
+            complete(end).last(),
             Some(&ProviderEvent::Done(StopReason::ToolUse))
         );
     }
@@ -1038,24 +1238,33 @@ mod tests {
     fn status_mapping() {
         let done = |status: &str| run(vec![completed(status)]).1;
         assert_eq!(
-            done("incomplete").unwrap().last(),
+            complete(done("incomplete")).last(),
             Some(&ProviderEvent::Done(StopReason::MaxTokens))
         );
         assert_eq!(
-            done("completed").unwrap().last(),
+            complete(done("completed")).last(),
             Some(&ProviderEvent::Done(StopReason::EndTurn))
         );
         for bad in ["failed", "cancelled", "requires_continuation"] {
             assert!(done(bad).is_err(), "{bad}");
         }
+        // A truncated stream (no completed event) asks the driver to resume.
         let (_, end) = run(vec![sse(
             "step.start",
             json!({ "index": 0, "step": { "type": "model_output" } }),
         )]);
-        assert!(end
-            .unwrap_err()
-            .to_string()
-            .contains("before the interaction completed"));
+        assert!(matches!(end, Ok(End::Resume)));
+    }
+
+    #[test]
+    fn requires_continuation_resends_with_the_token() {
+        let (out, end) = run(vec![sse(
+            "interaction.completed",
+            json!({ "interaction": { "status": "requires_continuation",
+                "continuation_token": "tok-1" } }),
+        )]);
+        assert!(out.is_empty());
+        assert!(matches!(end, Ok(End::Continue(t, _)) if t == "tok-1"));
     }
 
     #[test]
