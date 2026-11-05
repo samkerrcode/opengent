@@ -1,14 +1,16 @@
 //! Opt-in: exercises ProviderStore -> adapter -> RunCoordinator against a running
 //! OpenAI-compatible server (e.g. `node scripts/dev/mock-openai-server.mjs`).
 //! Set OPENGENT_TEST_OPENAI_BASE_URL (and optionally OPENGENT_TEST_OPENAI_MODEL) and run with --ignored.
+//! The Gemini test needs OPENGENT_TEST_GEMINI_API_KEY (Google AI Studio).
 
 use std::sync::Arc;
 
 use agent_core::agent::{context, RunCoordinator, RunRequest};
 use agent_core::config::resolve_data_root;
-use agent_core::domain::{Message, Role, RunEventPayload};
+use agent_core::domain::{ContentBlock, Message, Role, RunEventPayload, StopReason};
 use agent_core::providers::capabilities::ImageSupport;
 use agent_core::providers::registry::{ProviderInput, ProviderKind, ProviderStore, TlsMode};
+use agent_core::providers::{CompletionRequest, ProviderEvent, ToolSpec};
 use agent_core::secrets::MemorySecretStore;
 use tokio::sync::mpsc;
 
@@ -96,5 +98,136 @@ async fn store_builds_provider_and_run_completes() {
         "last event: {last:?}"
     );
     assert!(!text.trim().is_empty());
+    std::fs::remove_dir_all(tmp).ok();
+}
+
+/// Drains one stream into the blocks the coordinator would store, in stream order.
+async fn stream_blocks(
+    provider: &dyn agent_core::providers::ModelProvider,
+    request: &agent_core::providers::CompletionRequest,
+) -> (Vec<ContentBlock>, Option<StopReason>) {
+    let mut rx = provider
+        .stream(request, tokio_util::sync::CancellationToken::new())
+        .unwrap();
+    let (mut blocks, mut done) = (Vec::new(), None);
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            ProviderEvent::TextDelta(t) => match blocks.last_mut() {
+                Some(ContentBlock::Text { text }) => text.push_str(&t),
+                _ => blocks.push(ContentBlock::Text { text: t }),
+            },
+            ProviderEvent::Opaque { provider, data } => blocks.push(ContentBlock::ProviderOpaque {
+                provider: provider.into(),
+                data,
+            }),
+            ProviderEvent::ToolCall {
+                id,
+                name,
+                arguments,
+            } => blocks.push(ContentBlock::ToolCall {
+                id,
+                name,
+                arguments: serde_json::from_str(&arguments).unwrap_or_default(),
+                server: None,
+                tool: None,
+            }),
+            ProviderEvent::Done(r) => done = Some(r),
+            ProviderEvent::Error(e) => panic!("provider error: {e}"),
+            _ => {}
+        }
+    }
+    (blocks, done)
+}
+
+/// `OPENGENT_TEST_GEMINI_API_KEY=… cargo test -p agent-core -- --ignored gemini`
+/// (optional `OPENGENT_TEST_GEMINI_MODEL`, default `gemini-flash-latest`, and
+/// `OPENGENT_TEST_GEMINI_BASE_URL`, e.g. `http://localhost:8789/v1` for the mock server).
+#[tokio::test]
+#[ignore = "requires a Google AI Studio API key"]
+async fn gemini_lists_models_and_completes_a_tool_round_trip() {
+    let Ok(key) = std::env::var("OPENGENT_TEST_GEMINI_API_KEY") else {
+        eprintln!("OPENGENT_TEST_GEMINI_API_KEY not set; skipping");
+        return;
+    };
+    let tmp = std::env::temp_dir().join(format!("opengent-live-{}", uuid::Uuid::new_v4()));
+    let root = resolve_data_root(Some(&tmp)).unwrap();
+    let store = ProviderStore::load(
+        &root,
+        Arc::new(MemorySecretStore::default()),
+        agent_core::http::client().unwrap(),
+    )
+    .unwrap();
+    let saved = store
+        .save(ProviderInput {
+            id: None,
+            name: "gemini".into(),
+            kind: ProviderKind::GoogleGemini,
+            // Empty = the default endpoint; point at `mock-gemini-server.mjs` to test offline.
+            base_url: std::env::var("OPENGENT_TEST_GEMINI_BASE_URL").unwrap_or_default(),
+            default_model: None,
+            api_key: Some(key),
+            include_usage: false,
+            context_window: None,
+            model_context_windows: std::collections::HashMap::new(),
+            tls_mode: TlsMode::System,
+            tls_ca_pem: None,
+            image_support: ImageSupport::Auto,
+        })
+        .unwrap();
+    let models = store.discover_models(&saved.id).await.unwrap();
+    eprintln!("models: {models:?}");
+    assert!(!models.is_empty());
+
+    let model = std::env::var("OPENGENT_TEST_GEMINI_MODEL")
+        .unwrap_or_else(|_| "gemini-flash-latest".into());
+    let provider = store.build(&saved.id).unwrap();
+    let tools = vec![ToolSpec {
+        name: "weather__get".into(),
+        description: "Current weather for a city.".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": { "city": { "type": "string" } },
+            "required": ["city"]
+        }),
+    }];
+    let mut history = vec![Message::text(
+        Role::User,
+        "What's the weather in Paris? Please use tool weather__get.",
+    )];
+    let request = |messages: Vec<Message>| CompletionRequest {
+        model: model.clone(),
+        system: Some("You are a helpful assistant.".into()),
+        messages,
+        max_output_tokens: None,
+        tools: tools.clone(),
+    };
+    let (mut blocks, done) = stream_blocks(provider.as_ref(), &request(history.clone())).await;
+    assert_eq!(done, Some(StopReason::ToolUse), "blocks: {blocks:?}");
+    let ids: Vec<String> = blocks
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::ToolCall { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    for id in ids {
+        blocks.push(ContentBlock::ToolResult {
+            call_id: id,
+            content: serde_json::json!([{ "type": "text", "text": "{\"temp_c\":18,\"sky\":\"clear\"}" }]),
+            is_error: false,
+            status: None,
+        });
+    }
+    let stored = Message {
+        role: Role::Assistant,
+        blocks,
+    };
+    history.extend(context::render_turn(&stored, &Default::default(), false));
+    let (reply, done) = stream_blocks(provider.as_ref(), &request(history)).await;
+    eprintln!("reply: {reply:?}");
+    assert_eq!(done, Some(StopReason::EndTurn));
+    assert!(reply
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Text { text } if !text.trim().is_empty())));
     std::fs::remove_dir_all(tmp).ok();
 }

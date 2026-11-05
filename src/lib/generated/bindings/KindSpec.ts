@@ -6,4 +6,8 @@ export type KindSpec = { kind: ProviderKind, label: string, description: string,
 /**
  * Prefilled (and used when the field is left empty); `None` = the user must enter one.
  */
-default_base_url: string | null, base_url_hint: string, base_url_placeholder: string, requires_api_key: boolean, usage_option: boolean, presets: Array<ProviderPreset>, };
+default_base_url: string | null, base_url_hint: string, base_url_placeholder: string, model_placeholder: string, requires_api_key: boolean, 
+/**
+ * Help text under the API key field; empty = none.
+ */
+api_key_hint: string, usage_option: boolean, presets: Array<ProviderPreset>, };

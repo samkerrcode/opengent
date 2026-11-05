@@ -32,10 +32,10 @@ https://github.com/user-attachments/assets/e552658e-231b-44a2-97c2-7181deb878e3
 
 ## Highlights
 
-- **Model-agnostic.** Any OpenAI-compatible endpoint today — Ollama, LM Studio, vLLM,
-  llama.cpp, OpenRouter, or a self-hosted gateway — with a built-in simulated provider for
-  trying the app without an account. Native OpenAI, Anthropic, Google, Bedrock and Hugging Face
-  adapters are on the [roadmap](#roadmap).
+- **Model-agnostic.** Any OpenAI-compatible endpoint — Ollama, LM Studio, vLLM, llama.cpp,
+  OpenRouter, or a self-hosted gateway — plus native Google Gemini, with a built-in simulated
+  provider for trying the app without an account. Native OpenAI, Anthropic, Bedrock and
+  Hugging Face adapters are on the [roadmap](#roadmap).
 - **Real tools, real permissions.** Connect [MCP](https://modelcontextprotocol.io) servers over
   stdio or Streamable HTTP. Each tool is *Always allow*, *Ask*, or *Block*; approvals are
   enforced in Rust at dispatch, and an *Always allow* grant reverts to *Ask* if the tool's
@@ -150,7 +150,7 @@ detailed in [CHANGELOG.md](CHANGELOG.md); shipped features are documented in
 | **3 – MCP agent** | stdio + Streamable HTTP servers, tool discovery, Always allow / Ask / Block policies, approval UI, full loop: model → approval → tool → result → model. *Agent alpha.* | ✅ Done |
 | **4 – OAuth** | Browser sign-in (authorization code + PKCE, U2M) and client credentials (M2M) for MCP servers; token lifecycle in the keychain | Next |
 | **5 – OpenAI & Anthropic native** | Responses API and Messages API adapters, provider-aware prompt caching, cross-provider context projection | |
-| **6 – Google, Bedrock, Hugging Face** | Gemini (thought signatures), Bedrock ConverseStream (feature-gated AWS SDK), HF presets | |
+| **6 – Google, Bedrock, Hugging Face** | Gemini (thought signatures), Bedrock ConverseStream (feature-gated AWS SDK), HF presets | Gemini done (Interactions API, AI Studio key) |
 | **7 – Release hardening** | Performance profiling, accessibility, export/import, signing & notarization, installers | |
 | **8 – Extensions** | Sub-agents, A2A, skills, hooks, model router — through the existing `ModelProvider` / tool / permission seams | |
 
@@ -181,7 +181,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how proposals are approved.
   `tauri:dev`.
 - The command palette and inspector panel from Phase 1 are deferred (sidebar search covers the
   main need for now).
-- Only the OpenAI-compatible protocol is implemented. Native provider adapters arrive in
+- Implemented protocols: OpenAI-compatible and Google Gemini (AI Studio API key; no Vertex AI,
+  Google built-in tools or images inside tool results yet). The other native adapters arrive in
   Phases 5–6.
 - MCP servers that need OAuth sign-in can't connect until Phase 4.
 - Scheduled runs only fire while the app is open.

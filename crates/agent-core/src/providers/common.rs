@@ -207,12 +207,24 @@ pub fn map_transport(base_url: &str, e: reqwest::Error) -> Error {
 }
 
 pub fn map_status(status: StatusCode, body: &str) -> Error {
-    let detail = serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|v| extract_error_message(&v))
+    let parsed = serde_json::from_str::<Value>(body).ok();
+    let detail = parsed
+        .as_ref()
+        .and_then(extract_error_message)
         .unwrap_or_else(|| body.chars().take(300).collect::<String>().trim().to_owned());
     let detail: String = detail.chars().take(500).collect();
+    // Google APIs report a bad key as HTTP 400 with an `API_KEY_INVALID` reason, and missing
+    // credentials as `UNAUTHENTICATED`/`PERMISSION_DENIED` statuses.
+    let google_auth = body.contains("API_KEY_INVALID")
+        || matches!(
+            parsed
+                .as_ref()
+                .and_then(|v| v.pointer("/error/status"))
+                .and_then(Value::as_str),
+            Some("UNAUTHENTICATED" | "PERMISSION_DENIED")
+        );
     let hint = match status {
+        _ if google_auth => "authentication failed — check the API key",
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
             "authentication failed — check the API key"
         }
@@ -265,6 +277,29 @@ mod tests {
         );
         assert!(e.to_string().contains("bad key"));
         assert!(e.to_string().contains("401"));
+    }
+
+    #[test]
+    fn google_invalid_key_maps_to_auth_hint() {
+        let e = map_status(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":{"code":400,"message":"API key not valid.","status":"INVALID_ARGUMENT","details":[{"reason":"API_KEY_INVALID"}]}}"#,
+        )
+        .to_string();
+        assert!(
+            e.contains("authentication failed") && e.contains("API key not valid"),
+            "{e}"
+        );
+        let e = map_status(
+            StatusCode::FORBIDDEN,
+            r#"{"error":{"message":"denied","status":"PERMISSION_DENIED"}}"#,
+        );
+        assert!(e.to_string().contains("authentication failed"));
+        let e = map_status(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"bad field"}}"#,
+        );
+        assert!(e.to_string().contains("rejected the request"));
     }
 
     #[test]

@@ -32,6 +32,9 @@
   /** Rust-owned description of the kind being edited: labels, defaults, presets. */
   const spec = $derived<KindSpec | undefined>(editing ? providerStore.kindSpec(editing.kind) : undefined);
   const baseUrlReady = $derived(!!editing && (!!editing.base_url.trim() || !!spec?.default_base_url));
+  /** Kinds with a built-in endpoint tuck Base URL and TLS behind an "Advanced" toggle. */
+  let advanced = $state(false);
+  const endpointVisible = $derived(!spec?.default_base_url || advanced);
   let busy = $state(false);
   let notice = $state<{ ok: boolean; text: string } | null>(null);
   let testResult = $state<ProviderTestResult | null>(null);
@@ -50,21 +53,28 @@
     return [...names];
   });
 
+  /** Kinds with a built-in endpoint start with a usable name (their label) and URL. */
   function blankForm(kind: ProviderKind): Form {
-    const base_url = providerStore.kindSpec(kind)?.default_base_url ?? "";
-    return { id: null, kind, name: "", base_url, default_model: "", api_key: "", key_touched: false, include_usage: true, context_window: "", model_context: {}, tls_mode: "system", tls_ca_pem: "", ca_touched: false, image_support: "auto" };
+    const s = providerStore.kindSpec(kind);
+    const base_url = s?.default_base_url ?? "";
+    const name = s?.default_base_url ? s.label : "";
+    return { id: null, kind, name, base_url, default_model: "", api_key: "", key_touched: false, include_usage: true, context_window: "", model_context: {}, tls_mode: "system", tls_ca_pem: "", ca_touched: false, image_support: "auto" };
   }
 
   function startNew() {
     editing = blankForm(providerStore.kinds[0]?.kind ?? "open_ai_compatible");
+    advanced = false;
     notice = null;
     testResult = null;
   }
 
-  /** Switching type on a new provider resets kind-specific fields but keeps the name. */
+  /** Switching type on a new provider resets kind-specific fields; a typed name is kept. */
   function changeKind(kind: ProviderKind) {
     if (!editing || editing.id) return;
-    editing = { ...blankForm(kind), name: editing.name };
+    const typed = editing.name.trim() && editing.name !== spec?.label;
+    const next = blankForm(kind);
+    editing = typed ? { ...next, name: editing.name } : next;
+    advanced = false;
   }
 
   /** List subtitle: the endpoint host, or the kind label when using the kind's default endpoint. */
@@ -92,6 +102,8 @@
       ca_touched: false,
       image_support: p.image_support,
     };
+    const s = providerStore.kindSpec(p.kind);
+    advanced = !!s?.default_base_url && (p.base_url !== s.default_base_url || p.tls_mode !== "system");
     notice = null;
     testResult = null;
   }
@@ -231,21 +243,6 @@
             <input type="text" bind:value={editing.name} placeholder={spec?.label ?? "My provider"} maxlength="64" />
           </label>
           <label>
-            <span>Base URL <small>({spec ? (spec.default_base_url ? "leave as is unless you use a proxy" : spec.base_url_hint) : "endpoint URL"})</small></span>
-            <input type="url" bind:value={editing.base_url} placeholder={spec?.default_base_url ?? spec?.base_url_placeholder} />
-          </label>
-          <label>
-            <span>Default model</span>
-            {#if testResult?.models.length}
-              <select bind:value={editing.default_model}>
-                <option value="">— choose —</option>
-                {#each testResult.models as m (m)}<option value={m}>{m}</option>{/each}
-              </select>
-            {:else}
-              <input type="text" bind:value={editing.default_model} placeholder="e.g. llama3.1, gpt-4o-mini" />
-            {/if}
-          </label>
-          <label>
             <span>
               API key
               {#if editing.id && !editing.key_touched}
@@ -259,7 +256,55 @@
               placeholder={spec?.requires_api_key ? "required" : "optional for local servers"}
               autocomplete="off"
             />
+            {#if spec?.api_key_hint}<small class="field-help">{spec.api_key_hint}</small>{/if}
           </label>
+          <label>
+            <span>Default model</span>
+            {#if testResult?.models.length}
+              <select bind:value={editing.default_model}>
+                <option value="">— choose —</option>
+                {#each testResult.models as m (m)}<option value={m}>{m}</option>{/each}
+              </select>
+            {:else}
+              <input type="text" bind:value={editing.default_model} placeholder={spec?.model_placeholder || "model name"} />
+            {/if}
+          </label>
+          {#if spec?.default_base_url}
+            <button class="disclosure" type="button" aria-expanded={advanced} onclick={() => (advanced = !advanced)}>
+              <span class="caret" class:open={advanced}>▸</span> Advanced — proxy or custom endpoint
+            </button>
+          {/if}
+          {#if endpointVisible}
+            <label>
+              <span>Base URL <small>({spec ? (spec.default_base_url ? `${spec.base_url_hint}; leave as is unless you use a proxy` : spec.base_url_hint) : "endpoint URL"})</small></span>
+              <input type="url" bind:value={editing.base_url} placeholder={spec?.default_base_url ?? spec?.base_url_placeholder} />
+            </label>
+            {#if editing.base_url.trim().startsWith("https://")}
+              <label>
+                <span>TLS certificate</span>
+                <select bind:value={editing.tls_mode}>
+                  <option value="system">Verify with the OS trust store (recommended)</option>
+                  <option value="custom_ca">Trust a specific certificate (self-signed)</option>
+                  <option value="skip_verification">Skip verification — insecure, like curl -k</option>
+                </select>
+              </label>
+              {#if editing.tls_mode === "custom_ca"}
+                <label>
+                  <span>Server certificate <small>(PEM — openssl s_client -connect host:port | openssl x509)</small></span>
+                  <textarea
+                    rows="5"
+                    spellcheck="false"
+                    bind:value={editing.tls_ca_pem}
+                    oninput={() => editing && (editing.ca_touched = true)}
+                    placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"
+                  ></textarea>
+                </label>
+              {/if}
+              {#if editing.tls_mode === "skip_verification"}
+                <p class="tls-warning">Connection stays encrypted but the server is not authenticated. Only use on a network you trust.</p>
+              {/if}
+            {/if}
+          {/if}
           <div class="row2">
             <label>
               <span>Context window <small>(optional)</small></span>
@@ -301,31 +346,6 @@
               <option value="never">Not supported — image attachments are rejected</option>
             </select>
           </label>
-          {#if editing.base_url.trim().startsWith("https://")}
-            <label>
-              <span>TLS certificate</span>
-              <select bind:value={editing.tls_mode}>
-                <option value="system">Verify with the OS trust store (recommended)</option>
-                <option value="custom_ca">Trust a specific certificate (self-signed)</option>
-                <option value="skip_verification">Skip verification — insecure, like curl -k</option>
-              </select>
-            </label>
-            {#if editing.tls_mode === "custom_ca"}
-              <label>
-                <span>Server certificate <small>(PEM — openssl s_client -connect host:port | openssl x509)</small></span>
-                <textarea
-                  rows="5"
-                  spellcheck="false"
-                  bind:value={editing.tls_ca_pem}
-                  oninput={() => editing && (editing.ca_touched = true)}
-                  placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"
-                ></textarea>
-              </label>
-            {/if}
-            {#if editing.tls_mode === "skip_verification"}
-              <p class="tls-warning">Connection stays encrypted but the server is not authenticated. Only use on a network you trust.</p>
-            {/if}
-          {/if}
 
           {#if testResult}
             <p class="result" class:ok={testResult.ok} class:bad={!testResult.ok} role="status">{testResult.message}</p>
@@ -533,6 +553,24 @@
   .muted {
     color: var(--fg-faint);
     font-size: 13px;
+  }
+  .disclosure {
+    align-self: flex-start;
+    padding: 2px 0;
+    font-size: 13px;
+    color: var(--fg-muted);
+    background: none;
+    border: 0;
+  }
+  .disclosure:hover {
+    color: var(--fg);
+  }
+  .caret {
+    display: inline-block;
+    transition: transform 0.15s ease;
+  }
+  .caret.open {
+    transform: rotate(90deg);
   }
   .tls-warning {
     margin: 0;

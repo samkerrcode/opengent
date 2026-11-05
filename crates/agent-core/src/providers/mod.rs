@@ -5,6 +5,7 @@
 pub mod capabilities;
 pub mod common;
 pub mod fake;
+pub mod gemini;
 pub mod openai_compat;
 pub mod registry;
 pub mod sse;

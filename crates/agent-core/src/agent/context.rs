@@ -421,11 +421,11 @@ pub fn render_turn(
     let (mut out, mut step, mut results) = (Vec::new(), Vec::<ContentBlock>::new(), Vec::new());
     for b in &m.blocks {
         match b {
+            // A new step starts only once the previous step's results are in: text a model
+            // streams after a call (same response) belongs to that call's step, and splitting
+            // there would orphan the call's real result.
             ContentBlock::Text { text: t } => {
-                let after_calls = step
-                    .iter()
-                    .any(|s| matches!(s, ContentBlock::ToolCall { .. }));
-                if after_calls || !results.is_empty() {
+                if !results.is_empty() {
                     flush(&mut out, &mut step, &mut results);
                 }
                 match step.last_mut() {
@@ -797,6 +797,39 @@ mod tests {
             &out[2].blocks[0],
             ContentBlock::Text { text } if text == "Found 3 files."
         ));
+    }
+
+    #[test]
+    fn text_streamed_after_a_call_stays_in_that_step() {
+        let msg = Message {
+            role: Role::Assistant,
+            blocks: vec![
+                tool_call("c1", "fs__list"),
+                ContentBlock::Text {
+                    text: "Listing now.".into(),
+                },
+                tool_result("c1", "a.txt"),
+                ContentBlock::Text {
+                    text: "Done.".into(),
+                },
+            ],
+        };
+        let out = render_turn(&msg, &HashMap::new(), false);
+        assert_eq!(out.len(), 3, "assistant, tool, assistant");
+        assert_eq!(
+            out[0].blocks,
+            vec![
+                tool_call("c1", "fs__list"),
+                ContentBlock::Text {
+                    text: "Listing now.".into()
+                }
+            ]
+        );
+        assert_eq!(
+            out[1].blocks,
+            vec![tool_result("c1", "a.txt")],
+            "real result kept"
+        );
     }
 
     fn opaque(sig: &str) -> ContentBlock {
