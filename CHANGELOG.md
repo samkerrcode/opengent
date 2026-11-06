@@ -14,6 +14,11 @@ planned work lives in the [README roadmap](README.md#roadmap).
   a default model is chosen (no longer auto-picking the first model). Unsaved edits are
   confirmed before leaving, and the action bar stays visible while the form scrolls. Provider
   types now carry a `tagline` and `api_key_url`.
+- Fixed: external links open again. The `opener:allow-open-url` permission enabled the command
+  but granted no URL scope, so every `openUrl` call was rejected — chat Markdown links and the
+  new "Get an API key ↗" links did nothing. `opener:allow-default-urls` scopes opens to
+  `mailto:`/`tel:`/`http:`/`https:` in the OS default app; the provider form surfaces a denied
+  open instead of failing silently.
 - Native **OpenAI** provider (Phase 5 — native providers): add it with an OpenAI API key
   (Type → OpenAI). Uses the Responses API statelessly (`store: false`) — chosen over Chat
   Completions, where OpenAI's newer models restrict or drop tool calling — with streaming,

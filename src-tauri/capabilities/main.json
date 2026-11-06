@@ -1,12 +1,13 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-window",
-  "description": "Minimal capability set for the main window. No shell, fs or http access is granted to the webview; all privileged work goes through application commands.",
+  "description": "Minimal capability set for the main window. No shell, fs or http access is granted to the webview; all privileged work goes through application commands. URL opens are handed to the OS default app and scoped to mailto:, tel:, http: and https: by allow-default-urls.",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "core:window:allow-set-title",
     "dialog:allow-open",
-    "opener:allow-open-url"
+    "opener:allow-open-url",
+    "opener:allow-default-urls"
   ]
 }
