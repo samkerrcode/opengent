@@ -16,7 +16,7 @@
   const groups = $derived(
     providerStore.providers
       .map((p) => {
-        const models = new Set<string>(p.models);
+        const models = new Set<string>(providerStore.visibleModels(p));
         if (p.default_model) models.add(p.default_model);
         // Keep a saved choice visible even if the provider no longer lists it.
         if (value?.provider_id === p.id) models.add(value.model);
