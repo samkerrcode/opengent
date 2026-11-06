@@ -65,6 +65,7 @@ async fn store_builds_provider_and_run_completes() {
         &model,
         &history,
         None,
+        None,
         &Default::default(),
         false,
         &Default::default(),
@@ -177,6 +178,27 @@ async fn openai_lists_models_and_completes_a_tool_round_trip() {
         key,
         std::env::var("OPENGENT_TEST_OPENAI_RESPONSES_BASE_URL").unwrap_or_default(),
         std::env::var("OPENGENT_TEST_OPENAI_MODEL").unwrap_or_else(|_| "gpt-5-mini".into()),
+    )
+    .await;
+}
+
+/// `OPENGENT_TEST_ANTHROPIC_API_KEY=… cargo test -p agent-core -- --ignored anthropic`
+/// (optional `OPENGENT_TEST_ANTHROPIC_MODEL`, default `claude-haiku-5-5`, and
+/// `OPENGENT_TEST_ANTHROPIC_BASE_URL`, e.g. `http://localhost:8790/v1` for
+/// `mock-anthropic-server.mjs` with model `mock-claude-thinking`).
+#[tokio::test]
+#[ignore = "requires an Anthropic API key"]
+async fn anthropic_lists_models_and_completes_a_tool_round_trip() {
+    let Ok(key) = std::env::var("OPENGENT_TEST_ANTHROPIC_API_KEY") else {
+        eprintln!("OPENGENT_TEST_ANTHROPIC_API_KEY not set; skipping");
+        return;
+    };
+    tool_round_trip(
+        ProviderKind::Anthropic,
+        key,
+        std::env::var("OPENGENT_TEST_ANTHROPIC_BASE_URL").unwrap_or_default(),
+        std::env::var("OPENGENT_TEST_ANTHROPIC_MODEL")
+            .unwrap_or_else(|_| "claude-haiku-5-5".into()),
     )
     .await;
 }

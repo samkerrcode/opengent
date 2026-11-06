@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use super::anthropic::{self, AnthropicConfig, AnthropicProvider};
 use super::capabilities::{looks_like_vision_model, ImageSupport};
 use super::fake::FakeProvider;
 use super::gemini::{self, GeminiConfig, GeminiProvider};
@@ -34,6 +35,8 @@ pub enum ProviderKind {
     OpenAi,
     /// Google Gemini via the Interactions API with a Google AI Studio API key.
     GoogleGemini,
+    /// Anthropic Claude via the Messages API with an Anthropic API key.
+    Anthropic,
     Simulated,
 }
 
@@ -44,6 +47,7 @@ const NATIVE_CAPS: Capabilities = Capabilities {
     parallel_tool_calls: true,
     images: false,
     context_window: None,
+    max_output_tokens: None,
 };
 
 /// Static description of a provider kind. Adding a provider = one `KindMeta` constant, one
@@ -133,6 +137,24 @@ const GOOGLE_GEMINI: KindMeta = KindMeta {
     presets: &[],
 };
 
+const ANTHROPIC: KindMeta = KindMeta {
+    capabilities: NATIVE_CAPS,
+    label: "Anthropic",
+    tagline: "Claude models",
+    description: "Claude models through Anthropic's Messages API, using an API key from the \
+                  Anthropic Console.",
+    default_base_url: Some(anthropic::DEFAULT_BASE_URL),
+    base_url_hint: "Anthropic API root, ending in /v1",
+    base_url_placeholder: anthropic::DEFAULT_BASE_URL,
+    model_placeholder: "e.g. claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5",
+    requires_api_key: true,
+    api_key_hint: "Create a key in the Anthropic Console (console.anthropic.com → API keys).",
+    api_key_url: "https://console.anthropic.com/settings/keys",
+    usage_option: false,
+    user_creatable: true,
+    presets: &[],
+};
+
 const SIMULATED: KindMeta = KindMeta {
     capabilities: Capabilities {
         streaming: true,
@@ -140,6 +162,7 @@ const SIMULATED: KindMeta = KindMeta {
         parallel_tool_calls: false,
         images: true,
         context_window: None,
+        max_output_tokens: None,
     },
     label: "Simulated",
     tagline: "",
@@ -157,10 +180,11 @@ const SIMULATED: KindMeta = KindMeta {
 };
 
 impl ProviderKind {
-    pub const ALL: [ProviderKind; 4] = [
+    pub const ALL: [ProviderKind; 5] = [
         ProviderKind::OpenAiCompatible,
         ProviderKind::OpenAi,
         ProviderKind::GoogleGemini,
+        ProviderKind::Anthropic,
         ProviderKind::Simulated,
     ];
 
@@ -169,6 +193,7 @@ impl ProviderKind {
             ProviderKind::OpenAiCompatible => &OPENAI_COMPATIBLE,
             ProviderKind::OpenAi => &OPENAI,
             ProviderKind::GoogleGemini => &GOOGLE_GEMINI,
+            ProviderKind::Anthropic => &ANTHROPIC,
             ProviderKind::Simulated => &SIMULATED,
         }
     }
@@ -651,6 +676,11 @@ impl ProviderStore {
                 c.api_key = key;
                 Arc::new(GeminiProvider::new(c, http))
             }
+            ProviderKind::Anthropic => {
+                let mut c = AnthropicConfig::new(id, base_url);
+                c.api_key = key;
+                Arc::new(AnthropicProvider::new(c, http))
+            }
         })
     }
 
@@ -715,6 +745,9 @@ impl ProviderStore {
             .or(config.context_window)
             .or(discovered.and_then(|d| d.context_window))
             .or(caps.context_window);
+        caps.max_output_tokens = discovered
+            .and_then(|d| d.max_output_tokens)
+            .or(caps.max_output_tokens);
         caps.images = match config.image_support {
             ImageSupport::Always => true,
             ImageSupport::Never => false,
@@ -949,6 +982,7 @@ mod tests {
                 "m".into(),
                 DiscoveredModel {
                     context_window: Some(1_000_000),
+                    max_output_tokens: None,
                     vision: Some(true),
                     reasoning: None,
                 },
@@ -1043,6 +1077,28 @@ mod tests {
         let caps = s.capabilities_for(&saved.id, "gpt-5").unwrap();
         assert!(caps.tools && caps.images, "name heuristic covers gpt-5");
         let spec = ProviderKind::OpenAi.spec();
+        assert!(spec.requires_api_key && !spec.usage_option);
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn anthropic_requires_key_defaults_url_and_reports_family() {
+        let (s, tmp) = store();
+        let mut a = input("Anthropic");
+        a.kind = ProviderKind::Anthropic;
+        a.base_url = String::new();
+        a.api_key = None;
+        assert!(s.save(a.clone()).is_err(), "key required");
+        a.api_key = Some("sk-ant-test".into());
+        let saved = s.save(a).unwrap();
+        assert_eq!(saved.base_url, anthropic::DEFAULT_BASE_URL);
+        assert_eq!(
+            s.build(&saved.id).unwrap().family(),
+            Some(anthropic::FAMILY)
+        );
+        let caps = s.capabilities_for(&saved.id, "claude-sonnet-5-5").unwrap();
+        assert!(caps.tools && caps.images, "name heuristic covers claude 5");
+        let spec = ProviderKind::Anthropic.spec();
         assert!(spec.requires_api_key && !spec.usage_option);
         std::fs::remove_dir_all(tmp).unwrap();
     }

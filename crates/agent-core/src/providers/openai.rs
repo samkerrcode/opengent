@@ -191,6 +191,7 @@ pub fn parse_models(doc: &Value) -> Vec<(String, DiscoveredModel)> {
         .map(|id| {
             let details = DiscoveredModel {
                 context_window: known_context_window(id),
+                max_output_tokens: known_max_output(id),
                 vision: Some(accepts_images(id)),
                 reasoning: Some(is_reasoning_model(id)),
             };

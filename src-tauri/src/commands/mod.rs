@@ -379,6 +379,7 @@ pub(crate) async fn launch_run<S: RunSink>(
         &model,
         &history,
         context_window,
+        caps.max_output_tokens,
         &contents,
         caps.images,
         &tool_ctx,

@@ -300,6 +300,7 @@ pub fn parse_models_page(doc: &Value) -> (Vec<(String, DiscoveredModel)>, Option
                             .get("inputTokenLimit")
                             .and_then(Value::as_u64)
                             .map(|n| n.min(u32::MAX as u64) as u32),
+                        max_output_tokens: None,
                         // Gemini chat models accept image input; `ImageSupport` overrides it.
                         vision: Some(true),
                         reasoning: m.get("thinking").and_then(Value::as_bool),

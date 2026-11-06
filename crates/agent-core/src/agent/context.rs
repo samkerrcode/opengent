@@ -485,10 +485,12 @@ pub struct CompiledContext {
 /// Keeps the most recent messages that fit, never splitting the final user turn or a tool
 /// turn's call/result steps. Dropping the oldest turns is a disclosed, lossy fallback;
 /// summarization checkpoints arrive later.
+#[allow(clippy::too_many_arguments)]
 pub fn compile(
     model: &str,
     history: &[Message],
     context_window: Option<u32>,
+    output_cap: Option<u32>,
     contents: &AttachmentContents,
     images_supported: bool,
     tools: &ToolContext,
@@ -532,7 +534,10 @@ pub fn compile(
     // Only messages dropped for budget count as "trimmed"; empty-rendered ones were skipped,
     // not trimmed, so they don't trigger a false notice.
     let trimmed = history.len() - processed;
+    // The reserve assumes a quarter of the window is available for output; a model whose
+    // real output cap is smaller must not get a `max_tokens` the server rejects.
     let max_output = ((window as f32) * OUTPUT_RESERVE) as u32;
+    let cap = output_cap.unwrap_or(u32::MAX);
 
     CompiledContext {
         request: CompletionRequest {
@@ -541,7 +546,7 @@ pub fn compile(
             messages: kept_groups.into_iter().flatten().collect(),
             // Floor sized for reasoning models, which burn output tokens thinking before
             // the answer starts; 256 tokens was far too small for them.
-            max_output_tokens: Some(max_output.max(4096)),
+            max_output_tokens: Some(max_output.max(4096).min(cap)),
             tools: Vec::new(),
         },
         trimmed_messages: trimmed,
@@ -604,6 +609,7 @@ mod tests {
             "m",
             &turns(2, 10),
             Some(8192),
+            None,
             &HashMap::new(),
             false,
             &no_tools(),
@@ -618,6 +624,7 @@ mod tests {
             "m",
             &turns(4, 20),
             Some(8192),
+            None,
             &HashMap::new(),
             false,
             &no_tools(),
@@ -639,6 +646,7 @@ mod tests {
             "m",
             &turns(9, 3000),
             Some(4000),
+            None,
             &HashMap::new(),
             false,
             &no_tools(),
@@ -655,6 +663,7 @@ mod tests {
             "m",
             &turns(1, 100_000),
             Some(1000),
+            None,
             &HashMap::new(),
             false,
             &no_tools(),
@@ -971,6 +980,7 @@ mod tests {
             "m",
             &history,
             Some(4000),
+            None,
             &HashMap::new(),
             false,
             &no_tools(),

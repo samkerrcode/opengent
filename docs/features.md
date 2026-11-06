@@ -205,6 +205,69 @@ calls without signatures; whether Google accepts that for every model is unverif
 
 Offline testing: `node scripts/dev/mock-gemini-server.mjs` (see AGENTS.md).
 
+### Anthropic
+
+**What.** Claude models through Anthropic's Messages API, with streaming, thinking
+summaries in the Thinking block, interleaved thinking between tool calls, parallel tool
+calls and image input. Signed thinking blocks are stored and replayed, so reasoning
+carries across tool calls.
+
+**How to use.** Create a key in the [Anthropic Console](https://console.anthropic.com) →
+*API keys*. In Provider settings choose the **Anthropic** tile, paste the key and **Save &
+test**: the model list is fetched with each model's real limits and you pick a default
+(e.g. `claude-sonnet-5-5`). The endpoint defaults to `https://api.anthropic.com/v1`; open
+*Advanced settings* only for a proxy.
+
+**How it works.** `crates/agent-core/src/providers/anthropic.rs` (API version
+`2026-10-21`).
+- Requests go to `POST {base}/messages` with `stream: true`; the key rides in the
+  `x-api-key` header, never the URL. The API is stateless — Anthropic keeps no
+  conversation state, and the full local history is sent each turn.
+- History becomes alternating `user`/`assistant` messages: your text and images → `user`,
+  the model's text and calls → `assistant` (`tool_use`, arguments as an object), tool
+  results → `tool_result` blocks inside a `user` message (there is no tool role;
+  consecutive same-role messages merge). Tools are sent non-strict and `tool_choice` is
+  never forced — the newest models reject forced tool use.
+- Claude 4.6+ and all 5.x models get `thinking: {type: "adaptive", display: "summarized"}`:
+  the model decides how much to think, streams readable summaries, and interleaves
+  reasoning between tool calls. Older models (4.5 and below) support only the deprecated
+  manual mode and get no thinking config.
+- Each `thinking` block carries an encrypted `signature` that must be replayed unchanged.
+  The block is stored as provider state — signature only, since the readable text already
+  lives in the Thinking block and the server ignores that field on replay — and
+  re-inserted verbatim at its position; `redacted_thinking` blocks replay the same way. A
+  block too large to store ends signature storage for that response, because a gap would
+  invalidate every later block anyway.
+- **Prefix binding.** On Claude 5.1-generation models a signature is bound to the request
+  prefix it was produced under — system prompt, tools, earlier messages — and an edited
+  history fails the request. Every request sends
+  `thinking.block_binding.prefix_mismatch_behavior: "drop_block"` so a stale prefix (from
+  history trimming, shortened old tool results, or a changed tool set) drops the affected
+  reasoning instead of failing the turn; the drop is logged.
+- Discovery pages `GET {base}/models`, keeps non-`retired` models, and caches each model's
+  `max_input_tokens` (context window), `max_tokens` (output cap), image-input and thinking
+  flags — no built-in table needed.
+- Usage: input, output (thinking is already billed in), and cache read/write tokens.
+  `stop_reason`: `end_turn`/`stop_sequence`/`pause_turn` → end of turn, `tool_use` → tool
+  use, `max_tokens`/`model_context_window_exceeded` → output limit, `refusal` → an error
+  carrying the classifier's explanation (which lets an agent's fallback model take over).
+- No stream resume: a dropped connection fails the turn. The stream idle timeout is 180 s,
+  since thinking can pause the stream for a long while.
+
+*Limits:* API keys only — no Bedrock, Vertex or OAuth. No server-side state, batch API,
+Anthropic built-in tools (web search, code execution), citations, or `cache_control`
+prompt caching ([Phase 6](../README.md#roadmap)). Manual extended-thinking budgets aren't
+exposed (deprecated by Anthropic). Old tool results re-capped for context and history
+trimming make earlier thinking blocks invalid on Claude 5.1+ models — the API drops them
+rather than erroring, but reasoning continuity is reduced until context compilation
+becomes append-only (Phase 6). Images inside tool results are sent as text, as with other
+providers. Zero data retention is an organization-level Anthropic arrangement: everything
+used here is ZDR-eligible except Claude Fable/Mythos models, which require 30-day
+retention and reject requests from ZDR organizations; thinking blocks from Claude Sonnet
+5.5 and Haiku 5.5 only work for the account that produced them.
+
+Offline testing: `node scripts/dev/mock-anthropic-server.mjs` (see AGENTS.md).
+
 **Context windows.** Resolution per model: your per-model override → your provider-wide
 setting (a deliberate cap) → the window the provider reports during discovery → 8K. Image
 support similarly combines your setting, server-reported flags and a name heuristic.
