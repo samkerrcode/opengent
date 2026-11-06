@@ -30,4 +30,10 @@ vision_models: Array<string>,
 /**
  * Per-model metadata from the last discovery (context window, vision, reasoning).
  */
-discovered: { [key in string]: DiscoveredModel }, };
+discovered: { [key in string]: DiscoveredModel }, 
+/**
+ * Models the user hid from pickers. A listing preference only: runs accept any model
+ * name, and a hidden entry is kept (inert) while the model isn't listed so re-discovery
+ * doesn't resurrect it.
+ */
+hidden_models: Array<string>, };

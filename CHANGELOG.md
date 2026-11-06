@@ -14,6 +14,10 @@ planned work lives in the [README roadmap](README.md#roadmap).
   a default model is chosen (no longer auto-picking the first model). Unsaved edits are
   confirmed before leaving, and the action bar stays visible while the form scrolls. Provider
   types now carry a `tagline` and `api_key_url`.
+- Model hiding: each model in a provider's Advanced settings has a *shown* toggle that
+  removes it from the chat picker and agent dropdowns (per-provider `hidden_models`). The
+  default model can't be hidden; the current selection and agents already using a hidden
+  model keep working. The set survives re-discovery and clears if the provider type changes.
 - Fixed: external links open again. The `opener:allow-open-url` permission enabled the command
   but granted no URL scope, so every `openUrl` call was rejected — chat Markdown links and the
   new "Get an API key ↗" links did nothing. `opener:allow-default-urls` scopes opens to

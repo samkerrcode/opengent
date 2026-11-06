@@ -24,6 +24,8 @@
     tls_ca_pem: string;
     ca_touched: boolean;
     image_support: ImageSupport;
+    /** Models hidden from pickers; kept sorted for stable dirty-checking. */
+    hidden_models: string[];
   };
 
   // Common context sizes offered when the server can't report them. Doubling steps keep the
@@ -77,11 +79,15 @@
     const d = editing.default_model.trim();
     if (d) names.add(d);
     for (const m of Object.keys(editing.model_context)) names.add(m);
+    // Hidden models must render too — this is where they get un-hidden.
+    for (const m of editing.hidden_models) names.add(m);
     return [...names];
   });
 
   /** Models offered in the default-model dropdown once a test or earlier discovery listed some. */
   const knownModels = $derived(testResult?.models.length ? testResult.models : (current?.models ?? []));
+  /** Set form for membership checks inside each-blocks (also keeps hidden rows rendered). */
+  const hiddenSet = $derived(new Set(editing?.hidden_models ?? []));
 
   function serialize(f: Form): string {
     return JSON.stringify(toInput(f));
@@ -92,7 +98,7 @@
     const s = providerStore.kindSpec(kind);
     const base_url = s?.default_base_url ?? "";
     const name = s?.default_base_url ? s.label : "";
-    return { id: null, kind, name, base_url, default_model: "", api_key: "", key_touched: false, include_usage: true, context_window: "", model_context: {}, tls_mode: "system", tls_ca_pem: "", ca_touched: false, image_support: "auto" };
+    return { id: null, kind, name, base_url, default_model: "", api_key: "", key_touched: false, include_usage: true, context_window: "", model_context: {}, tls_mode: "system", tls_ca_pem: "", ca_touched: false, image_support: "auto", hidden_models: [] };
   }
 
   async function open(form: Form) {
@@ -141,6 +147,7 @@
       tls_ca_pem: p.tls_ca_pem ?? "",
       ca_touched: false,
       image_support: p.image_support,
+      hidden_models: [...p.hidden_models],
     });
   }
 
@@ -196,7 +203,16 @@
       // Rust semantics: null = keep existing PEM, "" = clear, value = replace.
       tls_ca_pem: f.ca_touched || !f.id ? f.tls_ca_pem : null,
       image_support: f.image_support,
+      hidden_models: [...new Set(f.hidden_models.map((m) => m.trim()).filter(Boolean))].sort(),
     };
+  }
+
+  /** Toggles a model's visibility in pickers; the default model can't be hidden. */
+  function toggleModel(m: string) {
+    if (!editing || m === editing.default_model.trim()) return;
+    editing.hidden_models = editing.hidden_models.includes(m)
+      ? editing.hidden_models.filter((x) => x !== m)
+      : [...editing.hidden_models, m].sort();
   }
 
   /** Makes a saved provider the chat default when nothing else is selected yet. */
@@ -371,7 +387,7 @@
                 <select bind:value={editing.default_model}>
                   <option value="">— choose —</option>
                   {#if editing.default_model && !knownModels.includes(editing.default_model)}<option value={editing.default_model}>{editing.default_model}</option>{/if}
-                  {#each knownModels as m (m)}<option value={m}>{m}</option>{/each}
+                  {#each knownModels.filter((m) => !hiddenSet.has(m)) as m (m)}<option value={m}>{m}</option>{/each}
                 </select>
               {:else}
                 <input type="text" bind:value={editing.default_model} placeholder={spec?.model_placeholder || "model name"} />
@@ -437,14 +453,22 @@
                 </div>
                 {#if ctxModels.length}
                   <div class="ctx-overrides">
-                    <span>Per-model context window <small>(overrides the provider default)</small></span>
+                    <span>Models <small>(context window overrides the provider default; hidden models are not offered in pickers)</small></span>
                     {#each ctxModels as m (m)}
-                      <div class="ctx-row">
+                      <div class="ctx-row" class:hidden={hiddenSet.has(m)}>
                         <span class="ctx-name" title={m}>{m}</span>
-                        <select bind:value={editing.model_context[m]}>
+                        <select bind:value={editing.model_context[m]} aria-label="Context window for {m}">
                           <option value="">Provider default</option>
                           {#each CONTEXT_SIZES as n (n)}<option value={String(n)}>{fmtCtx(n)} tokens</option>{/each}
                         </select>
+                        {#if m === editing.default_model.trim()}
+                          <span class="chip">default</span>
+                        {:else}
+                          <label class="shown">
+                            <input type="checkbox" checked={!hiddenSet.has(m)} onchange={() => toggleModel(m)} />
+                            shown
+                          </label>
+                        {/if}
                       </div>
                     {/each}
                   </div>
@@ -787,9 +811,21 @@
   }
   .ctx-row {
     display: grid;
-    grid-template-columns: 1fr 150px;
+    grid-template-columns: 1fr 150px 64px;
     gap: var(--space-2);
     align-items: center;
+  }
+  .ctx-row.hidden .ctx-name {
+    color: var(--fg-faint);
+    text-decoration: line-through;
+  }
+  .shown {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12.5px;
+    color: var(--fg-muted);
+    white-space: nowrap;
   }
   .ctx-name {
     overflow: hidden;

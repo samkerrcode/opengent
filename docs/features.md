@@ -64,6 +64,14 @@ override (for built-in types), TLS, context-window, token-usage and image-input 
 under **Advanced settings**, which opens on its own (or shows *customized*) when a saved
 provider changes any of them.
 
+**Hiding models.** The *Models* list in Advanced settings shows every known model with its
+per-model context window and a *shown* toggle. Unchecking a model removes it from the chat
+picker and agent model dropdowns — handy for decluttering an endpoint that lists many old
+models — while your current selection and any agent configured on it keep working. The
+provider's default model can't be hidden, and a hidden model reappears in the list so it can
+be re-shown. Hiding is a listing preference, not a block: runs and schedules already pointed
+at a hidden model still run.
+
 **Saving.** **Save** stores the connection and returns to the picker with a confirmation.
 **Save & test** also lists the provider's models; it returns to the picker once the test
 succeeds and a default model is set. Otherwise it stays on the form — to pick a default model

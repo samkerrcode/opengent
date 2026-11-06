@@ -11,4 +11,8 @@ export type ProviderInput = { id: string | null, name: string, kind: ProviderKin
 /**
  * `Some("")` clears a stored PEM; `None` leaves it unchanged.
  */
-tls_ca_pem: string | null, image_support: ImageSupport, };
+tls_ca_pem: string | null, image_support: ImageSupport, 
+/**
+ * Replaces the hidden-model set on save (not additive); ignored when the kind changes.
+ */
+hidden_models: Array<string>, };

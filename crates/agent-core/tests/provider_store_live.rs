@@ -44,6 +44,7 @@ async fn store_builds_provider_and_run_completes() {
             tls_mode: TlsMode::System,
             tls_ca_pem: None,
             image_support: ImageSupport::Auto,
+            hidden_models: Vec::new(),
         })
         .unwrap();
 
@@ -205,6 +206,7 @@ async fn tool_round_trip(kind: ProviderKind, key: String, base_url: String, mode
             tls_mode: TlsMode::System,
             tls_ca_pem: None,
             image_support: ImageSupport::Auto,
+            hidden_models: Vec::new(),
         })
         .unwrap();
     let models = store.discover_models(&saved.id).await.unwrap();

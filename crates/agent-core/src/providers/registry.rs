@@ -4,7 +4,7 @@
 //! Phase 1 — the shape is already flat and versioned). API keys live only in the `SecretStore`
 //! under `provider/<id>/api_key`; `ProviderConfig` only records whether one exists.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -304,6 +304,11 @@ pub struct ProviderConfig {
     /// Per-model metadata from the last discovery (context window, vision, reasoning).
     #[serde(default)]
     pub discovered: HashMap<String, DiscoveredModel>,
+    /// Models the user hid from pickers. A listing preference only: runs accept any model
+    /// name, and a hidden entry is kept (inert) while the model isn't listed so re-discovery
+    /// doesn't resurrect it.
+    #[serde(default)]
+    pub hidden_models: BTreeSet<String>,
 }
 
 fn default_true() -> bool {
@@ -332,6 +337,9 @@ pub struct ProviderInput {
     pub tls_ca_pem: Option<String>,
     #[serde(default)]
     pub image_support: ImageSupport,
+    /// Replaces the hidden-model set on save (not additive); ignored when the kind changes.
+    #[serde(default)]
+    pub hidden_models: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -380,6 +388,7 @@ fn simulated_config() -> ProviderConfig {
         image_support: ImageSupport::Always,
         vision_models: Vec::new(),
         discovered: HashMap::new(),
+        hidden_models: BTreeSet::new(),
     }
 }
 
@@ -524,7 +533,19 @@ impl ProviderStore {
         let has_api_key = will_have_key;
         let existing_pem = existing.as_ref().and_then(|p| p.tls_ca_pem.clone());
         // Cached discovery belongs to the previous protocol when the kind changes.
+        let is_new = existing.is_none();
         let cache = existing.filter(|p| p.kind == input.kind);
+        // Hidden names belong to the previous protocol's listing when the kind changes.
+        let hidden_models: BTreeSet<String> = if is_new || cache.is_some() {
+            input
+                .hidden_models
+                .into_iter()
+                .map(|m| m.trim().to_owned())
+                .filter(|m| !m.is_empty())
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
 
         let config = ProviderConfig {
             id: id.clone(),
@@ -557,6 +578,7 @@ impl ProviderStore {
                 .map(|p| p.vision_models.clone())
                 .unwrap_or_default(),
             discovered: cache.map(|p| p.discovered).unwrap_or_default(),
+            hidden_models,
         };
         match state.providers.iter_mut().find(|p| p.id == id) {
             Some(slot) => *slot = config.clone(),
@@ -782,6 +804,7 @@ mod tests {
             tls_mode: TlsMode::System,
             tls_ca_pem: None,
             image_support: ImageSupport::Auto,
+            hidden_models: Vec::new(),
         }
     }
 
@@ -852,6 +875,37 @@ mod tests {
         s.save(e).unwrap();
         assert!(!images("llava:7b"));
         assert!(!images("custom-model"));
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn hidden_models_round_trip_and_clear_on_kind_change() {
+        let (s, tmp) = store();
+        let mut i = input("X");
+        i.hidden_models = vec![" old-model ".into(), "old-model".into(), "".into()];
+        let p = s.save(i).unwrap();
+        assert_eq!(
+            p.hidden_models.iter().collect::<Vec<_>>(),
+            vec!["old-model"]
+        );
+
+        // Same-kind edit replaces the set wholesale.
+        let mut e = input("X");
+        e.id = Some(p.id.clone());
+        e.hidden_models = vec!["other-model".into()];
+        assert_eq!(
+            s.save(e).unwrap().hidden_models.iter().collect::<Vec<_>>(),
+            vec!["other-model"]
+        );
+
+        // A kind change drops hidden names from the previous protocol's listing.
+        let mut e = input("X");
+        e.id = Some(p.id.clone());
+        e.kind = ProviderKind::OpenAi;
+        e.base_url = String::new();
+        e.hidden_models = vec!["gpt-4o".into()];
+        let saved = s.save(e).unwrap();
+        assert!(saved.hidden_models.is_empty());
         std::fs::remove_dir_all(tmp).unwrap();
     }
 
