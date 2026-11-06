@@ -53,6 +53,8 @@ struct KindMeta {
     /// Static so capability lookups never construct an adapter.
     capabilities: Capabilities,
     label: &'static str,
+    /// One-line summary for the provider picker tile; empty = none.
+    tagline: &'static str,
     description: &'static str,
     /// Used when the user leaves the base URL empty; `None` = the user must supply one.
     default_base_url: Option<&'static str>,
@@ -63,6 +65,8 @@ struct KindMeta {
     requires_api_key: bool,
     /// Help text under the API key field (where to get one); empty = none.
     api_key_hint: &'static str,
+    /// Where to create an API key (opened in the browser); empty = none.
+    api_key_url: &'static str,
     /// Whether the "request token usage" toggle applies (OpenAI-compatible only).
     usage_option: bool,
     user_creatable: bool,
@@ -73,6 +77,7 @@ struct KindMeta {
 const OPENAI_COMPATIBLE: KindMeta = KindMeta {
     capabilities: NATIVE_CAPS,
     label: "OpenAI-compatible",
+    tagline: "Local servers and gateways",
     description: "Any server speaking the OpenAI Chat Completions protocol — local (Ollama, \
                   LM Studio, vLLM, llama.cpp) or hosted gateways.",
     default_base_url: None,
@@ -81,6 +86,7 @@ const OPENAI_COMPATIBLE: KindMeta = KindMeta {
     model_placeholder: "e.g. llama3.1, gpt-4o-mini",
     requires_api_key: false,
     api_key_hint: "Only needed for hosted gateways or servers started with an API key.",
+    api_key_url: "",
     usage_option: true,
     user_creatable: true,
     presets: &[
@@ -94,6 +100,7 @@ const OPENAI_COMPATIBLE: KindMeta = KindMeta {
 const OPENAI: KindMeta = KindMeta {
     capabilities: NATIVE_CAPS,
     label: "OpenAI",
+    tagline: "GPT and o-series models",
     description: "OpenAI models (GPT, o-series) through the Responses API, using an API key from \
                   the OpenAI Platform.",
     default_base_url: Some(openai::DEFAULT_BASE_URL),
@@ -102,6 +109,7 @@ const OPENAI: KindMeta = KindMeta {
     model_placeholder: "e.g. gpt-5.2, gpt-5-mini, gpt-4.1",
     requires_api_key: true,
     api_key_hint: "Create a key at platform.openai.com → API keys.",
+    api_key_url: "https://platform.openai.com/api-keys",
     usage_option: false,
     user_creatable: true,
     presets: &[],
@@ -110,6 +118,7 @@ const OPENAI: KindMeta = KindMeta {
 const GOOGLE_GEMINI: KindMeta = KindMeta {
     capabilities: NATIVE_CAPS,
     label: "Google Gemini",
+    tagline: "Gemini models via Google AI Studio",
     description: "Gemini models through Google's Gemini API (Interactions API), using an API key \
                   from Google AI Studio.",
     default_base_url: Some(gemini::DEFAULT_BASE_URL),
@@ -118,6 +127,7 @@ const GOOGLE_GEMINI: KindMeta = KindMeta {
     model_placeholder: "e.g. gemini-flash-latest, gemini-pro-latest",
     requires_api_key: true,
     api_key_hint: "Create a key in Google AI Studio (aistudio.google.com → Get API key).",
+    api_key_url: "https://aistudio.google.com/apikey",
     usage_option: false,
     user_creatable: true,
     presets: &[],
@@ -132,6 +142,7 @@ const SIMULATED: KindMeta = KindMeta {
         context_window: None,
     },
     label: "Simulated",
+    tagline: "",
     description: "Built-in offline provider for trying the app.",
     default_base_url: None,
     base_url_hint: "",
@@ -139,6 +150,7 @@ const SIMULATED: KindMeta = KindMeta {
     model_placeholder: "",
     requires_api_key: false,
     api_key_hint: "",
+    api_key_url: "",
     usage_option: false,
     user_creatable: false,
     presets: &[],
@@ -180,6 +192,7 @@ impl ProviderKind {
         KindSpec {
             kind: self,
             label: m.label.into(),
+            tagline: m.tagline.into(),
             description: m.description.into(),
             default_base_url: m.default_base_url.map(Into::into),
             base_url_hint: m.base_url_hint.into(),
@@ -187,6 +200,7 @@ impl ProviderKind {
             model_placeholder: m.model_placeholder.into(),
             requires_api_key: m.requires_api_key,
             api_key_hint: m.api_key_hint.into(),
+            api_key_url: m.api_key_url.into(),
             usage_option: m.usage_option,
             presets: m
                 .presets
@@ -215,6 +229,8 @@ pub fn creatable_kinds() -> Vec<KindSpec> {
 pub struct KindSpec {
     pub kind: ProviderKind,
     pub label: String,
+    /// One-line summary for the provider picker tile; empty = none.
+    pub tagline: String,
     pub description: String,
     /// Prefilled (and used when the field is left empty); `None` = the user must enter one.
     pub default_base_url: Option<String>,
@@ -224,6 +240,8 @@ pub struct KindSpec {
     pub requires_api_key: bool,
     /// Help text under the API key field; empty = none.
     pub api_key_hint: String,
+    /// Where to create an API key (opened in the browser); empty = none.
+    pub api_key_url: String,
     pub usage_option: bool,
     pub presets: Vec<ProviderPreset>,
 }
@@ -932,6 +950,9 @@ mod tests {
         );
         assert!(g.requires_api_key && !g.usage_option);
         assert!(!g.model_placeholder.is_empty() && !g.api_key_hint.is_empty());
+        assert!(kinds
+            .iter()
+            .all(|k| !k.tagline.is_empty() && !k.api_key_url.starts_with("http:")));
     }
 
     #[test]

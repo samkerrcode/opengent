@@ -2,7 +2,11 @@
 import type { ProviderKind } from "./ProviderKind";
 import type { ProviderPreset } from "./ProviderPreset";
 
-export type KindSpec = { kind: ProviderKind, label: string, description: string, 
+export type KindSpec = { kind: ProviderKind, label: string, 
+/**
+ * One-line summary for the provider picker tile; empty = none.
+ */
+tagline: string, description: string, 
 /**
  * Prefilled (and used when the field is left empty); `None` = the user must enter one.
  */
@@ -10,4 +14,8 @@ default_base_url: string | null, base_url_hint: string, base_url_placeholder: st
 /**
  * Help text under the API key field; empty = none.
  */
-api_key_hint: string, usage_option: boolean, presets: Array<ProviderPreset>, };
+api_key_hint: string, 
+/**
+ * Where to create an API key (opened in the browser); empty = none.
+ */
+api_key_url: string, usage_option: boolean, presets: Array<ProviderPreset>, };

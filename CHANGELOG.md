@@ -6,6 +6,14 @@ planned work lives in the [README roadmap](README.md#roadmap).
 
 ## Unreleased — Phase 4 (OAuth)
 
+- Provider settings redesign: opens on a tile picker of provider types with brand logos
+  (OpenAI, Google Gemini; a neutral icon otherwise) instead of a Type dropdown; the form gets a
+  logo header, *← All providers*, an API-key *Show* toggle and *Get an API key ↗* link, and
+  moves context window, image input, token usage and TLS under **Advanced settings**. Save
+  returns to the picker with a confirmation; Save & test returns once the connection works and
+  a default model is chosen (no longer auto-picking the first model). Unsaved edits are
+  confirmed before leaving, and the action bar stays visible while the form scrolls. Provider
+  types now carry a `tagline` and `api_key_url`.
 - Native **OpenAI** provider (Phase 5 — native providers): add it with an OpenAI API key
   (Type → OpenAI). Uses the Responses API statelessly (`store: false`) — chosen over Chat
   Completions, where OpenAI's newer models restrict or drop tool calling — with streaming,

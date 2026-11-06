@@ -49,13 +49,29 @@ keychain, model discovery via `GET /models`, context window override, TLS verifi
 (system / pinned CA / skip), and image-input policy. The model picker in the composer selects
 provider+model per message.
 
-**Provider types.** *Add provider* offers a **Type** choice (OpenAI-compatible, OpenAI,
-Google Gemini). Each type's label, description, default endpoint, presets, model-name examples,
-API-key help text and whether a key is required come from Rust (`list_provider_kinds`), so
+**Provider types.** Provider settings opens on a picker: one tile per provider type
+(OpenAI, Google Gemini, OpenAI-compatible) with its logo and a one-line summary, next to the
+**Your providers** list of saved connections. Click a tile to open that type's form; **←
+All providers** (or *+ Add provider*) returns to the picker, asking first if there are unsaved
+edits. You can add several connections of the same type (e.g. personal and work keys). Each
+type's label, tagline, description, default endpoint, presets, model-name examples, API-key
+help text and link, and whether a key is required come from Rust (`list_provider_kinds`), so
 the form never hardcodes a protocol. A type with a default endpoint is pre-named after its
-type, fills the base URL in for you (leaving it empty uses the default), and tucks Base URL
-and TLS settings behind **Advanced — proxy or custom endpoint**; the section opens on its own
-when a saved provider uses a non-default endpoint or TLS mode.
+type and fills the base URL in for you (leaving it empty uses the default). The form shows
+only the setup essentials — base URL and *Quick setup* presets for OpenAI-compatible servers,
+name, API key (with *Show* and *Get an API key ↗*), default model — and keeps the endpoint
+override (for built-in types), TLS, context-window, token-usage and image-input settings
+under **Advanced settings**, which opens on its own (or shows *customized*) when a saved
+provider changes any of them.
+
+**Saving.** **Save** stores the connection and returns to the picker with a confirmation.
+**Save & test** also lists the provider's models; it returns to the picker once the test
+succeeds and a default model is set. Otherwise it stays on the form — to pick a default model
+from the discovered list, or with "Provider saved, but the connection test failed" and the
+server's message. A failed save keeps everything you typed.
+
+*Limits:* tile logos are bundled for OpenAI and Google Gemini; other types show a neutral
+server icon. The picker has no search or categories yet.
 
 **How it works (all providers).** Adapter-level capabilities (streaming, tools, parallel
 calls) are declared once per type in Rust, so resolving a model's capabilities — done on every
@@ -71,9 +87,9 @@ input. Reasoning is carried across tool calls, so the model doesn't re-derive it
 every tool result.
 
 **How to use.** Create a key at [platform.openai.com](https://platform.openai.com) → *API
-keys*. In Provider settings choose *Add provider* → Type **OpenAI**, paste the key and **Save
+keys*. In Provider settings choose the **OpenAI** tile, paste the key and **Save
 & test**: the model list is fetched and you pick a default model (e.g. `gpt-5-mini`). The
-endpoint defaults to `https://api.openai.com/v1`; open *Advanced* only for a proxy or a
+endpoint defaults to `https://api.openai.com/v1`; open *Advanced settings* only for a proxy or a
 Responses-compatible gateway. (To use Chat Completions against OpenAI instead, add an
 *OpenAI-compatible* provider pointed at the same URL.)
 
@@ -130,10 +146,10 @@ AGENTS.md).
 Interactions API, with streaming, thought summaries, parallel tool calls and image input.
 
 **How to use.** Create an API key in [Google AI Studio](https://aistudio.google.com) → *Get
-API key*. In Provider settings choose *Add provider* → Type **Google Gemini**, paste the key and
+API key*. In Provider settings choose the **Google Gemini** tile, paste the key and
 **Save & test**: the model list is fetched and you pick a default model (e.g.
 `gemini-flash-latest`). The endpoint defaults to the stable API
-(`https://generativelanguage.googleapis.com/v1`); open *Advanced* only for a proxy or to use
+(`https://generativelanguage.googleapis.com/v1`); open *Advanced settings* only for a proxy or to use
 `…/v1beta`.
 
 **How it works.** `crates/agent-core/src/providers/gemini.rs`.
