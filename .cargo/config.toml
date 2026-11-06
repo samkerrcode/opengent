@@ -1,3 +1,6 @@
 [env]
 # ts-rs writes TypeScript bindings here when `cargo test -p agent-core export_bindings_` runs.
 TS_RS_EXPORT_DIR = { value = "src/lib/generated/bindings", relative = true }
+# macOS 12 is the supported floor (see AGENTS.md); silences ld warnings that the
+# toolchain's std objects require a newer macOS than the default link target.
+MACOSX_DEPLOYMENT_TARGET = "12.0"

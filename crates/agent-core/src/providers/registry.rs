@@ -14,6 +14,7 @@ use ts_rs::TS;
 use super::capabilities::{looks_like_vision_model, ImageSupport};
 use super::fake::FakeProvider;
 use super::gemini::{self, GeminiConfig, GeminiProvider};
+use super::openai::{self, OpenAiConfig, OpenAiProvider};
 use super::openai_compat::{normalize_base_url, OpenAiCompatConfig, OpenAiCompatProvider};
 use super::{Capabilities, DiscoveredModel, ModelProvider};
 use crate::config::DataRoot;
@@ -29,14 +30,28 @@ pub const SIMULATED_PROVIDER_ID: &str = "simulated";
 pub enum ProviderKind {
     /// Any server speaking the OpenAI Chat Completions protocol (Ollama, LM Studio, vLLM, gateways).
     OpenAiCompatible,
+    /// OpenAI via the Responses API with an OpenAI API key.
+    OpenAi,
     /// Google Gemini via the Interactions API with a Google AI Studio API key.
     GoogleGemini,
     Simulated,
 }
 
+/// Adapter-level flags shared by the native HTTP adapters.
+const NATIVE_CAPS: Capabilities = Capabilities {
+    streaming: true,
+    tools: true,
+    parallel_tool_calls: true,
+    images: false,
+    context_window: None,
+};
+
 /// Static description of a provider kind. Adding a provider = one `KindMeta` constant, one
 /// arm in `ProviderKind::meta`, and one arm in `ProviderStore::instantiate`.
 struct KindMeta {
+    /// Adapter-level capabilities (model-level ones are resolved in `capabilities_for`).
+    /// Static so capability lookups never construct an adapter.
+    capabilities: Capabilities,
     label: &'static str,
     description: &'static str,
     /// Used when the user leaves the base URL empty; `None` = the user must supply one.
@@ -56,6 +71,7 @@ struct KindMeta {
 }
 
 const OPENAI_COMPATIBLE: KindMeta = KindMeta {
+    capabilities: NATIVE_CAPS,
     label: "OpenAI-compatible",
     description: "Any server speaking the OpenAI Chat Completions protocol — local (Ollama, \
                   LM Studio, vLLM, llama.cpp) or hosted gateways.",
@@ -75,7 +91,24 @@ const OPENAI_COMPATIBLE: KindMeta = KindMeta {
     ],
 };
 
+const OPENAI: KindMeta = KindMeta {
+    capabilities: NATIVE_CAPS,
+    label: "OpenAI",
+    description: "OpenAI models (GPT, o-series) through the Responses API, using an API key from \
+                  the OpenAI Platform.",
+    default_base_url: Some(openai::DEFAULT_BASE_URL),
+    base_url_hint: "OpenAI API root, ending in /v1",
+    base_url_placeholder: openai::DEFAULT_BASE_URL,
+    model_placeholder: "e.g. gpt-5.2, gpt-5-mini, gpt-4.1",
+    requires_api_key: true,
+    api_key_hint: "Create a key at platform.openai.com → API keys.",
+    usage_option: false,
+    user_creatable: true,
+    presets: &[],
+};
+
 const GOOGLE_GEMINI: KindMeta = KindMeta {
+    capabilities: NATIVE_CAPS,
     label: "Google Gemini",
     description: "Gemini models through Google's Gemini API (Interactions API), using an API key \
                   from Google AI Studio.",
@@ -91,6 +124,13 @@ const GOOGLE_GEMINI: KindMeta = KindMeta {
 };
 
 const SIMULATED: KindMeta = KindMeta {
+    capabilities: Capabilities {
+        streaming: true,
+        tools: false,
+        parallel_tool_calls: false,
+        images: true,
+        context_window: None,
+    },
     label: "Simulated",
     description: "Built-in offline provider for trying the app.",
     default_base_url: None,
@@ -105,8 +145,9 @@ const SIMULATED: KindMeta = KindMeta {
 };
 
 impl ProviderKind {
-    pub const ALL: [ProviderKind; 3] = [
+    pub const ALL: [ProviderKind; 4] = [
         ProviderKind::OpenAiCompatible,
+        ProviderKind::OpenAi,
         ProviderKind::GoogleGemini,
         ProviderKind::Simulated,
     ];
@@ -114,9 +155,15 @@ impl ProviderKind {
     fn meta(self) -> &'static KindMeta {
         match self {
             ProviderKind::OpenAiCompatible => &OPENAI_COMPATIBLE,
+            ProviderKind::OpenAi => &OPENAI,
             ProviderKind::GoogleGemini => &GOOGLE_GEMINI,
             ProviderKind::Simulated => &SIMULATED,
         }
+    }
+
+    /// Adapter-level capabilities of this kind; adapters report the same value.
+    pub fn capabilities(self) -> Capabilities {
+        self.meta().capabilities.clone()
     }
 
     pub fn label(self) -> &'static str {
@@ -290,6 +337,8 @@ pub struct ProviderStore {
     state: Mutex<StoreFile>,
     secrets: Arc<dyn SecretStore>,
     http: reqwest::Client,
+    /// Per-provider clients for custom/skip TLS modes (see `connection`).
+    tls_clients: Mutex<HashMap<String, TlsClient>>,
 }
 
 fn api_key_ref(id: &str) -> Result<SecretRef> {
@@ -316,12 +365,11 @@ fn simulated_config() -> ProviderConfig {
     }
 }
 
-/// Whether to resolve credentials and the TLS-configured client. Inspection (capabilities)
-/// needs neither, which keeps keychain reads and client construction off that path.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Purpose {
-    Connect,
-    Inspect,
+/// A client built for a provider's non-default TLS settings, reused while they are unchanged.
+struct TlsClient {
+    mode: TlsMode,
+    ca_pem: Option<String>,
+    client: reqwest::Client,
 }
 
 impl ProviderStore {
@@ -347,6 +395,7 @@ impl ProviderStore {
             state: Mutex::new(state),
             secrets,
             http,
+            tls_clients: Mutex::new(HashMap::new()),
         })
     }
 
@@ -514,6 +563,7 @@ impl ProviderStore {
         if state.active.as_ref().is_some_and(|a| a.provider_id == id) {
             state.active = None;
         }
+        self.tls_clients.lock().unwrap().remove(id);
         self.secrets.delete(&api_key_ref(id)?)?;
         self.persist(&state)
     }
@@ -532,52 +582,57 @@ impl ProviderStore {
 
     /// Instantiates a live adapter, resolving the API key from the secret store.
     pub fn build(&self, id: &str) -> Result<Arc<dyn ModelProvider>> {
-        self.instantiate(&self.get(id)?, Purpose::Connect)
+        self.instantiate(&self.get(id)?)
     }
 
-    /// The single per-kind dispatch point. `Inspect` skips the keychain read and TLS client
-    /// construction: capability lookups run on every model change and never hit the network.
-    fn instantiate(
-        &self,
-        config: &ProviderConfig,
-        purpose: Purpose,
-    ) -> Result<Arc<dyn ModelProvider>> {
+    /// The single per-kind dispatch point.
+    fn instantiate(&self, config: &ProviderConfig) -> Result<Arc<dyn ModelProvider>> {
+        if config.kind == ProviderKind::Simulated {
+            return Ok(Arc::new(FakeProvider::default()));
+        }
+        let (key, http) = self.connection(config)?;
+        let (id, base_url) = (config.id.clone(), config.base_url.clone());
         Ok(match config.kind {
-            ProviderKind::Simulated => Arc::new(FakeProvider::default()),
+            ProviderKind::Simulated => unreachable!("handled above"),
             ProviderKind::OpenAiCompatible => {
-                let mut c = OpenAiCompatConfig::new(config.id.clone(), config.base_url.clone());
+                let mut c = OpenAiCompatConfig::new(id, base_url);
                 c.include_usage = config.include_usage;
                 c.context_window = config.context_window;
-                let (key, http) = self.connection(config, purpose)?;
                 c.api_key = key;
                 Arc::new(OpenAiCompatProvider::new(c, http))
             }
+            ProviderKind::OpenAi => {
+                let mut c = OpenAiConfig::new(id, base_url);
+                c.api_key = key;
+                Arc::new(OpenAiProvider::new(c, http))
+            }
             ProviderKind::GoogleGemini => {
-                let mut c = GeminiConfig::new(config.id.clone(), config.base_url.clone());
-                let (key, http) = self.connection(config, purpose)?;
+                let mut c = GeminiConfig::new(id, base_url);
                 c.api_key = key;
                 Arc::new(GeminiProvider::new(c, http))
             }
         })
     }
 
-    /// API key and HTTP client for a connection (`Inspect`: neither is resolved).
-    fn connection(
-        &self,
-        config: &ProviderConfig,
-        purpose: Purpose,
-    ) -> Result<(Option<String>, reqwest::Client)> {
-        if purpose == Purpose::Inspect {
-            return Ok((None, self.http.clone()));
-        }
+    /// API key and HTTP client for a connection. Clients for non-default TLS modes are built
+    /// once per provider and reused until its TLS settings change: building one loads a
+    /// trust store, which is too slow to repeat for every run.
+    fn connection(&self, config: &ProviderConfig) -> Result<(Option<String>, reqwest::Client)> {
         let key = if config.has_api_key {
             self.secrets.get(&api_key_ref(&config.id)?)?
         } else {
             None
         };
-        let http = match config.tls_mode {
-            TlsMode::System => self.http.clone(),
-            TlsMode::SkipVerification => crate::http::client_insecure()?,
+        if config.tls_mode == TlsMode::System {
+            return Ok((key, self.http.clone()));
+        }
+        let mut cache = self.tls_clients.lock().unwrap();
+        if let Some(c) = cache.get(&config.id).filter(|c| {
+            c.mode == config.tls_mode && c.ca_pem.as_deref() == config.tls_ca_pem.as_deref()
+        }) {
+            return Ok((key, c.client.clone()));
+        }
+        let client = match config.tls_mode {
             TlsMode::CustomCa => crate::http::client_with_extra_ca(
                 config.tls_ca_pem.as_deref().ok_or_else(|| {
                     Error::InvalidInput(
@@ -586,17 +641,32 @@ impl ProviderStore {
                     )
                 })?,
             )?,
+            _ => crate::http::client_insecure()?,
         };
-        Ok((key, http))
+        cache.insert(
+            config.id.clone(),
+            TlsClient {
+                mode: config.tls_mode,
+                ca_pem: config.tls_ca_pem.clone(),
+                client: client.clone(),
+            },
+        );
+        Ok((key, client))
     }
 
     /// Effective capabilities for a provider+model pair: adapter-level flags plus model-level
     /// resolution. Context window: per-model override → provider default (a deliberate user
     /// cap) → discovered → adapter-declared. Images: explicit tri-state, else server report
-    /// (discovered or cached) or the name heuristic.
+    /// (discovered or cached) or the name heuristic. Runs on every model change and run
+    /// start, so it reads the config in place: no clone, keychain read or adapter.
     pub fn capabilities_for(&self, provider_id: &str, model: &str) -> Result<Capabilities> {
-        let config = self.get(provider_id)?;
-        let mut caps = self.instantiate(&config, Purpose::Inspect)?.capabilities();
+        let state = self.state.lock().unwrap();
+        let config = state
+            .providers
+            .iter()
+            .find(|p| p.id == provider_id)
+            .ok_or_else(|| Error::NotFound(format!("provider `{provider_id}`")))?;
+        let mut caps = config.kind.capabilities();
         let discovered = config.discovered.get(model);
         caps.context_window = config
             .model_context_windows
@@ -622,10 +692,7 @@ impl ProviderStore {
     /// provider reported vision flags, so a failed probe keeps the previous cache.
     pub async fn discover_models(&self, id: &str) -> Result<Vec<String>> {
         let config = self.get(id)?;
-        let discovery = self
-            .instantiate(&config, Purpose::Connect)?
-            .discover()
-            .await?;
+        let discovery = self.instantiate(&config)?.discover().await?;
         if config.kind == ProviderKind::Simulated {
             return Ok(config.models);
         }
@@ -883,6 +950,70 @@ mod tests {
             .capabilities_for(&saved.id, "gemini-flash-latest")
             .unwrap();
         assert!(caps.tools && caps.images, "name heuristic covers gemini");
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn openai_requires_key_defaults_url_and_reports_family() {
+        let (s, tmp) = store();
+        let mut o = input("OpenAI");
+        o.kind = ProviderKind::OpenAi;
+        o.base_url = String::new();
+        o.api_key = None;
+        assert!(s.save(o.clone()).is_err(), "key required");
+        o.api_key = Some("sk-test".into());
+        let saved = s.save(o).unwrap();
+        assert_eq!(saved.base_url, openai::DEFAULT_BASE_URL);
+        assert_eq!(s.build(&saved.id).unwrap().family(), Some(openai::FAMILY));
+        let caps = s.capabilities_for(&saved.id, "gpt-5").unwrap();
+        assert!(caps.tools && caps.images, "name heuristic covers gpt-5");
+        let spec = ProviderKind::OpenAi.spec();
+        assert!(spec.requires_api_key && !spec.usage_option);
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn adapters_report_their_kind_capabilities() {
+        let (s, tmp) = store();
+        for kind in ProviderKind::ALL {
+            let id = if kind == ProviderKind::Simulated {
+                SIMULATED_PROVIDER_ID.to_owned()
+            } else {
+                let mut i = input("X");
+                i.kind = kind;
+                s.save(i).unwrap().id
+            };
+            let adapter = s.build(&id).unwrap().capabilities();
+            let meta = kind.capabilities();
+            assert_eq!(
+                (
+                    adapter.streaming,
+                    adapter.tools,
+                    adapter.parallel_tool_calls
+                ),
+                (meta.streaming, meta.tools, meta.parallel_tool_calls),
+                "{kind:?}: capabilities_for must agree with the adapter"
+            );
+        }
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn custom_tls_clients_are_reused_until_settings_change() {
+        let (s, tmp) = store();
+        let mut i = input("LAN");
+        i.base_url = "https://lan.example/v1".into();
+        i.tls_mode = TlsMode::SkipVerification;
+        let p = s.save(i.clone()).unwrap();
+        s.build(&p.id).unwrap();
+        s.build(&p.id).unwrap();
+        assert_eq!(s.tls_clients.lock().unwrap().len(), 1);
+        i.id = Some(p.id.clone());
+        i.tls_mode = TlsMode::System;
+        s.save(i).unwrap();
+        s.build(&p.id).unwrap();
+        s.delete(&p.id).unwrap();
+        assert!(s.tls_clients.lock().unwrap().is_empty());
         std::fs::remove_dir_all(tmp).unwrap();
     }
 

@@ -47,6 +47,33 @@ matter:
 | **Network** | Plain HTTP accepted for a non-loopback host, redirects followed on remote MCP connections, or TLS verification bypassed without the user choosing it. |
 | **Dependencies** | A known vulnerability in a pinned dependency that is reachable from OpenGent. |
 
+## Zero data retention (ZDR)
+
+OpenGent is the system of record for conversation state: chats live only in the local
+SQLite database, so the native hosted providers are driven in their **stateless, no-storage
+mode**. Both the OpenAI adapter (`POST /responses`) and the Google Gemini adapter
+(`POST /interactions`) send every request with **`store: false`** — the vendor API retains
+no conversation items between calls, and no server-side chaining
+(`previous_response_id`-style state, conversations, background runs) is used. The full,
+locally-held history is resent each turn instead.
+
+Provider continuation state that must be replayed on the next turn (OpenAI encrypted
+reasoning items, Gemini thought signatures) is stored locally alongside the message it came
+with, never crosses IPC or appears in search, and is only sent back to the same provider
+family it came from.
+
+Notes and caveats:
+
+- `store: false` means **no API-level storage**. It is the supported stateless mode for both
+  vendors, but a vendor's own logging, abuse-monitoring or policy-mandated retention still
+  applies per its data-usage terms and your organization/account settings — verify those for
+  formal ZDR requirements.
+- OpenAI-compatible providers (Ollama, LM Studio, hosted gateways) are stateless by protocol:
+  the app sends only the request body, but retention on the other side is that server's
+  policy and outside the app's control. For maximum retention guarantees use a local server.
+- Provider traffic originates in Rust (never the webview), API keys live in the OS keychain,
+  and HTTPS is required for non-loopback endpoints unless the user explicitly opts out.
+
 **Out of scope (by design):**
 
 - What a trusted MCP server does once you've connected it. Tool permissions are a consent

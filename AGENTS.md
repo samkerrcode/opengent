@@ -34,7 +34,16 @@ Contributor guidelines: see CONTRIBUTING.md. Security scope: SECURITY.md.
 - `cargo test -p agent-core -- --ignored` – live tests: OS keychain round trip; stdio MCP probe
   (`OPENGENT_TEST_MCP_COMMAND="npx -y @modelcontextprotocol/server-everything"`); provider round trip
   (`OPENGENT_TEST_OPENAI_BASE_URL=http://localhost:8787/v1` with `node scripts/dev/mock-openai-server.mjs`).
-- `node scripts/dev/mock-openai-server.mjs` – fake OpenAI-compatible server for manual UI testing (`/v1`, models `mock-fast`, `mock-slow`; API key `bad` triggers a 401). Send "use tool <name>" to exercise tool calling.
+- `node scripts/dev/mock-openai-server.mjs` – fake OpenAI server for manual UI testing (`/v1`, models `mock-fast`, `mock-slow`,
+  `mock-vision`, `mock-reasoning`; API key `bad` triggers a 401). Serves Chat Completions (OpenAI-compatible type) and the
+  Responses API (OpenAI type); the latter rejects requests with `store` ≠ false, item ids, strict-incompatible tools or
+  altered reasoning items. Send "use tool <name>" to exercise tool calling. Responses round trip:
+  `OPENGENT_TEST_OPENAI_API_KEY=x OPENGENT_TEST_OPENAI_RESPONSES_BASE_URL=http://localhost:8787/v1
+  OPENGENT_TEST_OPENAI_MODEL=mock-reasoning cargo test -p agent-core --test provider_store_live -- --ignored openai_lists`
+  (drop the base URL/model for real OpenAI).
+- Adapter helpers live in `providers/common.rs` (`CallIds`, `push_bounded`, `str_at`, `own_opaque`, `arguments_object`/
+  `arguments_string`, `is_chat_model`, `request_timeout`); adapter-level `Capabilities` are declared in the kind's
+  `KindMeta` and adapters return `ProviderKind::X.capabilities()`. Multi-request adapter tests use `tests/common::serve_many`.
 - `node scripts/dev/mock-gemini-server.mjs [port]` – fake Gemini Interactions API (`http://localhost:8789/v1`, models
   `mock-gemini-fast`, `mock-gemini-thinking`, `mock-gemini-slow`; any key except `bad`, which gets Google's 400
   `API_KEY_INVALID`). "use tool <name>" returns a signed `function_call`; it rejects requests whose replayed thought/call

@@ -12,9 +12,6 @@ use agent_core::domain::{ContentBlock, Message, Role, StopReason};
 use agent_core::providers::gemini::{GeminiConfig, GeminiProvider, FAMILY};
 use agent_core::providers::{CompletionRequest, ModelProvider};
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
-use tokio::sync::oneshot;
 
 fn request() -> CompletionRequest {
     CompletionRequest {
@@ -265,57 +262,7 @@ async fn discovery_lists_chat_models() {
         .contains("x-goog-api-key: test-key"));
 }
 
-/// Accepts one connection per entry, serving `responses[i]` (an SSE body) to request `i`.
-/// Returns the origin and every captured request.
-async fn serve_many(responses: Vec<&'static str>) -> (String, oneshot::Receiver<Vec<String>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let origin = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-    let (tx, rx) = oneshot::channel();
-    tokio::spawn(async move {
-        let mut requests = Vec::new();
-        for body in responses {
-            let Ok((mut sock, _)) = listener.accept().await else {
-                break;
-            };
-            let mut buf = vec![0u8; 64 * 1024];
-            let mut req = Vec::new();
-            loop {
-                match sock.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        req.extend_from_slice(&buf[..n]);
-                        if let Some(pos) = req.windows(4).position(|w| w == b"\r\n\r\n") {
-                            let head = String::from_utf8_lossy(&req[..pos]).to_string();
-                            let len = head
-                                .lines()
-                                .find_map(|l| {
-                                    let (k, v) = l.split_once(':')?;
-                                    k.eq_ignore_ascii_case("content-length").then_some(v)
-                                })
-                                .and_then(|v| v.trim().parse::<usize>().ok())
-                                .unwrap_or(0);
-                            if req.len() >= pos + 4 + len {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            requests.push(String::from_utf8_lossy(&req).into_owned());
-            let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            if sock.write_all(head.as_bytes()).await.is_err()
-                || sock.write_all(body.as_bytes()).await.is_err()
-            {
-                break;
-            }
-        }
-        let _ = tx.send(requests);
-    });
-    (origin, rx)
-}
+use common::serve_many;
 
 fn provider_at(origin: String) -> GeminiProvider {
     let mut config = GeminiConfig::new("g", format!("{origin}/v1"));

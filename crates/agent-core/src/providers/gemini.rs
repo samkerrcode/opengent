@@ -21,8 +21,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::common::{
-    extract_error_message, map_transport, pump_sse, read_json, send_checked, spawn_stream,
-    status_error, StreamEnd, MAX_TOOL_ARG_CHARS,
+    arguments_object, extract_error_message, is_chat_model, map_transport, own_opaque as opaque_of,
+    pump_sse, push_bounded, read_json, send_checked, spawn_stream, status_error, str_at, CallIds,
+    StreamEnd, MAX_TOOL_ARG_CHARS,
 };
 use super::sse::SseEvent;
 use super::{
@@ -84,9 +85,8 @@ impl GeminiConfig {
         }
     }
 
-    /// Whole-request deadline; the idle timeout governs streaming, this bounds the worst case.
     fn request_timeout(&self) -> Duration {
-        self.idle_timeout.max(self.connect_timeout) * 4
+        super::common::request_timeout(self.connect_timeout, self.idle_timeout)
     }
 }
 
@@ -265,28 +265,12 @@ impl GeminiProvider {
 
 /// The payload of an opaque block this adapter produced.
 fn own_opaque(b: &ContentBlock) -> Option<&Value> {
-    match b {
-        ContentBlock::ProviderOpaque { provider, data } if provider == FAMILY => Some(data),
-        _ => None,
-    }
+    opaque_of(b, FAMILY)
 }
 
 fn call_signature(data: &Value) -> Option<(&str, &str)> {
     let c = data.get("call_signature")?;
     Some((c.get("id")?.as_str()?, c.get("signature")?.as_str()?))
-}
-
-/// `function_call.arguments` must be an object. Stored arguments are an object when the
-/// model produced valid JSON, else the raw text (which may still parse).
-fn arguments_object(arguments: &Value) -> Value {
-    match arguments {
-        Value::Object(_) => arguments.clone(),
-        Value::String(s) => serde_json::from_str::<Value>(s)
-            .ok()
-            .filter(Value::is_object)
-            .unwrap_or_else(|| json!({})),
-        _ => json!({}),
-    }
 }
 
 /// Parses one `GET /models` page into chat models and the next page token.
@@ -299,8 +283,7 @@ pub fn parse_models_page(doc: &Value) -> (Vec<(String, DiscoveredModel)>, Option
                 .filter_map(|m| {
                     let id = m.get("name")?.as_str()?;
                     let id = id.strip_prefix("models/").unwrap_or(id).to_owned();
-                    let lower = id.to_ascii_lowercase();
-                    if NON_CHAT_MARKERS.iter().any(|x| lower.contains(x)) {
+                    if !is_chat_model(&id, NON_CHAT_MARKERS) {
                         return None;
                     }
                     // The listing has no Interactions marker; `generateContent` support is
@@ -340,12 +323,7 @@ impl ModelProvider for GeminiProvider {
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            streaming: true,
-            tools: true,
-            parallel_tool_calls: true,
-            ..Default::default()
-        }
+        super::registry::ProviderKind::GoogleGemini.capabilities()
     }
 
     fn family(&self) -> Option<&'static str> {
@@ -560,8 +538,7 @@ struct StreamState {
     /// Indices of steps that stopped in the current interaction.
     closed: HashSet<u64>,
     /// Every call id emitted so far, across connections — ids must stay unique per turn.
-    call_ids: HashSet<String>,
-    calls: usize,
+    call_ids: CallIds,
     usage: Option<Usage>,
     status: Option<String>,
     interaction_id: Option<String>,
@@ -569,16 +546,6 @@ struct StreamState {
     continuation: Option<String>,
     /// The server sent an `error` event: the stream must not be resumed or retried.
     failed: bool,
-}
-
-fn str_at<'a>(v: &'a Value, key: &str) -> &'a str {
-    v.get(key).and_then(Value::as_str).unwrap_or("")
-}
-
-/// Appends at most `limit` total chars; a hostile server must not grow state unboundedly.
-fn push_bounded(buf: &mut String, s: &str, limit: usize) {
-    let room = limit.saturating_sub(buf.len());
-    buf.extend(s.chars().take(room));
 }
 
 impl StreamState {
@@ -789,7 +756,7 @@ impl StreamState {
                 });
             }
             OpenStep::Call {
-                mut id,
+                id,
                 name,
                 arguments,
                 signature,
@@ -797,12 +764,7 @@ impl StreamState {
                 if name.is_empty() {
                     return;
                 }
-                // Approvals and result pairing key on the id: replace empty or repeated ones.
-                if id.is_empty() || !self.call_ids.insert(id.clone()) {
-                    id = format!("call_{}_{}", self.calls, uuid::Uuid::new_v4().simple());
-                    self.call_ids.insert(id.clone());
-                }
-                self.calls += 1;
+                let id = self.call_ids.unique(id);
                 if !signature.is_empty() {
                     out.push(ProviderEvent::Opaque {
                         provider: FAMILY,
@@ -864,7 +826,7 @@ impl StreamState {
             }
             _ => {}
         }
-        let reason = if self.calls > 0 {
+        let reason = if self.call_ids.count() > 0 {
             StopReason::ToolUse
         } else if status == "incomplete" {
             StopReason::MaxTokens

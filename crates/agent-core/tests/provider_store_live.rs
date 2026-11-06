@@ -1,7 +1,8 @@
 //! Opt-in: exercises ProviderStore -> adapter -> RunCoordinator against a running
 //! OpenAI-compatible server (e.g. `node scripts/dev/mock-openai-server.mjs`).
 //! Set OPENGENT_TEST_OPENAI_BASE_URL (and optionally OPENGENT_TEST_OPENAI_MODEL) and run with --ignored.
-//! The Gemini test needs OPENGENT_TEST_GEMINI_API_KEY (Google AI Studio).
+//! The Gemini test needs OPENGENT_TEST_GEMINI_API_KEY (Google AI Studio); the OpenAI
+//! (Responses API) test needs OPENGENT_TEST_OPENAI_API_KEY.
 
 use std::sync::Arc;
 
@@ -149,6 +150,39 @@ async fn gemini_lists_models_and_completes_a_tool_round_trip() {
         eprintln!("OPENGENT_TEST_GEMINI_API_KEY not set; skipping");
         return;
     };
+    tool_round_trip(
+        ProviderKind::GoogleGemini,
+        key,
+        std::env::var("OPENGENT_TEST_GEMINI_BASE_URL").unwrap_or_default(),
+        std::env::var("OPENGENT_TEST_GEMINI_MODEL")
+            .unwrap_or_else(|_| "gemini-flash-latest".into()),
+    )
+    .await;
+}
+
+/// `OPENGENT_TEST_OPENAI_API_KEY=… cargo test -p agent-core -- --ignored openai_lists`
+/// (optional `OPENGENT_TEST_OPENAI_MODEL`, default `gpt-5-mini`, and
+/// `OPENGENT_TEST_OPENAI_RESPONSES_BASE_URL`, e.g. `http://localhost:8787/v1` for
+/// `mock-openai-server.mjs` with model `mock-reasoning`).
+#[tokio::test]
+#[ignore = "requires an OpenAI API key"]
+async fn openai_lists_models_and_completes_a_tool_round_trip() {
+    let Ok(key) = std::env::var("OPENGENT_TEST_OPENAI_API_KEY") else {
+        eprintln!("OPENGENT_TEST_OPENAI_API_KEY not set; skipping");
+        return;
+    };
+    tool_round_trip(
+        ProviderKind::OpenAi,
+        key,
+        std::env::var("OPENGENT_TEST_OPENAI_RESPONSES_BASE_URL").unwrap_or_default(),
+        std::env::var("OPENGENT_TEST_OPENAI_MODEL").unwrap_or_else(|_| "gpt-5-mini".into()),
+    )
+    .await;
+}
+
+/// Store → discovery → a tool call → replay of the stored turn (with its provider state)
+/// → a final text answer. An empty `base_url` uses the kind's default endpoint.
+async fn tool_round_trip(kind: ProviderKind, key: String, base_url: String, model: String) {
     let tmp = std::env::temp_dir().join(format!("opengent-live-{}", uuid::Uuid::new_v4()));
     let root = resolve_data_root(Some(&tmp)).unwrap();
     let store = ProviderStore::load(
@@ -160,10 +194,9 @@ async fn gemini_lists_models_and_completes_a_tool_round_trip() {
     let saved = store
         .save(ProviderInput {
             id: None,
-            name: "gemini".into(),
-            kind: ProviderKind::GoogleGemini,
-            // Empty = the default endpoint; point at `mock-gemini-server.mjs` to test offline.
-            base_url: std::env::var("OPENGENT_TEST_GEMINI_BASE_URL").unwrap_or_default(),
+            name: kind.label().into(),
+            kind,
+            base_url,
             default_model: None,
             api_key: Some(key),
             include_usage: false,
@@ -178,8 +211,6 @@ async fn gemini_lists_models_and_completes_a_tool_round_trip() {
     eprintln!("models: {models:?}");
     assert!(!models.is_empty());
 
-    let model = std::env::var("OPENGENT_TEST_GEMINI_MODEL")
-        .unwrap_or_else(|_| "gemini-flash-latest".into());
     let provider = store.build(&saved.id).unwrap();
     let tools = vec![ToolSpec {
         name: "weather__get".into(),

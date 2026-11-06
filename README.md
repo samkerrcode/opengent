@@ -33,9 +33,9 @@ https://github.com/user-attachments/assets/e552658e-231b-44a2-97c2-7181deb878e3
 ## Highlights
 
 - **Model-agnostic.** Any OpenAI-compatible endpoint — Ollama, LM Studio, vLLM, llama.cpp,
-  OpenRouter, or a self-hosted gateway — plus native Google Gemini, with a built-in simulated
-  provider for trying the app without an account. Native OpenAI, Anthropic, Bedrock and
-  Hugging Face adapters are on the [roadmap](#roadmap).
+  OpenRouter, or a self-hosted gateway — plus native OpenAI and Google Gemini, with a built-in
+  simulated provider for trying the app without an account. Native Anthropic, Bedrock and
+  Hugging Face adapters are on the [roadmap](#native-providers).
 - **Real tools, real permissions.** Connect [MCP](https://modelcontextprotocol.io) servers over
   stdio or Streamable HTTP. Each tool is *Always allow*, *Ask*, or *Block*; approvals are
   enforced in Rust at dispatch, and an *Always allow* grant reverts to *Ask* if the tool's
@@ -132,7 +132,7 @@ Design rules (contributor conventions live in [AGENTS.md](AGENTS.md)):
 | `src-tauri/` | Tauri host: `AppState`, IPC commands, scheduler, capabilities, CSP, icons |
 | `src/` | Svelte app: `features/{chat,history,providers,mcp,agents}`, `lib/ipc`, `lib/state` |
 | `src/lib/generated/bindings/` | TypeScript types generated from Rust DTOs by ts-rs (committed; CI checks drift) |
-| `scripts/dev/` | Mock OpenAI-compatible and MCP servers for local testing |
+| `scripts/dev/` | Mock OpenAI (Chat Completions + Responses), Gemini and MCP servers for local testing |
 | `docs/` | Feature guide and branding assets |
 | `.github/workflows/ci.yml` | macOS + Windows checks, tests, and unsigned build |
 
@@ -149,10 +149,24 @@ detailed in [CHANGELOG.md](CHANGELOG.md); shipped features are documented in
 | **2 – Custom/local providers** | OpenAI-compatible Chat Completions streaming, provider/model settings, capability flags, incremental sanitized Markdown, context limits. *First usable chat.* | ✅ Done |
 | **3 – MCP agent** | stdio + Streamable HTTP servers, tool discovery, Always allow / Ask / Block policies, approval UI, full loop: model → approval → tool → result → model. *Agent alpha.* | ✅ Done |
 | **4 – OAuth** | Browser sign-in (authorization code + PKCE, U2M) and client credentials (M2M) for MCP servers; token lifecycle in the keychain | Next |
-| **5 – OpenAI & Anthropic native** | Responses API and Messages API adapters, provider-aware prompt caching, cross-provider context projection | |
-| **6 – Google, Bedrock, Hugging Face** | Gemini (thought signatures), Bedrock ConverseStream (feature-gated AWS SDK), HF presets | Gemini done (Interactions API, AI Studio key) |
+| **5 – Native providers** | One adapter per vendor protocol, each shipped independently — see [Native providers](#native-providers) | In progress (Gemini, OpenAI done) |
+| **6 – Provider context & caching** | Provider-aware prompt caching (OpenAI `prompt_cache_key`, Anthropic `cache_control`), cross-provider context projection, summarization checkpoints | |
 | **7 – Release hardening** | Performance profiling, accessibility, export/import, signing & notarization, installers | |
 | **8 – Extensions** | Sub-agents, A2A, skills, hooks, model router — through the existing `ModelProvider` / tool / permission seams | |
+
+### Native providers
+
+Phase 5 is delivered one provider at a time. Every adapter plugs into the same `ModelProvider`
+seam, replays its own continuation state through `ProviderOpaque` blocks, and gets its settings
+form from Rust (`list_provider_kinds`) — adding one needs no UI changes.
+
+| Provider | Protocol | Notes | Status |
+|---|---|---|---|
+| **Google Gemini** | Interactions API (`store: false`) | AI Studio key; thought signatures replayed verbatim; stream resume | ✅ Done |
+| **OpenAI** | Responses API (`store: false`) | API key; encrypted reasoning items replayed; reasoning summaries | ✅ Done |
+| **Anthropic** | Messages API | Thinking signatures, `cache_control` (with Phase 6) | Next |
+| **AWS Bedrock** | ConverseStream | Feature-gated AWS SDK; IAM / SSO profiles | |
+| **Hugging Face** | Inference Providers (OpenAI-compatible) | Presets on the OpenAI-compatible type | |
 
 ### Proposed features
 
@@ -181,9 +195,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how proposals are approved.
   `tauri:dev`.
 - The command palette and inspector panel from Phase 1 are deferred (sidebar search covers the
   main need for now).
-- Implemented protocols: OpenAI-compatible and Google Gemini (AI Studio API key; no Vertex AI,
-  Google built-in tools or images inside tool results yet). The other native adapters arrive in
-  Phases 5–6.
+- Implemented protocols: OpenAI-compatible, OpenAI (Responses API; no built-in tools such as
+  web search or code interpreter yet) and Google Gemini (AI Studio API key; no Vertex AI, Google
+  built-in tools or images inside tool results yet). The other native adapters arrive during
+  [Phase 5](#native-providers).
 - MCP servers that need OAuth sign-in can't connect until Phase 4.
 - Scheduled runs only fire while the app is open.
 - Builds are unsigned. The DMG step can fail if a previous build's image is still mounted
