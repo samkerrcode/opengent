@@ -41,8 +41,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::common::{
     arguments_object, extract_error_message, map_transport, own_opaque as opaque_of, pump_sse,
-    push_bounded, read_json, send_checked, spawn_stream, status_error, str_at, CallIds, StreamEnd,
-    MAX_TOOL_ARG_CHARS,
+    push_bounded, read_json, secret_header, send_checked, spawn_stream, status_error, str_at,
+    CallIds, StreamEnd, MAX_TOOL_ARG_CHARS,
 };
 use super::sse::SseEvent;
 use super::{
@@ -116,17 +116,21 @@ fn model_name(model: &str) -> String {
 /// models newer than this list still get thinking.
 pub fn supports_adaptive_thinking(model: &str) -> bool {
     let m = model_name(model);
-    if !m.starts_with("claude") {
-        return true;
-    }
-    let legacy = m.starts_with("claude-2")
-        || m.starts_with("claude-3")
-        || ["-4-0", "-4-1", "-4-2", "-4-3", "-4-4", "-4-5"]
-            .iter()
-            .any(|s| m.contains(s))
-        || m.ends_with("-4")
-        || m.ends_with("-4-0");
-    !legacy
+    !m.starts_with("claude") || version(&m).is_none_or(|v| v >= (4, 6))
+}
+
+/// `(major, minor)` of a bare Claude name in either scheme — `claude-3-5-sonnet-…`,
+/// `claude-sonnet-4-5-…`, `claude-2.1`, `claude-opus-4-6@…`. Date suffixes are 8-digit
+/// tokens, so only 1–2 digit tokens count. `None` when the name carries no version.
+fn version(m: &str) -> Option<(u32, u32)> {
+    let num = |t: &str| {
+        (!t.is_empty() && t.len() <= 2 && t.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| t.parse().ok())
+            .flatten()
+    };
+    let mut tokens = m.split(['-', '.', '@']).skip(1);
+    let major = tokens.by_ref().find_map(num)?;
+    Some((major, tokens.next().and_then(num).unwrap_or(0)))
 }
 
 /// Best-known output cap per generation. The compiler's ~25%-of-window budget can exceed a
@@ -138,14 +142,11 @@ pub fn known_max_output(model: &str) -> Option<u32> {
     if !m.starts_with("claude") {
         return None;
     }
-    Some(if supports_adaptive_thinking(model) {
-        128_000 // Claude 4.6 and later
-    } else if m.starts_with("claude-3-7") {
-        64_000
-    } else if m.starts_with("claude-3") || m.starts_with("claude-2") {
-        4_096 // the floor of the 2.x/3.x caps
-    } else {
-        64_000 // Claude 4.0–4.5
+    Some(match version(&m) {
+        _ if supports_adaptive_thinking(model) => 128_000, // Claude 4.6 and later
+        Some((3, 7)) => 64_000,
+        Some((major, _)) if major < 4 => 4_096, // the floor of the 1.x–3.x caps
+        _ => 64_000,                            // Claude 4.0–4.5
     })
 }
 
@@ -162,7 +163,7 @@ fn build_request(
         .header("anthropic-version", API_VERSION)
         .header("anthropic-beta", BETA_FLAGS);
     if let Some(key) = &config.api_key {
-        req = req.header("x-api-key", key);
+        req = secret_header(req, "x-api-key", key);
     }
     req
 }
@@ -248,10 +249,15 @@ impl AnthropicProvider {
                             })),
                             b => {
                                 // A signed thinking/redacted_thinking block, replayed
-                                // verbatim at its position.
-                                if let Some(block) = own_opaque(b)
-                                    .and_then(|d| d.get("block"))
-                                    .filter(|v| v.is_object())
+                                // verbatim at its position. Only those two types: stored
+                                // state must never inject other content into the request.
+                                if let Some(block) =
+                                    own_opaque(b).and_then(|d| d.get("block")).filter(|v| {
+                                        matches!(
+                                            str_at(v, "type"),
+                                            "thinking" | "redacted_thinking"
+                                        )
+                                    })
                                 {
                                     content.push(block.clone());
                                 }
@@ -811,6 +817,7 @@ mod tests {
                         provider: "other_family".into(),
                         data: json!({ "block": { "type": "thinking" } }),
                     },
+                    opaque(json!({ "type": "text", "text": "injected" })),
                 ],
             },
             Message {
@@ -878,7 +885,7 @@ mod tests {
                 "tool_use",
                 "tool_use"
             ],
-            "foreign opaque state is dropped; own state replays in place"
+            "foreign or non-thinking opaque state is dropped; own state replays in place"
         );
         assert_eq!(msgs[1]["content"][0], thinking, "thinking block verbatim");
         assert_eq!(msgs[1]["content"][2], redacted, "redacted block verbatim");
@@ -908,7 +915,15 @@ mod tests {
             ("claude-sonnet-4-6", true),
             ("claude-opus-4-8", true),
             ("anthropic/claude-opus-5-5", true),
+            ("claude-sonnet-5-4", true),
+            ("claude-opus-5-4-20260115", true),
+            ("claude-sonnet-5-20261101", true),
+            ("claude-opus-4-6@20260205", true),
+            ("claude-opus-4-10", true),
             ("future-model", true),
+            ("claude-opus-4-5@20251101", false),
+            ("claude-2.1", false),
+            ("claude-instant-1.2", false),
             ("claude-sonnet-4-5", false),
             ("claude-opus-4-5-20251101", false),
             ("claude-haiku-4-5-20251001", false),
@@ -936,8 +951,12 @@ mod tests {
         assert_eq!(AnthropicProvider::build_body(&req)["max_tokens"], 128_000);
         req.model = "claude-sonnet-4-5".into();
         assert_eq!(AnthropicProvider::build_body(&req)["max_tokens"], 64_000);
+        req.model = "claude-3-7-sonnet-20250224".into();
+        assert_eq!(AnthropicProvider::build_body(&req)["max_tokens"], 64_000);
         req.model = "claude-3-5-sonnet-20241022".into();
         assert_eq!(AnthropicProvider::build_body(&req)["max_tokens"], 4_096);
+        req.model = "claude-sonnet-5-4".into();
+        assert_eq!(AnthropicProvider::build_body(&req)["max_tokens"], 128_000);
         req.model = "proxy-model".into();
         assert_eq!(
             AnthropicProvider::build_body(&req)["max_tokens"],

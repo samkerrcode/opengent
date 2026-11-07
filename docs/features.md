@@ -163,7 +163,8 @@ API key*. In Provider settings choose the **Google Gemini** tile, paste the key 
 **How it works.** `crates/agent-core/src/providers/gemini.rs`.
 - Requests go to `POST {base}/interactions` with `store: false` (Google keeps nothing; the
   chat history stays local and the full history is sent each turn) and `stream: true`. The
-  key is sent in the `x-goog-api-key` header, never in the URL.
+  key is sent in the `x-goog-api-key` header, never in the URL, and redirects are never
+  followed.
 - History becomes an ordered list of steps: your messages → `user_input` (text + images), the
   model's text → `model_output`, tool calls → `function_call` (arguments as an object), tool
   results → `function_result` (with the tool name).
@@ -221,7 +222,8 @@ test**: the model list is fetched with each model's real limits and you pick a d
 **How it works.** `crates/agent-core/src/providers/anthropic.rs` (API version
 `2026-10-21`).
 - Requests go to `POST {base}/messages` with `stream: true`; the key rides in the
-  `x-api-key` header, never the URL. The API is stateless — Anthropic keeps no
+  `x-api-key` header, never the URL, and redirects are never followed (reqwest would
+  forward custom headers to the redirect target). The API is stateless — Anthropic keeps no
   conversation state, and the full local history is sent each turn.
 - History becomes alternating `user`/`assistant` messages: your text and images → `user`,
   the model's text and calls → `assistant` (`tool_use`, arguments as an object), tool

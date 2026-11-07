@@ -22,6 +22,10 @@ planned work lives in the [README roadmap](README.md#roadmap).
   now clamped to the model's real output cap (a new `max_output_tokens` capability filled
   from discovery), which also fixes oversized `max_tokens` for 1M-window models on other
   providers. Offline mock: `scripts/dev/mock-anthropic-server.mjs`.
+- Provider HTTP clients no longer follow redirects (as remote MCP connections already
+  didn't): reqwest forwards custom credential headers such as `x-api-key` and
+  `x-goog-api-key` to a cross-origin redirect target. A redirecting base URL now fails with
+  a hint to use the final address. Credential headers are also marked sensitive.
 - Provider settings redesign: opens on a tile picker of provider types with brand logos
   (OpenAI, Google Gemini; a neutral icon otherwise) instead of a Type dropdown; the form gets a
   logo header, *← All providers*, an API-key *Show* toggle and *Get an API key ↗* link, and

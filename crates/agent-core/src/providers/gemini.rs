@@ -108,7 +108,7 @@ fn build_request(
         .timeout(timeout)
         .header("Api-Revision", API_REVISION);
     if let Some(key) = &config.api_key {
-        req = req.header("x-goog-api-key", key);
+        req = super::common::secret_header(req, "x-goog-api-key", key);
     }
     req
 }

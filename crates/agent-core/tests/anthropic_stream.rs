@@ -327,6 +327,30 @@ async fn invalid_key_maps_to_auth_hint() {
 }
 
 #[tokio::test]
+async fn redirects_are_not_followed_with_the_key() {
+    // reqwest forwards custom headers like `x-api-key` across origins, so a followed
+    // redirect would hand the key to the target. Not following it surfaces a clear error.
+    let target = common::serve_once("200 OK", TEXT_BODY, 4096, Duration::ZERO).await;
+    let status: &'static str = Box::leak(
+        format!(
+            "307 Temporary Redirect\r\nLocation: {}/v1/messages",
+            target.origin
+        )
+        .into_boxed_str(),
+    );
+    let (p, _s) = provider(status, b"", 4096).await;
+    let c = common::collect(&p, &request()).await;
+    let err = c.err.unwrap();
+    assert!(err.contains("redirected"), "{err}");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), target.request)
+            .await
+            .is_err(),
+        "the redirect target must never receive a request"
+    );
+}
+
+#[tokio::test]
 async fn oversized_signature_drops_the_block_and_the_tail() {
     let sig = "s".repeat(70 * 1024);
     let body = format!(
