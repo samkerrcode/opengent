@@ -6,6 +6,26 @@ planned work lives in the [README roadmap](README.md#roadmap).
 
 ## Unreleased — Phase 4 (OAuth)
 
+- Native **Anthropic** provider (Phase 5 — native providers): add it with an Anthropic API
+  key (Type → Anthropic). Uses the Messages API (version `2026-10-21`) statelessly, with
+  streaming, adaptive thinking (`display: "summarized"`, no beta header needed for
+  interleaved reasoning between tool calls), parallel tool calls, image input, and model
+  discovery that caches each model's reported context window, output cap, vision and
+  thinking flags. Signed `thinking`/`redacted_thinking` blocks are stored as provider
+  state (signature only — the readable text is in the Thinking block and the server
+  ignores it on replay) and replayed verbatim in order; a block over the size cap ends
+  signature storage for that response rather than leaving an invalid gap. On Claude
+  5.1-generation models, which bind signatures to the request prefix, requests send
+  `block_binding: "drop_block"` so edited history (trimming, re-capped tool results,
+  changed tools) costs the affected reasoning instead of the turn. `refusal` stops surface
+  the classifier's explanation so agent fallbacks engage. The compiler's output budget is
+  now clamped to the model's real output cap (a new `max_output_tokens` capability filled
+  from discovery), which also fixes oversized `max_tokens` for 1M-window models on other
+  providers. Offline mock: `scripts/dev/mock-anthropic-server.mjs`.
+- Provider HTTP clients no longer follow redirects (as remote MCP connections already
+  didn't): reqwest forwards custom credential headers such as `x-api-key` and
+  `x-goog-api-key` to a cross-origin redirect target. A redirecting base URL now fails with
+  a hint to use the final address. Credential headers are also marked sensitive.
 - Provider settings redesign: opens on a tile picker of provider types with brand logos
   (OpenAI, Google Gemini; a neutral icon otherwise) instead of a Type dropdown; the form gets a
   logo header, *← All providers*, an API-key *Show* toggle and *Get an API key ↗* link, and

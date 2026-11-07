@@ -17,21 +17,16 @@ pub fn init() {
     });
 }
 
+/// Every client is redirect-free: reqwest strips `Authorization`/`Cookie` on cross-origin
+/// hops but forwards custom credential headers (`x-api-key`, `x-goog-api-key`, MCP
+/// `X-API-Key`), which would leak them to whatever host a redirect names.
 fn builder() -> reqwest::ClientBuilder {
     init();
     reqwest::Client::builder()
         .user_agent(format!("{}/{}", product().slug, product().version))
         .connect_timeout(Duration::from_secs(15))
         .pool_idle_timeout(Duration::from_secs(90))
-}
-
-/// Pooled client that never follows redirects, for remote MCP servers. Redirects are off
-/// because reqwest strips `Authorization`/`Cookie` on cross-origin hops but forwards
-/// custom headers (e.g. `X-API-Key`) — which would leak MCP credentials to a third host.
-pub fn client_no_redirect() -> reqwest::Result<reqwest::Client> {
-    builder()
         .redirect(reqwest::redirect::Policy::none())
-        .build()
 }
 
 /// Pooled client with product user agent. Per-request timeouts are set by callers.

@@ -90,7 +90,7 @@ impl AppState {
                 Arc::new(MemorySecretStore::default())
             }
         };
-        // Pooled client for providers; remote MCP servers get a redirect-free client so
+        // Separate pools for providers and remote MCP servers; both are redirect-free so
         // custom credential headers can't leak to a redirect target.
         let http = agent_core::http::client()?;
         let providers = ProviderStore::load(&data_root, secrets.clone(), http)?;
@@ -99,7 +99,7 @@ impl AppState {
         let handle = app.clone();
         let mcp = McpManager::new(
             McpStore::load(&data_root, secrets.clone())?,
-            agent_core::http::client_no_redirect()?,
+            agent_core::http::client()?,
             tauri::async_runtime::handle().inner().clone(),
             move || {
                 let _ = handle.emit(MCP_CHANGED_EVENT, ());

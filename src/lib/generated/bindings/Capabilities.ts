@@ -3,4 +3,9 @@
 /**
  * Static capability declaration. `None`/`false` means "not known to be supported".
  */
-export type Capabilities = { streaming: boolean, tools: boolean, parallel_tool_calls: boolean, images: boolean, context_window: number | null, };
+export type Capabilities = { streaming: boolean, tools: boolean, parallel_tool_calls: boolean, images: boolean, context_window: number | null, 
+/**
+ * The most `max_tokens`/`max_output_tokens` the model accepts; `None` = not known.
+ * Requests with a larger budget are rejected, so the compiler clamps to it.
+ */
+max_output_tokens: number | null, };

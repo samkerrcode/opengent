@@ -50,6 +50,16 @@ Contributor guidelines: see CONTRIBUTING.md. Security scope: SECURITY.md.
   signatures were altered or reordered. Live/offline round trip: `OPENGENT_TEST_GEMINI_API_KEY=x
   OPENGENT_TEST_GEMINI_BASE_URL=http://localhost:8789/v1 OPENGENT_TEST_GEMINI_MODEL=mock-gemini-thinking
   cargo test -p agent-core --test provider_store_live -- --ignored gemini` (drop the base URL/model for real Gemini).
+- `node scripts/dev/mock-anthropic-server.mjs [port]` – fake Anthropic Messages API
+  (`http://localhost:8790/v1`, models `mock-claude-fast`, `mock-claude-thinking`,
+  `mock-claude-slow`; any key except `bad`, which gets a 401 `authentication_error`).
+  "use tool <name>" returns a `tool_use`; "decline" returns a `refusal` stop. Replayed
+  thinking blocks must carry an issued signature with an unchanged `thinking` field.
+  Live/offline round trip: `OPENGENT_TEST_ANTHROPIC_API_KEY=x
+  OPENGENT_TEST_ANTHROPIC_BASE_URL=http://localhost:8790/v1
+  OPENGENT_TEST_ANTHROPIC_MODEL=mock-claude-thinking
+  cargo test -p agent-core --test provider_store_live -- --ignored anthropic`
+  (drop the base URL/model for real Anthropic).
 - `node scripts/dev/mock-mcp-server.mjs` – fake MCP server (tools: echo, add, get_time, fail, slow).
   Stdio by default (use `node <abs path>` as a stdio command); `--http 8788` serves Streamable HTTP at `/mcp`; `--many 50` adds filler tools for on-demand loading tests.
 

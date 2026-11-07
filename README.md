@@ -33,9 +33,9 @@ https://github.com/user-attachments/assets/e552658e-231b-44a2-97c2-7181deb878e3
 ## Highlights
 
 - **Model-agnostic.** Any OpenAI-compatible endpoint — Ollama, LM Studio, vLLM, llama.cpp,
-  OpenRouter, or a self-hosted gateway — plus native OpenAI and Google Gemini, with a built-in
-  simulated provider for trying the app without an account. Native Anthropic, Bedrock and
-  Hugging Face adapters are on the [roadmap](#native-providers).
+  OpenRouter, or a self-hosted gateway — plus native OpenAI, Google Gemini and Anthropic,
+  with a built-in simulated provider for trying the app without an account. Native
+  Bedrock and Hugging Face adapters are on the [roadmap](#native-providers).
 - **Real tools, real permissions.** Connect [MCP](https://modelcontextprotocol.io) servers over
   stdio or Streamable HTTP. Each tool is *Always allow*, *Ask*, or *Block*; approvals are
   enforced in Rust at dispatch, and an *Always allow* grant reverts to *Ask* if the tool's
@@ -149,7 +149,7 @@ detailed in [CHANGELOG.md](CHANGELOG.md); shipped features are documented in
 | **2 – Custom/local providers** | OpenAI-compatible Chat Completions streaming, provider/model settings, capability flags, incremental sanitized Markdown, context limits. *First usable chat.* | ✅ Done |
 | **3 – MCP agent** | stdio + Streamable HTTP servers, tool discovery, Always allow / Ask / Block policies, approval UI, full loop: model → approval → tool → result → model. *Agent alpha.* | ✅ Done |
 | **4 – OAuth** | Browser sign-in (authorization code + PKCE, U2M) and client credentials (M2M) for MCP servers; token lifecycle in the keychain | Next |
-| **5 – Native providers** | One adapter per vendor protocol, each shipped independently — see [Native providers](#native-providers) | In progress (Gemini, OpenAI done) |
+| **5 – Native providers** | One adapter per vendor protocol, each shipped independently — see [Native providers](#native-providers) | In progress (Gemini, OpenAI, Anthropic done) |
 | **6 – Provider context & caching** | Provider-aware prompt caching (OpenAI `prompt_cache_key`, Anthropic `cache_control`), cross-provider context projection, summarization checkpoints | |
 | **7 – Release hardening** | Performance profiling, accessibility, export/import, signing & notarization, installers | |
 | **8 – Extensions** | Sub-agents, A2A, skills, hooks, model router — through the existing `ModelProvider` / tool / permission seams | |
@@ -164,7 +164,7 @@ form from Rust (`list_provider_kinds`) — adding one needs no UI changes.
 |---|---|---|---|
 | **Google Gemini** | Interactions API (`store: false`) | AI Studio key; thought signatures replayed verbatim; stream resume | ✅ Done |
 | **OpenAI** | Responses API (`store: false`) | API key; encrypted reasoning items replayed; reasoning summaries | ✅ Done |
-| **Anthropic** | Messages API | Thinking signatures, `cache_control` (with Phase 6) | Next |
+| **Anthropic** | Messages API | Adaptive thinking, signed thinking-block replay | ✅ Done |
 | **AWS Bedrock** | ConverseStream | Feature-gated AWS SDK; IAM / SSO profiles | |
 | **Hugging Face** | Inference Providers (OpenAI-compatible) | Presets on the OpenAI-compatible type | |
 
@@ -196,9 +196,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how proposals are approved.
 - The command palette and inspector panel from Phase 1 are deferred (sidebar search covers the
   main need for now).
 - Implemented protocols: OpenAI-compatible, OpenAI (Responses API; no built-in tools such as
-  web search or code interpreter yet) and Google Gemini (AI Studio API key; no Vertex AI, Google
-  built-in tools or images inside tool results yet). The other native adapters arrive during
-  [Phase 5](#native-providers).
+  web search or code interpreter yet), Google Gemini (AI Studio API key; no Vertex AI, Google
+  built-in tools or images inside tool results yet) and Anthropic (API key; no Bedrock/Vertex,
+  Anthropic built-in tools or prompt caching yet). The remaining native adapters arrive
+  during [Phase 5](#native-providers).
 - MCP servers that need OAuth sign-in can't connect until Phase 4.
 - Scheduled runs only fire while the app is open.
 - Builds are unsigned. The DMG step can fail if a previous build's image is still mounted

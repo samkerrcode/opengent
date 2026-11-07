@@ -3,4 +3,4 @@
 /**
  * Per-model metadata reported by a provider's listing endpoint. `None` = not reported.
  */
-export type DiscoveredModel = { context_window?: number | null, vision?: boolean | null, reasoning?: boolean | null, };
+export type DiscoveredModel = { context_window?: number | null, max_output_tokens?: number | null, vision?: boolean | null, reasoning?: boolean | null, };

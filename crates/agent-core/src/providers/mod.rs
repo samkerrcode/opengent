@@ -2,6 +2,7 @@
 //! stream of normalized `ProviderEvent`s. Provider dispatch stays out of the per-token hot
 //! path: the coordinator receives events over a bounded channel.
 
+pub mod anthropic;
 pub mod capabilities;
 pub mod common;
 pub mod fake;
@@ -32,6 +33,9 @@ pub struct Capabilities {
     pub parallel_tool_calls: bool,
     pub images: bool,
     pub context_window: Option<u32>,
+    /// The most `max_tokens`/`max_output_tokens` the model accepts; `None` = not known.
+    /// Requests with a larger budget are rejected, so the compiler clamps to it.
+    pub max_output_tokens: Option<u32>,
 }
 
 /// A function the model may call. `parameters` is a JSON Schema object.
@@ -110,6 +114,8 @@ pub fn opaque_within_limit(data: &serde_json::Value) -> bool {
 pub struct DiscoveredModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

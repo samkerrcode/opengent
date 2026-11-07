@@ -197,6 +197,23 @@ pub fn normalize_call_ids(calls: &mut [PartialCall]) {
     }
 }
 
+/// Adds a credential header marked sensitive, so `Debug` output redacts it and HTTP/2 never
+/// adds it to the HPACK table.
+pub fn secret_header(
+    req: reqwest::RequestBuilder,
+    name: &'static str,
+    value: &str,
+) -> reqwest::RequestBuilder {
+    match reqwest::header::HeaderValue::from_str(value) {
+        Ok(mut v) => {
+            v.set_sensitive(true);
+            req.header(name, v)
+        }
+        // Let reqwest report the invalid value when the request is sent.
+        Err(_) => req.header(name, value),
+    }
+}
+
 /// `v[key]` as a string, or `""`.
 pub fn str_at<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
@@ -317,6 +334,10 @@ pub fn map_status(status: StatusCode, body: &str) -> Error {
         }
         StatusCode::NOT_FOUND => "endpoint or model not found — check the base URL and model name",
         StatusCode::TOO_MANY_REQUESTS => "rate limited by the provider",
+        s if s.is_redirection() => {
+            "the server redirected (not followed, to protect credentials) — set the base URL \
+             to the final address"
+        }
         s if s.is_server_error() => "provider server error",
         _ => "provider rejected the request",
     };
