@@ -21,6 +21,10 @@ Contributor guidelines: see CONTRIBUTING.md. Security scope: SECURITY.md.
 - `npm run tauri:dev` – run the desktop app (generates product artifacts first).
 - `npm run tauri:build` – release bundle (unsigned unless signing is configured).
 - `npm run verify` – svelte-check, vitest, cargo fmt/clippy/test.
+- Releases (`docs/releasing.md`): `.github/workflows/release.yml` builds a universal macOS `.dmg` and Windows
+  `.exe`/`.msi`; a manual run is a dry run (artifacts only), a `vX.Y.Z[-alpha|-beta|-rc.N]` tag creates a draft
+  release. `node scripts/check-release-version.mjs [tag]` is the gate: `product.json`, `package.json`,
+  `package-lock.json` and workspace `Cargo.toml` versions must agree. App versions stay plain `X.Y.Z` (MSI).
 - `npm run gen:types` – regenerate TS bindings after changing any `#[derive(TS)]` type, then commit them.
 - Adding a provider: new `ProviderKind` + `KindMeta` row + one `ProviderStore::instantiate` arm + an
   adapter in `providers/` built on `providers/common.rs` (`send_checked`, `pump_sse`, `read_json`,

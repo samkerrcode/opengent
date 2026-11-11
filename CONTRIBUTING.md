@@ -48,6 +48,8 @@ Node 24 LTS (`nvm use`), the Tauri system dependencies, then `npm install` and
 - Branches are deleted on merge. Never reuse a merged branch — cut a fresh one off `main`.
 - Security fixes use `fix/` with a neutral slug; don't name branches or PRs in ways that
   disclose a vulnerability before it's patched.
+- Releases are cut by the maintainer from tags on `main`; versioning and the procedure are in
+  [docs/releasing.md](docs/releasing.md). Don't bump version numbers in a feature PR.
 
 ## Pull request checklist
 

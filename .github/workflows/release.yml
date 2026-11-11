@@ -1,0 +1,103 @@
+name: Release
+
+# Tag push: build installers and open a *draft* GitHub release for the maintainer to publish.
+# Manual run: dry run that builds and uploads workflow artifacts only. See docs/releasing.md.
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Version gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+
+      - name: Versions agree and match the tag
+        run: node scripts/check-release-version.mjs ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+
+  build:
+    name: Build (${{ matrix.platform }})
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macOS universal
+            os: macos-latest
+            target: universal-apple-darwin
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - platform: Windows x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            rust_targets: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      - run: npm ci
+
+      - name: Build bundles (unsigned)
+        run: npm run tauri:build -- --target ${{ matrix.target }}
+
+      - name: Upload bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundles-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/bundle/**/*.dmg
+            target/${{ matrix.target }}/release/bundle/**/*.msi
+            target/${{ matrix.target }}/release/bundle/**/*.exe
+          if-no-files-found: error
+
+  publish:
+    name: Draft GitHub release
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bundles-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOCS_URL: ${{ github.server_url }}/${{ github.repository }}/blob/${{ github.ref_name }}/docs/releasing.md
+        run: |
+          mkdir out
+          find dist -type f -exec mv {} out/ \;
+          (cd out && sha256sum * > ../SHA256SUMS.txt)
+          mv SHA256SUMS.txt out/
+
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+
+          gh release create "$GITHUB_REF_NAME" out/* \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --draft --generate-notes $prerelease \
+            --notes "These installers are **unsigned**. See [installing a release]($DOCS_URL#installing-a-release) for the macOS and Windows first-launch steps and how to verify \`SHA256SUMS.txt\`."
