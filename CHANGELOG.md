@@ -6,6 +6,13 @@ planned work lives in the [README roadmap](README.md#roadmap).
 
 ## Unreleased — Phase 4 (OAuth)
 
+- Release workflow: pushing a `vX.Y.Z` (or `-alpha.N` / `-beta.N` / `-rc.N`) tag builds a
+  universal macOS `.dmg` (Apple Silicon + Intel) and Windows x64 `.exe` + `.msi` installers
+  with a `SHA256SUMS.txt`, and opens a **draft** GitHub release for the maintainer to publish;
+  running it manually is a dry run that only uploads build artifacts. A version gate
+  (`scripts/check-release-version.mjs`) requires every version field and the tag to agree.
+  Installers are unsigned until Phase 7. Versioning policy, install steps and the release
+  procedure: [docs/releasing.md](docs/releasing.md).
 - Native **Anthropic** provider (Phase 5 — native providers): add it with an Anthropic API
   key (Type → Anthropic). Uses the Messages API (version `2026-10-21`) statelessly, with
   streaming, adaptive thinking (`display: "summarized"`, no beta header needed for

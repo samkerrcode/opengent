@@ -56,8 +56,11 @@ See **[docs/features.md](docs/features.md)** for the full feature guide.
 
 OpenGent is **pre-1.0** and under active development. Phases 0–3 of the [roadmap](#roadmap)
 are complete and Phase 4 (OAuth for MCP servers) is next. macOS is verified. Windows builds and
-tests run in CI but haven't been tested by hand yet. There are no prebuilt installers yet
-(signed installers come with Phase 7), so for now you build from source.
+tests run in CI but haven't been tested by hand yet. There are no prebuilt installers yet, so
+for now you build from source; unsigned installers will appear on the
+[Releases](https://github.com/samkerrcode/opengent/releases) page (signed ones come with
+Phase 7). Versioning and the release process are described in
+[docs/releasing.md](docs/releasing.md).
 
 ## Quick start
 
@@ -133,8 +136,9 @@ Design rules (contributor conventions live in [AGENTS.md](AGENTS.md)):
 | `src/` | Svelte app: `features/{chat,history,providers,mcp,agents}`, `lib/ipc`, `lib/state` |
 | `src/lib/generated/bindings/` | TypeScript types generated from Rust DTOs by ts-rs (committed; CI checks drift) |
 | `scripts/dev/` | Mock OpenAI (Chat Completions + Responses), Gemini and MCP servers for local testing |
-| `docs/` | Feature guide and branding assets |
+| `docs/` | Feature guide, release & versioning policy, and branding assets |
 | `.github/workflows/ci.yml` | macOS + Windows checks, tests, and unsigned build |
+| `.github/workflows/release.yml` | Tag-driven installers (universal macOS `.dmg`, Windows `.exe` + `.msi`) as a draft GitHub release |
 
 ## Roadmap
 
