@@ -81,7 +81,7 @@ ZDR contract) is settled between you and the vendor.
 | **Simulated** | Nobody (no network) | — | **1** | **1** |
 | **OpenAI** | OpenAI | Responses API with `store: false` | 3 | **2**, once OpenAI has approved ZDR for your organization |
 | **Anthropic** | Anthropic | Messages API (stateless by design) | 3 | **2**, with a ZDR arrangement for your organization — see the model exceptions below |
-| **Google Gemini** | Google | Interactions API with `store: false` | 3 | 3 with an AI Studio key, the only credential supported today; check Google's terms for your account tier |
+| **Google Gemini** | Google | Interactions API with `store: false` | 3 | 3 with an AI Studio key, the only credential supported — Google's documented ZDR path is Vertex AI, which OpenGent doesn't support |
 | **Hosted gateway** — OpenRouter or another *OpenAI-compatible* service | The gateway and the vendors behind it | Chat Completions, stateless | 4 | Whatever the gateway's terms and routing guarantee |
 | **Company gateway** — an *OpenAI-compatible* endpoint your organization runs | Your organization, plus anything it forwards to | Chat Completions, stateless | Set by your organization | **1** when it serves internal models only |
 
@@ -98,10 +98,17 @@ Per provider:
   caveats: Claude Fable and Mythos models require 30-day retention and reject requests from
   ZDR organizations, and thinking blocks from Claude Sonnet 5.5 and Haiku 5.5 only work for
   the account that produced them.
-- **Google Gemini.** Every request sends `store: false`. Recovering a dropped stream may ask
-  Google for the remainder of the same in-flight response; nothing is read back from earlier
-  turns. Only AI Studio API keys are supported (no Vertex AI), and Google's terms treat free
-  and paid usage differently — verify them before sending sensitive data.
+- **Google Gemini.** Every request sends `store: false` — the Interactions API stores
+  conversation state *by default*, so this opt-out is what keeps chats out of Google's stored
+  state. Recovering a dropped stream may ask Google for the remainder of the same in-flight
+  response; nothing is read back from earlier turns. Per
+  [Google's ZDR documentation](https://ai.google.dev/gemini-api/docs/zdr), paid usage is not
+  used for training, but prompts and responses are logged for a limited period for abuse
+  monitoring with no opt-out; billed projects additionally log requests in AI Studio for up
+  to 55 days by default (adjustable to 7). Google's documented route to guaranteed ZDR is
+  Vertex AI, which the adapter doesn't support. The other retention sources Google lists —
+  Search/Maps grounding (30 days), the File API, explicit context caching and Live API
+  session resumption — are features OpenGent doesn't use.
 - **OpenAI-compatible.** Stateless by protocol: the app sends only the request body. What the
   other side keeps is that server's policy. For the strongest guarantee, use a local model.
 
