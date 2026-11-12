@@ -1,513 +1,567 @@
-# Features
+# Feature guide
 
-What OpenGent does today, one section per capability. Each entry covers **what it does**,
-**how to use it**, **how it works**, and **limits** — keep new features in this format so the
-document stays scannable as the app grows.
+Everything OpenGent can do today, organized by where you find it in the app. This is the
+reference for **what exists and how to use it**. It is not a history: what changed and when is
+in the [changelog](../CHANGELOG.md), what's planned is on the [roadmap](../README.md#roadmap),
+and the security model is in [SECURITY.md](../SECURITY.md).
 
-- [Chat](#chat)
-- [Branding & activity indicators](#branding--activity-indicators)
-- [Providers & models](#providers--models)
-- [Connections (MCP tools)](#connections-mcp-tools)
-- [Agents](#agents)
-- [Scheduled agent runs](#scheduled-agent-runs)
-- [Attachments](#attachments)
-- [History & persistence](#history--persistence)
-- [Secrets](#secrets)
+Each feature is described the same way:
+
+| Part | Answers |
+|---|---|
+| **What** | What the feature does, in a sentence or two |
+| **How to use** | Where it is in the app and the steps to use it |
+| **How it works** | Behavior worth knowing: what is stored, what is sent, what happens in edge cases |
+| **Limits** | Caps, unsupported cases and known gaps |
+
+## At a glance
+
+| Area | Feature | In short |
+|---|---|---|
+| [Chat](#chat) | [Conversations](#conversations) | Streaming replies with Stop, Regenerate, copy and live token usage |
+| | [Rich rendering](#rich-rendering) | Sanitized Markdown, code highlighting, KaTeX math, Thinking blocks |
+| | [Attachments](#attachments) | Text files and images (PNG, JPEG, GIF, WebP) in a prompt |
+| | [History & search](#history--search) | Chats saved locally, searchable, recovered after a crash |
+| [Models & providers](#models--providers) | [Provider types](#provider-types) | OpenAI, Google Gemini, Anthropic, any OpenAI-compatible server, Simulated |
+| | [Provider settings](#provider-settings) | Add, test and manage connections; keys go to the OS keychain |
+| | [Model list & hiding](#model-list--hiding) | Discovered models, per-model context windows, hide the ones you don't use |
+| | [Reasoning continuity](#reasoning-continuity) | A model's reasoning carries across tool calls |
+| [Tools](#tools-mcp-connections) | [Connections](#connections) | MCP servers over stdio or Streamable HTTP |
+| | [Tool permissions](#tool-permissions) | *Allow* / *Ask* / *Disable* per tool, enforced in Rust |
+| | [Scopes](#permission-scopes) | Defaults per connection, overrides per chat, own set per agent |
+| | [Approvals](#approvals) | Allow once / Always allow / Deny on a card showing the arguments |
+| | [Tool loading](#tool-loading) | All, on-demand (`find_tools`), or automatic |
+| [Agents](#agents) | [Agents](#agents) | Reusable role with models, instructions and its own tools |
+| | [Fallback model](#fallback-model) | A second model takes over when the first can't start |
+| | [Schedules](#schedules) | Run an agent once, on an interval, or on weekdays |
+| [Privacy & data](#privacy--data) | [Local data](#local-data) | Everything under `~/.opengent`; no account, no telemetry |
+| | [Secrets](#secrets) | API keys and tokens only in the OS credential store |
+| [Appearance](#appearance) | [Activity indicator & theme](#activity-indicator--theme) | Live run phases, light/dark theme, reduced motion |
+
+Keyboard shortcuts: **⌘N / Ctrl+N** new chat · **⌘, / Ctrl+,** provider settings · **Esc**
+stop the current reply or close a dialog · **Shift+Enter** new line in the composer.
+
+---
 
 ## Chat
 
-Streaming conversations with Markdown-rendered replies: code highlighting, KaTeX math,
-stop/cancel (Esc), retry, live token usage, and "older messages trimmed" notices when history
-exceeds the model's context window. While a reply streams, a caret marks where the next token
-will appear: at the end of the deepest trailing text (nested list items, the last table cell,
-blockquotes, the current code line) and just after rendered math, never inside it.
+### Conversations
 
-## Branding & activity indicators
+**What.** A conversation with the model you pick, streamed token by token. Each reply shows
+its real phases — generating, awaiting approval, calling a tool — as they happen.
 
-**What.** The open G with a solid diamond identifies the app in the Dock/taskbar, sidebar,
-and chat/agent welcome screens. Assistant responses retain the radar-like activity symbol.
+**How to use.**
 
-**How to use.** No setup is needed. The radar spins while a run is active and stops at a
-terminal state; the adjacent phase label describes what is happening. Enable the OS
-reduced-motion preference to disable its rotation.
+- Type in the composer and press Enter. Choose the provider and model in the composer's model
+  picker; the choice applies per message, so you can switch models mid-chat.
+- **Stop** (or Esc) cancels a reply. **Regenerate** retries the last one.
+- Copy a whole reply with the button under it, or a single code block with the button on the
+  block.
+- Scroll up at any time to read earlier text while a reply streams; **Jump to latest ↓** (or
+  scrolling back to the bottom) resumes following.
+- Click a chat's title to rename it.
 
-**How it works.** In-app brand marks share the README's canonical SVG and use the theme's
-accent color. The sidebar name comes from product identity, not an embedded image.
-Desktop icons and the social preview are generated from that same mark.
+**How it works.** The chat history is held locally and the model receives it on every turn.
+When the history no longer fits the model's context window, the oldest turns are left out and
+the reply shows an "older messages trimmed" notice. Token usage is shown when the provider
+reports it. A streaming caret marks where the next token will appear, including inside lists,
+tables, blockquotes and code blocks.
 
-**Limits.** The radar indicates an active run, not a percentage complete or a security
-guarantee. Desktop icons are packaged at build time; the repository social preview must
-be uploaded manually. Asset exports and regeneration instructions live in
-[the branding asset guide](assets/README.md).
+**Limits.** One reply at a time per chat. Trimming is by whole turns; there is no
+summarization of older history yet.
 
-## Providers & models
+### Rich rendering
 
-Any server speaking the OpenAI Chat Completions protocol — Ollama, LM Studio, vLLM, hosted
-gateways such as OpenRouter — native **OpenAI** and **Google Gemini**, plus a built-in
-simulated provider that needs no account. Per provider: base URL (HTTPS required off-loopback), API key in the OS
-keychain, model discovery via `GET /models`, context window override, TLS verification mode
-(system / pinned CA / skip), and image-input policy. The model picker in the composer selects
-provider+model per message.
+**What.** Replies render as Markdown: headings, lists, tables, links, syntax-highlighted code
+blocks, and math via KaTeX (`$…$`, `$$…$$`, `\(…\)`, `\[…\]` and math fences). Models that
+expose reasoning get a collapsible **Thinking** block above the answer.
 
-**Provider types.** Provider settings opens on a picker: one tile per provider type
-(OpenAI, Google Gemini, OpenAI-compatible) with its logo and a one-line summary, next to the
-**Your providers** list of saved connections. Click a tile to open that type's form; **←
-All providers** (or *+ Add provider*) returns to the picker, asking first if there are unsaved
-edits. You can add several connections of the same type (e.g. personal and work keys). Each
-type's label, tagline, description, default endpoint, presets, model-name examples, API-key
-help text and link, and whether a key is required come from Rust (`list_provider_kinds`), so
-the form never hardcodes a protocol. A type with a default endpoint is pre-named after its
-type and fills the base URL in for you (leaving it empty uses the default). The form shows
-only the setup essentials — base URL and *Quick setup* presets for OpenAI-compatible servers,
-name, API key (with *Show* and *Get an API key ↗*), default model — and keeps the endpoint
-override (for built-in types), TLS, context-window, token-usage and image-input settings
-under **Advanced settings**, which opens on its own (or shows *customized*) when a saved
-provider changes any of them.
+**How it works.** Rendering is sanitized: raw HTML in model output is disabled and the result
+is filtered again before display. Links open in your default browser — the app window never
+navigates. The Thinking block is open while the model reasons and collapses once it starts
+answering.
 
-**Hiding models.** The *Models* list in Advanced settings shows every known model with its
-per-model context window and a *shown* toggle. Unchecking a model removes it from the chat
-picker and agent model dropdowns — handy for decluttering an endpoint that lists many old
-models — while your current selection and any agent configured on it keep working. The
-provider's default model can't be hidden, and a hidden model reappears in the list so it can
-be re-shown. Hiding is a listing preference, not a block: runs and schedules already pointed
-at a hidden model still run.
+**Limits.** No raw HTML, embedded media or diagrams. What appears in Thinking depends on the
+provider: some send full reasoning, most hosted models send a summary.
 
-**Saving.** **Save** stores the connection and returns to the picker with a confirmation.
-**Save & test** also lists the provider's models; it returns to the picker once the test
-succeeds and a default model is set. Otherwise it stays on the form — to pick a default model
-from the discovered list, or with "Provider saved, but the connection test failed" and the
-server's message. A failed save keeps everything you typed.
+### Attachments
 
-*Limits:* tile logos are bundled for OpenAI and Google Gemini; other types show a neutral
-server icon. The picker has no search or categories yet.
+**What.** Attach text files and images to a message. Text is included in the prompt as
+labeled excerpts; images go to models that can see them.
 
-**How it works (all providers).** Adapter-level capabilities (streaming, tools, parallel
-calls) are declared once per type in Rust, so resolving a model's capabilities — done on every
-model change and run start — reads the saved config in place without building an adapter,
-touching the keychain or cloning the model list. HTTP clients for *pinned CA* / *skip
-verification* TLS modes are built once per provider and reused until its TLS settings change.
+**How to use.** Click **⌁ Attach** and pick up to 20 files. Attached files appear as chips
+(images as thumbnails) in the composer and in the sent message. Files that can't be used are
+skipped individually, each with a reason.
 
-### OpenAI
+| Kind | Accepted | Notes |
+|---|---|---|
+| Text | Any UTF-8 text file | SVG counts as text |
+| Images | PNG, JPEG, GIF, WebP | Needs a vision-capable model |
+| Not yet | HEIC/HEIF, BMP, TIFF, PDF and other documents, non-UTF-8 text | Skipped with a reason |
 
-**What.** OpenAI models (GPT-4.1, GPT-5 and later, o-series) through the **Responses API**,
-with streaming, reasoning summaries in the Thinking block, parallel tool calls and image
-input. Reasoning is carried across tool calls, so the model doesn't re-derive its plan after
-every tool result.
+**Which models accept images.** Decided per provider and model, in this order:
+
+1. **Your setting** — Provider settings → Advanced → *Image input*: *Auto-detect* (default),
+   *Supported*, or *Not supported*. Anything other than Auto-detect wins outright.
+2. **What the server reports** — detected when you Save & test a provider or refresh its
+   models (native providers, OpenRouter, LM Studio and Ollama report it). Capable models are
+   marked "· vision" in the picker.
+3. **The model's name** — well-known vision families (GPT-4o and later, Claude 3 and later,
+   Gemini, LLaVA, Qwen-VL, Pixtral, Gemma 3 and similar) count as capable even when the
+   server says nothing.
+
+**How it works.** Files are copied into `~/.opengent/attachments` when attached, so later
+edits to the original don't change the chat. Identical files are stored once. Images are
+identified by their content, not their extension. If you switch to a text-only model with
+images pending, they are flagged and Send is blocked until you remove them; reopening an old
+chat with images on a text-only model replaces each image with a labeled placeholder rather
+than dropping it silently.
+
+**Limits.** 20 files per message, 2 MiB each. Each image counts as roughly 1,500 tokens of
+context.
+
+### History & search
+
+**What.** Every chat is saved locally as it streams and listed in the sidebar. The app opens
+on a fresh chat.
+
+**How to use.** Use **Search chats** in the sidebar to search titles, message text and
+reasoning. Rename a chat by clicking its title; delete it from the sidebar.
+
+**How it works.** A reply is saved while it streams, so quitting or crashing mid-reply loses
+nothing already received: on the next launch the turn is shown as interrupted and can be
+regenerated. Search does not match tool arguments or internal ids.
+
+**Limits.** No export/import, folders or pinning yet. Deleting a chat is permanent.
+
+---
+
+## Models & providers
+
+### Provider types
+
+A **provider** is a saved connection to a model service. You can add several of the same type
+(for example personal and work keys).
+
+| Type | Connects to | Key | Reasoning shown | Model limits |
+|---|---|---|---|---|
+| **OpenAI** | OpenAI Platform (Responses API) | API key | Summaries | Built-in table per model family |
+| **Google Gemini** | Google AI Studio (Interactions API) | API key | Thought summaries | Reported by Google |
+| **Anthropic** | Anthropic API (Messages API) | API key | Thinking summaries | Reported by Anthropic |
+| **OpenAI-compatible** | Any Chat Completions server: Ollama, LM Studio, vLLM, llama.cpp, OpenRouter, a company gateway | Optional | When the server streams it | Set by you, or reported |
+| **Simulated** | Nothing — built in | None | — | — |
+
+All types support streaming, tool calling (including several calls in one step) and image
+input where the model does. More native providers are on the
+[roadmap](../README.md#native-providers).
+
+#### OpenAI
+
+**What.** GPT and o-series models with reasoning summaries, tools and image input.
 
 **How to use.** Create a key at [platform.openai.com](https://platform.openai.com) → *API
-keys*. In Provider settings choose the **OpenAI** tile, paste the key and **Save
-& test**: the model list is fetched and you pick a default model (e.g. `gpt-5-mini`). The
-endpoint defaults to `https://api.openai.com/v1`; open *Advanced settings* only for a proxy or a
-Responses-compatible gateway. (To use Chat Completions against OpenAI instead, add an
-*OpenAI-compatible* provider pointed at the same URL.)
+keys*. Choose the **OpenAI** tile, paste the key, **Save & test**, then pick a default model.
 
-**How it works.** `crates/agent-core/src/providers/openai.rs`.
-- **Why Responses, not Chat Completions.** OpenAI's newer models restrict tool calling on
-  Chat Completions (GPT-5.4+ only with reasoning off; GPT-6 not at all) and expose reasoning
-  summaries only on Responses. Responses is used **statelessly**: `store: false`, the full
-  local history is sent each turn and OpenAI keeps nothing.
-- Requests go to `POST {base}/responses` with `stream: true` and the key in the
-  `Authorization` header. The system prompt is sent as `instructions`; history becomes an
-  ordered list of input items: your messages → `message` (`input_text` + `input_image`), the
-  model's text → assistant `message`, tool calls → `function_call`, results →
-  `function_call_output` (paired by `call_id`). Tools are sent with `strict: false`, since MCP
-  schemas rarely meet strict-mode rules.
-- **Reasoning models** (o-series, GPT-5+, `codex`; not `-chat` variants) get
-  `reasoning: {summary: "auto"}` and `include: ["reasoning.encrypted_content"]`. Each finished
-  `reasoning` item (encrypted content + summary) is stored as provider state at its stream
-  position and replayed verbatim next turn. Item ids are never stored or sent — with
-  `store: false` there is no server state for them to reference. An assistant message's
-  `phase` (commentary vs final answer, on newer models) is stored and replayed with it.
-- **Reasoning storage decision.** If an item would exceed the 64 KiB provider-state cap, its
-  summary is dropped (the text is kept in the Thinking block); if the encrypted content alone
-  is still too large, the item isn't stored and the model simply reasons afresh next turn.
-- Calls and reasoning items are emitted when their item finishes, so stored blocks keep the
-  server's order. A call cut off by the output limit (`status: incomplete`) is dropped rather
-  than run with truncated arguments.
-- Usage: input, output (reasoning tokens are already included) and cached input tokens.
-  `response.completed` → end of turn or tool use; `response.incomplete` → output limit, or an
-  error for the content filter; `response.failed` / `error` events → error with the server's
-  message.
-- Discovery: `GET {base}/models`, minus non-chat families (embeddings, TTS/transcription,
-  image/video generation, realtime/audio, moderation, search/deep-research, computer use,
-  legacy completions). OpenAI's listing reports no limits, so a built-in table supplies
-  per-family context windows (e.g. GPT-6 1.05M, GPT-4.1 ≈ 1M, GPT-5 272K input, o-series 200K,
-  GPT-4o 128K) plus vision and reasoning flags; your per-model setting always wins. The
-  compiler's 25%-of-window output budget is clamped to each model's real output cap so large
-  windows never trigger a rejected `max_output_tokens`.
-- The stream idle timeout is 180 s, since reasoning models can think silently for a while.
+**How it works.** OpenGent uses the Responses API because OpenAI's newer models restrict or
+drop tool calling on Chat Completions. Requests are stateless (`store: false`): the full local
+history is sent each turn and OpenAI keeps no conversation. OpenAI doesn't report model
+limits, so context windows and output caps come from a built-in table; your own setting
+always wins.
 
-*Limits:* API keys only (no Azure OpenAI endpoints, organization/project headers or OAuth).
-No server-side state (`previous_response_id` chaining, conversations, background mode) and no
-stream resume: a dropped connection fails the turn. OpenAI's built-in tools (web search, file
-search, code interpreter, computer use, remote MCP) and structured outputs aren't offered.
-Reasoning effort and verbosity are the model defaults. Context windows for models newer than
-the built-in table fall back to your setting or 8K. Images inside tool results are sent as
-text, as with other providers.
+**Limits.** API keys only — no Azure OpenAI, organization/project headers or OAuth. OpenAI's
+built-in tools (web search, file search, code interpreter, computer use) and structured
+outputs aren't offered. Reasoning effort is the model default. A dropped connection fails the
+turn. Models newer than the built-in table use your context-window setting, or 8K.
+To use Chat Completions against OpenAI instead, add an *OpenAI-compatible* provider with the
+same URL.
 
-Offline testing: `node scripts/dev/mock-openai-server.mjs` serves the Responses API too (see
-AGENTS.md).
+#### Google Gemini
 
-### Google Gemini
+**What.** Gemini models, and Gemma models served by the Gemini API, with thought summaries,
+tools and image input.
 
-**What.** Gemini models (and Gemma models served by the Gemini API) through Google's
-Interactions API, with streaming, thought summaries, parallel tool calls and image input.
+**How to use.** Create a key in [Google AI Studio](https://aistudio.google.com) → *Get API
+key*. Choose the **Google Gemini** tile, paste the key, **Save & test**, then pick a default
+model.
 
-**How to use.** Create an API key in [Google AI Studio](https://aistudio.google.com) → *Get
-API key*. In Provider settings choose the **Google Gemini** tile, paste the key and
-**Save & test**: the model list is fetched and you pick a default model (e.g.
-`gemini-flash-latest`). The endpoint defaults to the stable API
-(`https://generativelanguage.googleapis.com/v1`); open *Advanced settings* only for a proxy or to use
-`…/v1beta`.
+**How it works.** Requests are stateless (`store: false`): the full local history is sent
+each turn and Google keeps no conversation. Thought tokens are counted as output in usage.
+If Google's stream closes early on a long reply, OpenGent resumes or retries it once before
+reporting an error.
 
-**How it works.** `crates/agent-core/src/providers/gemini.rs`.
-- Requests go to `POST {base}/interactions` with `store: false` (Google keeps nothing; the
-  chat history stays local and the full history is sent each turn) and `stream: true`. The
-  key is sent in the `x-goog-api-key` header, never in the URL, and redirects are never
-  followed.
-- History becomes an ordered list of steps: your messages → `user_input` (text + images), the
-  model's text → `model_output`, tool calls → `function_call` (arguments as an object), tool
-  results → `function_result` (with the tool name).
-- Reasoning arrives as `thought` steps; summaries (`thinking_summaries: "auto"`, not requested
-  for Gemma models) stream into the Thinking block. Google requires model steps to be
-  replayed exactly as received, so each `thought` step is stored verbatim as provider state
-  and re-sent at its original position, and a signature on a `function_call` step is stored
-  and re-attached to that call. Steps are emitted as they finish, so interleaved
-  thought/call sequences keep their order.
-- **Thought storage decision.** The complete thought step (signature + summary) is stored,
-  because the API asks for verbatim replay. When a long summary would push the block past the
-  64 KiB provider-state cap, the summary is dropped and only the signature is kept: the
-  signature is what the server validates, and the readable summary is still stored in the
-  message's Thinking block. A thought step with neither signature nor summary is not stored.
-- Usage: input, output **including thought tokens** (billed as output), and cached tokens.
-  Status `completed`/`requires_action` → end of turn or tool use, `incomplete` → output limit,
-  `failed`/`cancelled` → error.
-- **Stream recovery.** Google's stream can close before `interaction.completed` on long
-  responses. The adapter recovers transparently: a `requires_continuation` status resends
-  the request with its `continuation_token`; a dropped connection resumes with
-  `GET /interactions/{id}?last_event_id=…` (each event carries a resumable id; skipped when
-  `store: false` yields no interaction id); and as a last resort the interaction is retried
-  once. Only when all of that fails does the run error.
-- Discovery pages through `GET {base}/models`, keeps chat models (those supporting
-  `generateContent`, minus embedding, TTS, image/video/music and similar families), and caches
-  each model's input-token limit as its context window and its `thinking` flag. Listed models
-  count as vision-capable unless you set *Image input* to *Not supported*.
-- A bad key (Google answers HTTP 400 `API_KEY_INVALID`) is reported as an authentication
-  failure. The stream idle timeout is 180 s, since Pro models can think silently for a while.
+**Limits.** AI Studio API keys only — no Vertex AI, OAuth or application default
+credentials. Google's built-in tools (Search, code execution, URL context) and structured
+output aren't offered. Thinking level is the server default. A resumed stream may briefly
+repeat text already shown.
 
-*Limits:* AI Studio API keys only — no Vertex AI, OAuth or ADC. No server-side state
-(`previous_interaction_id`) or background runs; a resumed/restarted stream may briefly
-repeat output the earlier connection already delivered. Google's built-in tools (Search, code execution,
-URL context, file search, MCP) and structured output aren't offered. Thinking level is the
-server default. Images inside tool results are sent as text placeholders, as with other
-providers (sending them as image content is a possible follow-up). Mid-turn switches from
-another provider into Gemini (e.g. an agent fallback during a tool loop) replay the earlier
-calls without signatures; whether Google accepts that for every model is unverified.
+#### Anthropic
 
-Offline testing: `node scripts/dev/mock-gemini-server.mjs` (see AGENTS.md).
-
-### Anthropic
-
-**What.** Claude models through Anthropic's Messages API, with streaming, thinking
-summaries in the Thinking block, interleaved thinking between tool calls, parallel tool
-calls and image input. Signed thinking blocks are stored and replayed, so reasoning
-carries across tool calls.
+**What.** Claude models with thinking summaries, reasoning between tool calls, tools and
+image input.
 
 **How to use.** Create a key in the [Anthropic Console](https://console.anthropic.com) →
-*API keys*. In Provider settings choose the **Anthropic** tile, paste the key and **Save &
-test**: the model list is fetched with each model's real limits and you pick a default
-(e.g. `claude-sonnet-5-5`). The endpoint defaults to `https://api.anthropic.com/v1`; open
-*Advanced settings* only for a proxy.
+*API keys*. Choose the **Anthropic** tile, paste the key, **Save & test**, then pick a default
+model.
 
-**How it works.** `crates/agent-core/src/providers/anthropic.rs` (API version
-`2026-10-21`).
-- Requests go to `POST {base}/messages` with `stream: true`; the key rides in the
-  `x-api-key` header, never the URL, and redirects are never followed (reqwest would
-  forward custom headers to the redirect target). The API is stateless — Anthropic keeps no
-  conversation state, and the full local history is sent each turn.
-- History becomes alternating `user`/`assistant` messages: your text and images → `user`,
-  the model's text and calls → `assistant` (`tool_use`, arguments as an object), tool
-  results → `tool_result` blocks inside a `user` message (there is no tool role;
-  consecutive same-role messages merge). Tools are sent non-strict and `tool_choice` is
-  never forced — the newest models reject forced tool use.
-- Claude 4.6+ and all 5.x models get `thinking: {type: "adaptive", display: "summarized"}`:
-  the model decides how much to think, streams readable summaries, and interleaves
-  reasoning between tool calls. Older models (4.5 and below) support only the deprecated
-  manual mode and get no thinking config.
-- Each `thinking` block carries an encrypted `signature` that must be replayed unchanged.
-  The block is stored as provider state — signature only, since the readable text already
-  lives in the Thinking block and the server ignores that field on replay — and
-  re-inserted verbatim at its position; `redacted_thinking` blocks replay the same way. A
-  block too large to store ends signature storage for that response, because a gap would
-  invalidate every later block anyway.
-- **Prefix binding.** On Claude 5.1-generation models a signature is bound to the request
-  prefix it was produced under — system prompt, tools, earlier messages — and an edited
-  history fails the request. Every request sends
-  `thinking.block_binding.prefix_mismatch_behavior: "drop_block"` so a stale prefix (from
-  history trimming, shortened old tool results, or a changed tool set) drops the affected
-  reasoning instead of failing the turn; the drop is logged.
-- Discovery pages `GET {base}/models`, keeps non-`retired` models, and caches each model's
-  `max_input_tokens` (context window), `max_tokens` (output cap), image-input and thinking
-  flags — no built-in table needed.
-- Usage: input, output (thinking is already billed in), and cache read/write tokens.
-  `stop_reason`: `end_turn`/`stop_sequence`/`pause_turn` → end of turn, `tool_use` → tool
-  use, `max_tokens`/`model_context_window_exceeded` → output limit, `refusal` → an error
-  carrying the classifier's explanation (which lets an agent's fallback model take over).
-- No stream resume: a dropped connection fails the turn. The stream idle timeout is 180 s,
-  since thinking can pause the stream for a long while.
+**How it works.** The Messages API is stateless: the full local history is sent each turn and
+Anthropic keeps no conversation. Claude 4.6 and later decide for themselves how much to
+think; older models answer directly. A refusal is reported with Anthropic's explanation, which
+lets an agent's fallback model take over.
 
-*Limits:* API keys only — no Bedrock, Vertex or OAuth. No server-side state, batch API,
-Anthropic built-in tools (web search, code execution), citations, or `cache_control`
-prompt caching ([Phase 6](../README.md#roadmap)). Manual extended-thinking budgets aren't
-exposed (deprecated by Anthropic). Old tool results re-capped for context and history
-trimming make earlier thinking blocks invalid on Claude 5.1+ models — the API drops them
-rather than erroring, but reasoning continuity is reduced until context compilation
-becomes append-only (Phase 6). Images inside tool results are sent as text, as with other
-providers. Zero data retention is an organization-level Anthropic arrangement: everything
-used here is ZDR-eligible except Claude Fable/Mythos models, which require 30-day
-retention and reject requests from ZDR organizations; thinking blocks from Claude Sonnet
-5.5 and Haiku 5.5 only work for the account that produced them.
+**Limits.** API keys only — no Bedrock, Vertex or OAuth. Anthropic's built-in tools (web
+search, code execution), citations, batch and prompt caching aren't offered (caching is
+[Phase 6](../README.md#roadmap)). Thinking budgets can't be set. A dropped connection fails
+the turn. On the Claude 5.1 generation, trimming old history can discard earlier reasoning —
+the turn still succeeds, with less continuity. Zero data retention is arranged with Anthropic
+per organization; see [SECURITY.md](../SECURITY.md#data-handling-by-provider).
 
-Offline testing: `node scripts/dev/mock-anthropic-server.mjs` (see AGENTS.md).
+#### OpenAI-compatible
 
-**Context windows.** Resolution per model: your per-model override → your provider-wide
-setting (a deliberate cap) → the window the provider reports during discovery → 8K. Image
-support similarly combines your setting, server-reported flags and a name heuristic.
+**What.** Any server that speaks the OpenAI Chat Completions protocol — the way to run fully
+local models or to go through a gateway your organization approves.
 
-**Provider state.** Some native APIs return opaque continuation data the next request must
-replay (Gemini thought signatures, OpenAI encrypted reasoning items, Anthropic thinking
-signatures).
-It is stored with the assistant message in stream order and replayed only to adapters of the
-same protocol; switching a chat to another provider simply drops it from that request. It
-never reaches the UI (not streamed, stripped from chat loads), is excluded from search, and
-each block is capped at 64 KiB.
+**How to use.** Choose the **OpenAI-compatible** tile and either pick a *Quick setup* preset
+or enter a base URL ending in `/v1`.
 
-*Limits:* state from a provider family is only replayed when the selected model (or an
-agent's fallback) speaks that family.
+| Preset | Base URL |
+|---|---|
+| Ollama | `http://localhost:11434/v1` |
+| LM Studio | `http://localhost:1234/v1` |
+| vLLM / llama.cpp | `http://localhost:8000/v1` |
+| OpenRouter | `https://openrouter.ai/api/v1` |
 
-## Connections (MCP tools)
+An API key is only needed for hosted gateways or servers started with one.
 
-**What.** MCP servers give the model real tools. Add them in **Connections** (sidebar → ⚒):
-a *local command* (stdio — e.g. `npx -y @modelcontextprotocol/server-everything`, with
-optional env vars and working directory) or a *remote server* (Streamable HTTP endpoint with
-optional headers). Paste a standard `{"mcpServers": {…}}` JSON config to prefill the form.
-Secret env/header values go to the OS keychain; everything else lives in `mcp.json`.
-Servers connect in the background and are enabled or disabled only with the **Enabled**
-switch at the top of a connection in Connections (the ⚒ Tools menu turns a server off for one
-chat or agent without disconnecting it); status dots and stderr tails surface failures. While a connection is disabled, Reconnect is hidden and
-**Save & test** is greyed out. **Save & test** saves, connects, waits for the handshake and
-reports the result ("connected · N tools discovered" or the error); a plain **Save** only
-reconnects when the command, working directory, environment, URL or headers changed.
+**How it works.** Models are discovered from the server's `/models` list. Reasoning is shown
+when the server streams it (`reasoning_content` or `reasoning`).
 
-**Tool permissions.** A connection's **Tool permissions** section lists every tool the
-server reported, each with an access badge and an *Allow* / *Ask* / *Disable* choice, plus
-*Default for new tools* and *Reset all to default*. Changes save immediately. The list is
-cached in `mcp.json` after each successful listing, so it stays visible ("last seen") and
-editable while the server is disabled or offline. Badges come from the server's MCP
-annotation hints and are informational only — never used to grant anything:
-*Read-only* (`readOnlyHint`), *Write* (`destructiveHint: false`), *Destructive*
-(`destructiveHint: true`), and *Unannotated* (no hints given). Unannotated tools get a
-dashed amber badge and a note: the MCP spec defaults them to potentially destructive, so
-*Ask* is the safe choice.
+**Limits.** Capabilities vary by server: tool calling and image input depend on the model and
+on what the server implements. Servers that report no context window use your setting, or 8K.
 
-**Scoped permissions (chats and agents).** Connection permissions are the **defaults**.
-Every run also has a scope that can adjust them:
+#### Simulated
 
-- *Plain chats* — the composer's ⚒ **Tools** menu ("Tools · this chat") sets overrides for
-  that chat only: turn a server off for the chat (it stays connected for everything else),
-  or set a tool to Allow / Ask / Disable. Overridden tools show a dot; click it, or *Reset to
-  defaults*, to follow Connections again. New chats start with no overrides.
-- *Agents* — own their tools and permissions, edited in the agent editor or from an agent
-  chat's ⚒ Tools menu ("Tools · agent name"). See [Agents](#agents).
-- The approval card's **Always allow** saves to the run's scope ("Always allow in this chat"
-  / "for this agent"), never to the global defaults.
+**What.** A built-in provider that streams canned replies, so you can try the interface with
+no account, key or network. It is always available in the model picker.
 
-Resolution, enforced in Rust (`mcp/permissions.rs`): a disabled connection offers nothing;
-tools off in the scope are neither offered nor named; a tool set to *Disable* in Connections
-is a **hard ceiling** no chat or agent can turn back on (menus show "off in Connections");
-otherwise the scope's choice applies, falling back to the connection's. Dispatch re-checks the
-scope on every call, so turning a server or tool off mid-run blocks its next call. A run
-whose chat or agent was deleted fails closed (every tool asks); deleting an agent also
-cancels its running chats.
+### Provider settings
 
-**Tool security.** Every tool is *Always allow*, *Ask*, or *Block* — set per tool in
-Connections → Tool permissions (the defaults), per chat or agent as above, or per server via
-the default. Blocked tools are never sent to the model; *Ask* pauses the run on an approval
-card (Allow once / Always allow / Deny), *Always allow* persists the choice. Enforcement
-happens in Rust at dispatch, not just in the UI. Two extra guardrails: *Always allow* pins a
-signature of the tool's definition, **per scope** — a connection grant is pinned when granted
-(from the live definition, or the cached one when offline) or, for a default Allow, when the
-tool is first listed (only configs predating the cache pin on first use); a chat/agent grant
-is pinned when saved, copying the connection's pin when there is one, so copying a stale
-grant keeps it stale, and an approval-card grant pins the definition just approved. Scoped
-grants never pin on first use, and re-approving in one scope never re-validates another. If
-the server changes the schema or description the tool falls back to *Ask* and shows a
-"changed" badge; and a new stdio server,
-or a change to its command, working directory or environment, must be confirmed in a native
-OS dialog, so server installs can't be driven silently. A model that calls a disabled tool
-is told it is disabled (and to say so) rather than that it doesn't exist. Approval cards open
-their arguments automatically and carry the server's destructive/read-only hints; unanswered
-approvals auto-deny after 15 minutes.
+**What.** One place to add, test, edit and remove provider connections.
 
-**Tool loading.** Under ⚒ Tools → *Tool loading*: **Always load all** sends every enabled
-tool's schema each request; **On-demand** sends only a `find_tools` search tool — the model
-calls it with keywords to load the matching tools, keeping prompts small when many servers
-are connected; **Auto** (default) loads all until the definitions exceed ~6k estimated
-tokens or a quarter of the context window, then switches to on-demand. Tools loaded through
-`find_tools` stay available for the rest of the conversation. If the model calls a real
-catalog tool that isn't loaded yet, it is loaded on the spot so the retry carries its
-definition — a `find_tools` call is only needed for names that don't exist.
+**How to use.** Open **Providers** (⌘, / Ctrl+,). The dialog opens on a picker: one tile per
+provider type next to **Your providers**, the list of saved connections.
 
-**How it works.** The run loop is model → tool calls → (approval) → results → model (max 8
-steps, max 16 calls per step). Calls stream in as `tool_calls` fragments, execute against
-the MCP connection, and results feed back; tool cards in the chat show status, arguments,
-and results. Results are capped before persistence and replay: the lesser of 40k chars or
-a quarter of the context window, re-capped to 2k on later turns; binary parts become
-labeled stubs. Arguments must be a JSON object — malformed calls are rejected before the
-approval step. Stdio servers run as process-group leaders with kill-on-drop, so `npx →
-node` grandchildren die on disconnect or app quit; a timed-out or cancelled call notifies
-the server via `notifications/cancelled`. Remote (HTTP) connections never follow
-redirects, keeping credential headers on the origin. Stderr tails are line-capped and
-redact known secret values. Key code: `crates/agent-core/src/mcp/` (config, stdio env,
-manager), `agent/tools.rs` (catalog, naming, search), `agent/coordinator.rs` (loop),
-`providers/openai_compat.rs` (tool_calls).
+1. Click a tile. The form asks only for the essentials: name, API key (with *Show* and *Get
+   an API key ↗*), default model — plus base URL and presets for OpenAI-compatible servers.
+2. **Save & test** saves, connects and lists the provider's models. It returns to the picker
+   once the test passes and a default model is chosen; otherwise it stays on the form with the
+   server's message. **Save** stores the connection without testing.
+3. **← All providers** returns to the picker, asking first if you have unsaved edits.
 
-**Limits.** Max 8 tool steps per run and 16 calls per step; calls run sequentially. Per
-server: up to 500 tools, 64 env/header entries, 1 KB tool descriptions, 16 KB input
-schemas (oversized tools are skipped). Stdio children get an allow-listed environment plus
-a recovered login-shell PATH so `npx`/`uvx` resolve from GUI launches. Server-supplied
-metadata (descriptions, schemas) is treated as untrusted and bounded before it reaches the
-model; the cached tool list keeps at most 500 tools per server, with titles capped at 128
-and descriptions at 256 characters, and is display/pinning only — calls always need the
-live server. Chat overrides and agent access accept at most 64 servers and 500 tools per
-server, with tool names up to 128 characters; scoped pins of deleted chats/agents are pruned
-at startup. MCP auth (OAuth) is [Phase 4](../README.md#roadmap) — remote servers that need
-browser sign-in can't connect yet.
+**Advanced settings** holds what most setups never touch:
+
+| Setting | Purpose |
+|---|---|
+| Base URL (built-in types) | Point a native provider at a proxy or gateway |
+| TLS verification | *System* (default), a *pinned CA* certificate, or *skip verification* |
+| Context window | A provider-wide cap on how much history is sent |
+| Image input | *Auto-detect*, *Supported* or *Not supported* |
+| Token usage | Ask the server to report usage (OpenAI-compatible) |
+| Models | The model list, per-model context windows and the *shown* toggles |
+
+The section opens by itself, marked *customized*, when a saved provider changes any of these.
+
+**How it works.** API keys go straight to the OS keychain and are never shown again; when
+editing a provider, leave the key field blank to keep the stored key. Removing a provider
+deletes its key from the keychain. HTTPS is required unless the server is on this machine. Redirects are
+never followed, so a key can't be forwarded to another host — if a base URL redirects, the
+error tells you to use the final address. A failed save keeps everything you typed.
+
+**Limits.** The picker has no search or categories yet.
+
+### Model list & hiding
+
+**What.** Each provider keeps the list of models it discovered, with their limits. Hide the
+ones you don't use to keep the model picker short.
+
+**How to use.** Provider settings → **Advanced settings** → *Models*. Untick *shown* to hide a
+model from the chat picker and the agent model dropdowns; set a per-model context window when
+the default is wrong.
+
+**How it works.** The context window for a model is the first of: your per-model value → your
+provider-wide setting → the value the provider reports → 8K. Hiding is a listing preference,
+not a block: the model you currently have selected, and agents or schedules already using a
+hidden model, keep working. Hidden models survive a model refresh.
+
+**Limits.** The provider's default model can't be hidden. Changing a provider's type clears
+its hidden list.
+
+### Reasoning continuity
+
+**What.** OpenAI, Gemini and Anthropic return protected reasoning data that must be sent back
+on the next request for the model to continue its line of thought across tool calls. OpenGent
+stores and replays it for you.
+
+**How it works.** The data is saved locally with the message it belongs to and replayed only
+to the same provider family. It is never displayed, never searched, and never sent to a
+different vendor. Switching a chat to another provider simply leaves it out — the readable
+Thinking text stays in the chat either way.
+
+**Limits.** Continuity applies only while you stay with the same provider family. Unusually
+large reasoning blocks (over 64 KiB) aren't stored; the model then reasons afresh on the next
+turn.
+
+---
+
+## Tools (MCP connections)
+
+Tools come from [MCP](https://modelcontextprotocol.io) servers you connect. The model
+proposes a call; your permissions decide whether it runs.
+
+### Connections
+
+**What.** A connection is one MCP server: a **local command** (stdio) or a **remote server**
+(Streamable HTTP).
+
+**How to use.** Open **Connections** (sidebar → ⚒) and add a server:
+
+| Kind | You provide | Example |
+|---|---|---|
+| Local command | Command, optional working directory and environment variables | `npx -y @modelcontextprotocol/server-everything` |
+| Remote server | URL, optional headers | `https://example.com/mcp` |
+
+- Paste a standard `{"mcpServers": {…}}` JSON config to prefill the form.
+- Mark an environment variable or header as *secret* to keep its value in the OS keychain.
+- **Save & test** saves, connects and reports "connected · N tools discovered" or the error.
+  **Save** alone reconnects only if the command, directory, environment, URL or headers
+  changed.
+- The **Enabled** switch turns a connection off everywhere. To turn it off for a single chat
+  or agent, use the ⚒ Tools menu instead (see [Scopes](#permission-scopes)).
+
+**How it works.** Servers connect in the background and reconnect when they drop; a status
+dot and the server's recent error output show failures. Adding a local command, or changing
+its command, working directory or environment, must be confirmed in a native OS dialog, so a
+server can never be installed silently. Local servers are stopped, along with any processes
+they started, when you disconnect or quit.
+
+**Limits.** Servers that require OAuth sign-in can't connect yet
+([Phase 4](../README.md#roadmap)). A local server runs with your user account's privileges —
+permissions are a consent layer, not a sandbox, so only add servers you trust.
+
+### Tool permissions
+
+**What.** Every tool has one of three permissions:
+
+| Permission | Effect |
+|---|---|
+| **Allow** (*Always allow*) | Runs without asking |
+| **Ask** | Pauses the reply on an approval card |
+| **Disable** (*Block*) | Never offered to the model |
+
+**How to use.** In a connection, **Tool permissions** lists every tool the server reported
+with a permission choice, *Default for new tools*, and *Reset all to default*. Changes save
+immediately. Each tool carries a badge taken from the server's own description:
+
+| Badge | Meaning |
+|---|---|
+| Read-only | The server says the tool only reads |
+| Write | The server says it changes things, non-destructively |
+| Destructive | The server says it can delete or overwrite |
+| Unannotated | The server says nothing — treat as potentially destructive; *Ask* is the safe choice |
+
+**How it works.** Permissions are enforced in Rust when a call is dispatched, not in the
+interface. Badges are information only and never grant anything. An *Allow* is tied to the
+tool's exact definition: if the server later changes the tool's description or inputs, it
+drops back to *Ask* and shows a "changed" badge. The tool list is remembered, so permissions
+stay editable while a server is disabled or offline. A model that calls a disabled tool is
+told it is disabled.
+
+**Limits.** Per server: up to 500 tools; tools with oversized descriptions or input schemas
+are skipped.
+
+### Permission scopes
+
+**What.** Connection permissions are the **defaults**. Chats and agents can adjust them
+without affecting anything else.
+
+| Scope | Where to edit | Behavior |
+|---|---|---|
+| **Connection** (defaults) | Connections → Tool permissions | Applies everywhere unless overridden. *Disable* here is a hard ceiling nothing can lift |
+| **Chat** | Composer → ⚒ Tools ("Tools · this chat") | Turn a server off for this chat, or set a tool to Allow / Ask / Disable. New chats start with no overrides |
+| **Agent** | Agent editor, or ⚒ Tools in an agent chat | The agent has its own tools and permissions (see [Agents](#agents)) |
+
+**How to use.** In the ⚒ Tools menu, overridden tools show a dot; click it, or *Reset to
+defaults*, to follow Connections again. Tools disabled in Connections show "off in
+Connections".
+
+**How it works.** Every call is re-checked against its scope, so turning a server or tool off
+mid-reply blocks its next call. If a chat or agent is deleted while it is running, its
+remaining tool calls all require approval.
+
+### Approvals
+
+**What.** When a tool set to *Ask* is called, the reply pauses on an approval card showing
+the tool, its arguments and its badge.
+
+**How to use.** Choose **Allow once**, **Always allow**, or **Deny**. *Always allow* is saved
+for the current chat or agent only — never to the global defaults.
+
+**How it works.** A denial is reported back to the model so it can continue without the
+tool. Calls with malformed arguments are rejected before you are asked.
+
+**Limits.** An unanswered approval is denied automatically after 15 minutes.
+
+### Tool loading
+
+**What.** Controls how many tool definitions are sent with each request — relevant once you
+connect many servers.
+
+**How to use.** ⚒ Tools → *Tool loading*:
+
+| Mode | Behavior |
+|---|---|
+| **Auto** (default) | Sends everything while it's small; switches to on-demand past about 6k tokens of definitions or a quarter of the context window |
+| **Always load all** | Sends every enabled tool's definition with each request |
+| **On-demand** | Sends only a `find_tools` search tool; the model looks tools up by keyword |
+
+**How it works.** Tools found through `find_tools` stay loaded for the rest of the
+conversation. If the model calls a real tool that isn't loaded yet, it is loaded on the spot
+and the model retries.
+
+### Tool calls in a reply
+
+**What.** Tool calls appear as cards inside the reply, with status, arguments and result.
+
+**How it works.** The model can call tools, read the results and continue, repeatedly, within
+one reply. Results are shortened before they are stored and sent back to the model; older
+results are shortened further on later turns. A cancelled or timed-out call is cancelled on
+the server too.
+
+**Limits.**
+
+| Limit | Value |
+|---|---|
+| Tool steps per reply | 8 |
+| Calls per step | 16, run one after another |
+| Tool result kept | Up to 40k characters or a quarter of the context window; 2k on later turns |
+| Images and other binary results | Passed to the model as a text placeholder |
+
+---
 
 ## Agents
 
-**What it does.** Reusable assistants with their own name, description, default model,
-optional fallback model, instructions, and its own MCP servers, tools and tool permissions.
-Agent chats use the regular chat interface, labeled with the agent's name.
+**What.** An agent is a reusable assistant: a name and description, a default model with an
+optional fallback, your instructions, and its own selection of tools and permissions. Agent
+chats look like regular chats, labeled with the agent's name.
 
-**How to use it.** Click **Agents** in the sidebar. With no agents you get an intro page and a
-*Create your first agent* button. The editor has four sections: *Identity* (name, description),
-*Models* (default + optional fallback), *Instructions* (your system prompt), and *Tools*: tick
-a connection to add it, then **Edit tools & permissions…** to turn each tool on/off and choose
-*Allow* or *Ask*, plus *New tools* (Ask or Off) for tools the server adds later. Adding a
-connection copies its defaults from Connections — read-only tools keep *Allow*; write,
-destructive and unannotated tools start at *Ask*, because agents can run unattended. The card
-summarizes how many tools run without asking (highlighted when some can make changes);
-*Reset to connection defaults* copies them again. The same controls are in an agent chat's
-⚒ Tools menu, which saves straight to the agent. **Save & start chat** opens a new chat with
-the agent; the composer shows the agent chip instead of the model picker. Agent cards also
-offer **Chat** and **Configure**.
+**How to use.** Click **Agents** in the sidebar, then *Create your first agent* (or open an
+existing card with **Configure**). The editor has four sections:
 
-**How it works.** Agents are stored in SQLite (`agents` table; config as JSON). Chats carry an
-`agent_id`, and Rust resolves the agent's models, tools and prompt at run time — the webview
-never supplies them for agent chats. The system prompt is a built-in agent prompt
-(`agent_system_prompt` in `agent/context.rs`: identity, operating rules, untrusted-data
-handling, and an unattended-run section for schedules), then the tools section, then your
-instructions appended verbatim under *Agent instructions*. The agent's permissions
-(`AgentServerAccess`: `default_policy` + per-tool `policies`, `block` = off) are its run
-scope (`ScopePolicies::Agent`, resolved in `McpManager::prepare_tools` and at dispatch);
-servers the agent doesn't use are neither offered nor named, and tools disabled in
-Connections stay disabled. Agents saved before per-agent permissions follow the connection's
-permissions until opened in the editor, which converts them (an old *Selected tools* list
-becomes per-tool on/off) and saves on **Save**. The fallback model is used once per run when the default fails **before producing any
-output** (connection/auth/model errors); the turn shows a notice and is attributed to the
-fallback model (`ModelSwitched` run event). Context is budgeted for the smaller of the two
-models' windows.
+| Section | Contents |
+|---|---|
+| Identity | Name and description |
+| Models | Default model, optional fallback |
+| Instructions | Your system prompt for the agent |
+| Tools | Tick a connection to add it; **Edit tools & permissions…** turns each tool on or off and sets *Allow* or *Ask*; *New tools* decides what happens to tools the server adds later (*Ask* or *Off*) |
 
-**Limits.** The fallback does not engage after partial output (it would duplicate text).
-Image attachments are gated on the default model's capabilities. Deleting an agent removes its
-schedules; its chats remain as plain chats. Agents can't allow tools the server adds later
-without asking: *New tools* is Ask or Off, and a tool needs an explicit *Allow* (pinned to its
-definition at save time). Turning a connection off in an agent chat's menu and back on again
-re-copies the defaults rather than restoring earlier per-tool choices.
+**Save & start chat** opens a new chat with the agent; **Chat** on a card does the same. The
+same tool controls are available in an agent chat's ⚒ Tools menu and save straight to the
+agent.
 
-## Scheduled agent runs
+**How it works.** Adding a connection copies its current defaults: read-only tools keep
+*Allow*, everything else starts at *Ask*, because agents can run unattended. The card shows
+how many tools run without asking and highlights when some of them can make changes. *Reset
+to connection defaults* copies them again. Your instructions are added to a built-in agent
+prompt that covers operating rules and the handling of untrusted tool output. An agent only
+sees the connections you gave it, and tools disabled in Connections stay disabled.
 
-**What it does.** Runs an agent with a preset prompt once, every N minutes/hours/days, or on
-chosen weekdays at a local time. Each run opens a new chat (marked ⏱ in the sidebar).
+**Limits.** An agent can't auto-allow tools a server adds later; each *Allow* is an explicit
+choice. Turning a connection off and on again in an agent re-copies the defaults. Image
+attachments follow the default model's capabilities. Deleting an agent deletes its schedules
+and stops its running chats; the chats themselves remain as plain chats.
 
-**How to use it.** In a saved agent's editor, **Add schedule**: prompt, repeat rule, what to do
-with missed runs, enabled. Each schedule shows its next run, last outcome (with a link to the
-chat), a pause toggle, **Run now**, Edit and Delete.
+### Fallback model
 
-**Missed runs.** If the app was closed or the computer asleep at the scheduled time, the
-schedule's policy decides: **Run it once when the app is back** (several missed occurrences
-coalesce into one catch-up run) or **Skip it** and wait for the next time. A run counts as
-missed when first seen more than 2 minutes after it was due.
+**What.** If the default model can't start a reply — connection, authentication or model
+error, or a refusal — the agent's fallback model answers instead.
 
-**How it works.** `agents/schedule.rs` holds the pure logic (`next_after`, `plan_due`,
-DST-aware weekday times via chrono in the OS time zone). `src-tauri/src/scheduler.rs` ticks
-every 20 s against wall-clock time (so sleep is detected even though timers pause), persists the
-decision *before* starting the run (no double fires after a crash), and waits up to 30 s at
-startup for MCP servers to connect so catch-up runs have their tools. Scheduled runs stream
-over app events (`background-run-started`, `background-run-event`); if the chat is open you see
-it live and can answer approval prompts. The agent is told the run is unattended and must not
-wait for answers.
+**How it works.** The switch happens at most once per reply, and the reply is labeled with
+the model that produced it. History is sized for the smaller of the two models' context
+windows.
 
-**Limits.** Runs only while the app is open (no OS-level launch agent). Tool calls that need
-approval are auto-denied after 15 minutes if nobody answers. Interval schedules count from when
-they were saved/last ran, not from a fixed clock time. No OS notifications yet.
+**Limits.** No switch after the first model has produced output, since that would duplicate
+text.
 
-## Attachments
+### Schedules
 
-Attach files to a message with the **⌁ Attach** button (native file picker, up to 20 files,
-2 MiB each). The picker accepts any file; what it can't use is skipped per file with a
-reason instead of failing the whole selection. Text files are expanded into labeled
-`<attachment>` excerpts in the prompt. Images go to models that can see them.
+**What.** Run an agent with a preset prompt automatically. Each run opens a new chat, marked
+⏱ in the sidebar.
 
-### Image attachments
+**How to use.** In a saved agent's editor, **Add schedule** and set the prompt, the repeat
+rule and the missed-run policy. Each schedule shows its next run and last outcome (with a link
+to the chat), and has a pause toggle, **Run now**, Edit and Delete.
 
-**What.** PNG, JPEG, GIF, and WebP images can be attached to a prompt. They appear as
-thumbnails in the composer and in the sent message, and are sent to the model as base64
-`data:` URLs in the OpenAI `image_url` content-part format.
+| Repeat | Fires |
+|---|---|
+| Once | At a date and time |
+| Interval | Every N minutes, hours or days, counted from when it was saved or last ran |
+| Weekdays | On chosen days at a local time (daylight-saving aware) |
 
-**Which models.** Whether a model accepts images is resolved per provider+model, in order:
+| Missed-run policy | When the app was closed or the computer asleep |
+|---|---|
+| Run it once when the app is back | Any number of missed runs become a single catch-up run |
+| Skip it | Waits for the next scheduled time |
 
-1. **Your setting** — Provider Settings → *Image input*: `Auto-detect` (default),
-   `Supported` (all models on the provider), or `Not supported`. Always/Never wins outright.
-2. **Server-reported** — in `auto`, detection runs when you save & test a provider or refresh
-   its model list: OpenRouter-style `architecture.modality`, LM Studio `type: "vlm"` (via
-   `/v1/models` or `/api/v0/models`), and Ollama per-model `capabilities` via `/api/show`.
-   Results are cached on the provider (`vision_models`) and marked "· vision" in the picker.
-3. **Name heuristic** — in `auto`, well-known vision families (gpt-4o/4.1/5, o3/o4,
-   claude ≥ 3, gemini, llava, qwen-vl, pixtral, gemma3, and similar) count as capable even
-   when the server reports nothing.
+**How it works.** A run counts as missed when it is noticed more than 2 minutes late. At
+launch, the scheduler waits briefly for connections so catch-up runs have their tools. The
+agent is told the run is unattended and not to wait for answers. If you have the chat open
+you see the run live and can answer its approval prompts.
 
-**Behavior when unsupported.** The picker shows all files (a type list can't describe
-"any UTF-8 text or sniffed image" without hiding attachable files); picked images are
-skipped with a per-file reason. Images already pending when you switch to a text-only
-model are flagged in the composer and block Send until removed. `start_run` re-validates
-and fails the send with a clear error. Replaying an old chat that contains images against
-a text-only model degrades each image to a labeled placeholder (`status="omitted"`)
-instead of dropping it silently.
+**Limits.** Schedules fire only while the app is open. A tool that needs approval is denied
+after 15 minutes if nobody answers. No OS notifications yet.
 
-**How it works.** Images are sniffed by magic bytes (a `.png` that isn't one is rejected),
-stored as immutable content-addressed blobs under `~/.opengent/attachments/`, base64-encoded
-at request time, and rendered as `ContentBlock::Image` — request-path only, never persisted.
-Thumbnails load through an IPC command returning a `data:` URL (CSP-safe; the webview has no
-file access). Key code: `crates/agent-core/src/providers/capabilities.rs` (heuristic),
-`providers/openai_compat.rs` (detection probes, request body), `storage/attachments.rs`
-(sniffing, blobs), `agent/context.rs` (render).
+---
 
-**Limits.** 2 MiB per image before base64 inflation; each image is estimated at ~1,500 tokens
-for context budgeting. SVG is treated as text (providers don't accept it as image input).
-Formats not yet supported — to be added later — include HEIC/HEIF (iPhone photos), BMP,
-TIFF, PDF and other document types, and non-UTF-8 text (UTF-16, Latin-1); they are skipped
-with a reason at pick time.
+## Privacy & data
 
-## History & persistence
+### Local data
 
-Chats, messages, and attachment metadata live in SQLite (WAL) under `~/.opengent`. Sidebar
-search covers titles and message text and reasoning (not tool arguments, ids or provider
-state); interrupted streams are recovered as failed turns on
-next launch. Attachment blobs are deduplicated by SHA-256 and integrity-checked on read.
+**What.** OpenGent has no account, no cloud service of its own and no telemetry. The only
+network traffic is to the providers and MCP servers you configure.
 
-## Secrets
+| Data | Location |
+|---|---|
+| Chats, messages, agents, schedules | SQLite database in `~/.opengent` |
+| Attachments | `~/.opengent/attachments` |
+| Provider and connection settings | JSON files in `~/.opengent` (no secrets) |
+| API keys, secret headers and variables | OS credential store |
 
-API keys live only in the OS credential store (macOS Keychain, Windows Credential Manager).
-`ProviderConfig` stores a `has_api_key` flag, never the value; nothing secret crosses IPC.
+**How it works.** With a local model (Ollama, LM Studio, vLLM, llama.cpp) nothing leaves
+your machine. Hosted providers receive the conversation for each request and are used in
+their stateless mode; what each vendor may retain is covered in
+[SECURITY.md](../SECURITY.md#data-handling-by-provider).
+
+**Limits.** Local chat data isn't encrypted by the app; it relies on your OS account and disk
+encryption. Per-chat encryption is on the [roadmap](../README.md#proposed-features).
+
+### Secrets
+
+**What.** API keys and secret connection values live only in the macOS Keychain or Windows
+Credential Manager.
+
+**How it works.** Secrets never reach the interface, the database, settings files or logs.
+Settings record only *that* a key exists. To replace a key, type a new one over it; removing
+a provider deletes its key.
+
+---
+
+## Appearance
+
+### Activity indicator & theme
+
+**What.** A radar symbol next to each reply spins while the model is working and stops when
+the reply ends; the label beside it names the current phase. The app follows your system's
+light or dark theme.
+
+**How it works.** Turning on your OS's reduced-motion setting stops the rotation.
+
+**Limits.** The indicator shows activity, not progress. There is no in-app theme switch.

@@ -61,8 +61,9 @@ Node 24 LTS (`nvm use`), the Tauri system dependencies, then `npm install` and
 - If you added a schema change, add a new SQLite migration; migrations are append-only, so never
   edit an existing one.
 - If the change is user-visible, update [docs/features.md](docs/features.md) (keep its
-  *what / how to use / how it works / limits* format) and add a line to
-  [CHANGELOG.md](CHANGELOG.md).
+  *what / how to use / how it works / limits* format, written for users) and add an entry
+  under *Unreleased* in [CHANGELOG.md](CHANGELOG.md), in the matching group (*Added*,
+  *Changed*, *Fixed*, *Security*).
 - Keep PRs focused: one issue per PR.
 
 ## Conventions

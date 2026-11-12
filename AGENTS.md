@@ -4,6 +4,15 @@ Frontier quality model-agnostic desktop agent and harness. Tauri 2 host + Svelte
 Design/roadmap: see the phased plan and proposed features in README.md; delivered work in CHANGELOG.md.
 Contributor guidelines: see CONTRIBUTING.md. Security scope: SECURITY.md.
 
+## Workflow
+
+- Before creating a branch, read `CONTRIBUTING.md` and follow it: branch off an up-to-date `main`, name it
+  `<type>/<slug>` (`feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `ci`, `chore`), one branch = one PR = one issue,
+  never reuse a merged branch, and meet the PR checklist before opening the PR.
+- Do not run `npm run tauri:build` (or any other release/bundle build) during development unless explicitly asked —
+  it is expensive, and release bundles are built by `.github/workflows/release.yml`. Use `npm run verify` to check
+  changes and `npm run tauri:dev` to run the app.
+
 ## Layout
 
 - `product.json` – single source of product identity (display name, slug, data dir, bundle id, version).
@@ -19,7 +28,7 @@ Contributor guidelines: see CONTRIBUTING.md. Security scope: SECURITY.md.
 
 - Node 24 LTS (`nvm use` reads `.nvmrc`); `npm install` once; `cargo` uses the committed `Cargo.lock`.
 - `npm run tauri:dev` – run the desktop app (generates product artifacts first).
-- `npm run tauri:build` – release bundle (unsigned unless signing is configured).
+- `npm run tauri:build` – release bundle (unsigned unless signing is configured). Only when asked; see Workflow.
 - `npm run verify` – svelte-check, vitest, cargo fmt/clippy/test.
 - Releases (`docs/releasing.md`): `.github/workflows/release.yml` builds a universal macOS `.dmg` and Windows
   `.exe`/`.msi`; a manual run is a dry run (artifacts only), a `vX.Y.Z[-alpha|-beta|-rc.N]` tag creates a draft
@@ -77,5 +86,7 @@ Contributor guidelines: see CONTRIBUTING.md. Security scope: SECURITY.md.
 - Streaming to the UI goes through `tauri::ipc::Channel` (ordered); text deltas are coalesced in `RunEmitter`.
 - Product branding only via `product.json`; `slug`, `dataDirName`, `identifier` are stable – renaming needs a migration.
 - Prefer first-party code; add external dependencies only for key capabilities.
-- User-visible changes: update `docs/features.md` (what / how to use / how it works / limits) and `CHANGELOG.md`;
-  move shipped roadmap items out of README "Proposed features".
+- User-visible changes: update `docs/features.md` (the user-facing feature reference: what / how to use / how it
+  works / limits, plus its "At a glance" row — no code paths or change history) and add an entry under *Unreleased*
+  in `CHANGELOG.md` (Added / Changed / Fixed / Security, prefixed with the area); move shipped roadmap items out of
+  README "Proposed features". A new or changed provider also updates the SECURITY.md data-handling table.
