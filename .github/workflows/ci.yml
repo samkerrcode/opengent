@@ -5,9 +5,11 @@ on:
     branches: [main]
     paths-ignore:
       - '**.md'
+      - '.github/workflows/release.yml'
   pull_request:
     paths-ignore:
       - '**.md'
+      - '.github/workflows/release.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
