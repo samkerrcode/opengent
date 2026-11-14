@@ -5,6 +5,7 @@
 mod commands;
 mod scheduler;
 mod state;
+mod window;
 
 use tauri::Manager;
 use tracing_subscriber::EnvFilter;
@@ -18,6 +19,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            window::fit_and_show(app);
             let state = AppState::initialize(app.handle())?;
             tracing::info!(
                 product = agent_core::config::product().display_name,
