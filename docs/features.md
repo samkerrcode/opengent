@@ -253,9 +253,9 @@ provider type next to **Your providers**, the list of saved connections.
 
 1. Click a tile. The form asks only for the essentials: name, API key (with *Show* and *Get
    an API key ↗*), default model — plus base URL and presets for OpenAI-compatible servers.
-2. **Save & test** saves, connects and lists the provider's models. It returns to the picker
-   once the test passes and a default model is chosen; otherwise it stays on the form with the
-   server's message. **Save** stores the connection without testing.
+2. **Save & test** saves, connects and lists the provider's models, then stays on the form
+   so the discovered list is right there for choosing a default model. **Save** stores the
+   connection without testing and returns to the picker.
 3. **← All providers** returns to the picker, asking first if you have unsaved edits.
 
 **Advanced settings** holds what most setups never touch:

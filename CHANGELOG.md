@@ -18,6 +18,8 @@ under *Unreleased*.
 
 - **Platform**: The window now opens at about 75% of the screen's usable area, centred, instead
   of a fixed 1280 × 820 that overflowed high-DPI screens such as 4K at 300% scaling.
+- **Providers**: **Save & test** stays on the form after a successful test so the discovered
+  model list is visible; plain **Save** still returns to the picker.
 
 ## 0.1.0 — 2026-11-11
 

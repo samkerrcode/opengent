@@ -49,6 +49,7 @@
   /** Confirmation shown on the picker after a successful save. */
   let flash = $state<string | null>(null);
   let testResult = $state<ProviderTestResult | null>(null);
+  let noticeEl = $state<HTMLElement | null>(null);
   let dialog = $state<HTMLElement | null>(null);
   let pane = $state<HTMLElement | null>(null);
 
@@ -231,8 +232,9 @@
     return saved;
   }
 
-  // Save returns to the picker. Save & test returns only when the connection works and a
-  // default model is set; otherwise it stays so the user can fix the problem or pick a model.
+  // Save returns to the picker. Save & test always stays on the form: the discovered model
+  // list and the test outcome are what the user came to see. Success adopts the provider as
+  // the chat default when nothing else is selected.
   async function save(andTest: boolean) {
     if (!editing) return;
     const f = editing;
@@ -255,7 +257,7 @@
       } else {
         await adoptAsActive(saved.id, f.default_model.trim());
         const models = n ? ` · ${n} model${n === 1 ? "" : "s"} available` : "";
-        return void backToPicker(`${saved.name} saved and connected${models}.`, true);
+        notice = { ok: true, text: `${saved.name} saved and connected${models}.` };
       }
     } catch (e) {
       notice = { ok: false, text: describeError(e) };
@@ -280,6 +282,12 @@
   function onKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") requestClose();
   }
+
+  // The outcome line sits at the end of the scroll pane; keep it visible when it changes.
+  $effect(() => {
+    void notice;
+    noticeEl?.scrollIntoView({ block: "nearest" });
+  });
 
   $effect(() => {
     dialog?.focus();
@@ -485,7 +493,7 @@
             {/if}
 
             {#if notice}
-              <p class="result" class:ok={notice.ok} class:bad={!notice.ok} role="status">{notice.text}</p>
+              <p class="result" class:ok={notice.ok} class:bad={!notice.ok} role="status" bind:this={noticeEl}>{notice.text}</p>
             {/if}
           </div>
 
