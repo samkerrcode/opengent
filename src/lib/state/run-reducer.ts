@@ -48,10 +48,6 @@ export function turnText(turn: AssistantTurn): string {
   return turn.segments.filter((s) => s.kind === "text").map((s) => s.text).join("\n\n");
 }
 
-export function turnThinking(turn: AssistantTurn): string {
-  return turn.segments.filter((s) => s.kind === "thinking").map((s) => s.text).join("\n\n");
-}
-
 // Copy-on-write updates: unchanged segments keep their object identity so Svelte doesn't
 // re-render (or re-run markdown-it + DOMPurify on) them for every streamed delta.
 function pushText(turn: AssistantTurn, kind: "text" | "thinking", delta: string) {

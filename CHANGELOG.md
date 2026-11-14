@@ -14,7 +14,16 @@ under *Unreleased*.
 
 ## Unreleased
 
+### Changed
+
+- **Chat**: Each reasoning step gets its own Thinking block, shown in order between tool calls
+  and the answer, instead of one merged block above the reply.
+
 ### Fixed
+
+- **Chat**: A Thinking block with wide code or tables no longer grows past the window edge.
+- **Chat**: Scrolling up inside a streaming Thinking block is no longer snapped back to the
+  bottom; returning to its bottom resumes following.
 
 - **Platform**: The window now opens at about 75% of the screen's usable area, centred, instead
   of a fixed 1280 × 820 that overflowed high-DPI screens such as 4K at 300% scaling.

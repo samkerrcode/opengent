@@ -56,6 +56,25 @@ describe("applyRunEvent", () => {
     expect(turnText(t)).toBe("Checking.\n\nDone.");
   });
 
+  it("keeps thinking around tool calls in separate segments", () => {
+    let t = emptyTurn();
+    t = applyRunEvent(t, ev(0, { type: "thinking_delta", text: "Plan" }));
+    t = applyRunEvent(t, ev(1, { type: "thinking_delta", text: " it." }));
+    t = applyRunEvent(
+      t,
+      ev(2, {
+        type: "tool_call",
+        call: { id: "c1", name: "fs__list", server: "fs", tool: "list", arguments: {} },
+      }),
+    );
+    t = applyRunEvent(t, ev(3, { type: "thinking_delta", text: "Next." }));
+    expect(t.segments).toEqual([
+      { kind: "thinking", text: "Plan it." },
+      expect.objectContaining({ kind: "tool" }),
+      { kind: "thinking", text: "Next." },
+    ]);
+  });
+
   it("flags sequence gaps", () => {
     let t = applyRunEvent(emptyTurn(), ev(0, { type: "phase", phase: "queued" }));
     t = applyRunEvent(t, ev(2, { type: "text_delta", text: "x" }));

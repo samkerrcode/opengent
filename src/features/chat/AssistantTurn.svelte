@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { AssistantTurn, TurnSegment } from "$lib/state/run-reducer";
-  import { isTerminal, turnText, turnThinking } from "$lib/state/run-reducer";
+  import { isTerminal, turnText } from "$lib/state/run-reducer";
   import { renderMarkdown } from "$lib/markdown";
   import { markdownHtml } from "$lib/stream-cursor";
   import { copyText } from "$lib/clipboard";
@@ -21,20 +21,36 @@
 
   const live = $derived(!isTerminal(turn.phase));
   const fullText = $derived(turnText(turn));
-  const thinking = $derived(turnThinking(turn));
-  // Thinking is done as soon as the model moves on to text or a tool call — collapsing
-  // then, instead of at run completion, keeps the response in view while it streams.
-  const thinkingLive = $derived(live && turn.segments.at(-1)?.kind === "thinking");
-  let thinkingEl = $state<HTMLElement>();
-  // The body is height-capped and scrolls internally; follow the tail while thinking
-  // streams, and reset to the top once it collapses so a reopened trace reads from
-  // the start.
-  $effect(() => {
-    const el = thinkingEl;
-    void thinking.length;
-    if (!el) return;
-    el.scrollTop = thinkingLive ? el.scrollHeight : 0;
-  });
+  // A thinking segment is done as soon as the model moves on to text or a tool call —
+  // collapsing then, instead of at run completion, keeps the response in view while it streams.
+  const thinkingLive = (i: number) => live && i === turn.segments.length - 1;
+
+  // The thinking body is height-capped and scrolls internally. While it streams, follow the
+  // tail unless the user scrolled up inside it (returning to its bottom resumes); once it
+  // collapses, reset to the top so a reopened trace reads from the start.
+  function followTail(active: boolean) {
+    return (node: HTMLElement) => {
+      if (!active) {
+        node.scrollTop = 0;
+        return;
+      }
+      let following = true;
+      const toEnd = () => {
+        if (following) node.scrollTop = node.scrollHeight;
+      };
+      const onScroll = () => {
+        following = node.scrollHeight - node.scrollTop - node.clientHeight < 8;
+      };
+      toEnd();
+      const observer = new MutationObserver(toEnd);
+      observer.observe(node, { childList: true, subtree: true, characterData: true });
+      node.addEventListener("scroll", onScroll, { passive: true });
+      return () => {
+        observer.disconnect();
+        node.removeEventListener("scroll", onScroll);
+      };
+    };
+  }
   const truncated = $derived(turn.stopReason === "max_tokens");
   const usageText = $derived.by(() => {
     const u = turn.usage;
@@ -96,16 +112,17 @@
     {/each}
     {#if truncated}<p class="notice">Response was cut off at the output token limit.</p>{/if}
 
-    {#if thinking.trim()}
-      <details class="thinking-block" open={thinkingLive}>
-        <summary>{thinkingLive ? "Thinking…" : "Thinking"}</summary>
-        <div class="markdown thinking-body" bind:this={thinkingEl}>{@html renderMarkdown(thinking)}</div>
-      </details>
-    {/if}
-
     <div class="body selectable">
       {#each turn.segments as seg, i (i)}
-        {#if seg.kind === "text"}
+        {#if seg.kind === "thinking"}
+          {#if seg.text.trim()}
+            {@const active = thinkingLive(i)}
+            <details class="thinking-block" open={active}>
+              <summary>{active ? "Thinking…" : "Thinking"}</summary>
+              <div class="markdown thinking-body" {@attach followTail(active)}>{@html renderMarkdown(seg.text)}</div>
+            </details>
+          {/if}
+        {:else if seg.kind === "text"}
           <div class="markdown" {@attach markdownHtml(renderMarkdown(seg.text), live && i === turn.segments.length - 1)}></div>
         {:else if seg.kind === "tool"}
           <ToolCallCard segment={seg} runId={turn.runId} />
@@ -150,7 +167,7 @@
 <style>
   .assistant {
     display: grid;
-    grid-template-columns: 28px 1fr;
+    grid-template-columns: 28px minmax(0, 1fr);
     gap: var(--space-3);
     align-items: start;
   }
@@ -167,6 +184,7 @@
   .content {
     min-width: 0;
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-2);
   }
   .rail {
@@ -286,6 +304,13 @@
     border-radius: var(--radius-md);
     background: var(--bg-sunken);
     font-size: 13px;
+    line-height: 1.55;
+    min-width: 0;
+    max-width: 100%;
+    margin: var(--space-2) 0;
+  }
+  .thinking-block:first-child {
+    margin-top: 0;
   }
   .thinking-block > summary {
     padding: 6px 10px;

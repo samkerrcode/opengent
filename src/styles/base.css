@@ -11,6 +11,12 @@ body,
   margin: 0;
 }
 
+/* The app scrolls inside its own panes; the document itself must never grow a scrollbar. */
+html,
+body {
+  overflow: hidden;
+}
+
 body {
   font-family: var(--font-sans);
   font-size: 14px;
