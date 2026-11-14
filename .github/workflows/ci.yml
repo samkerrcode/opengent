@@ -31,13 +31,13 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - name: Install Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - run: npm ci
       - run: npm run gen:product
@@ -49,5 +49,34 @@ jobs:
       - name: Bindings drift check
         run: node scripts/check-bindings.mjs
 
-      - name: Build desktop bundle (unsigned)
+      - name: Build frontend (production)
+        run: npm run build
+
+  release-build:
+    name: Release build (${{ matrix.os }})
+    if: github.event_name == 'push'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: release
+
+      - run: npm ci
+
+      - name: Build desktop app (unsigned, no bundle)
         run: npm run tauri:build -- --no-bundle

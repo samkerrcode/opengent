@@ -39,7 +39,7 @@ jobs:
           - platform: macOS universal
             os: macos-latest
             target: universal-apple-darwin
-            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            rust_targets: aarch64-apple-darwin x86_64-apple-darwin
           - platform: Windows x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -52,9 +52,10 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.rust_targets }}
+      - name: Install Rust toolchain (rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.rust_targets }}
 
       - run: npm ci
 

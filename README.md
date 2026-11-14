@@ -64,8 +64,8 @@ Phase 7). Versioning and the release process are described in
 
 ## Quick start
 
-**Prerequisites:** Rust (stable, via [`rustup`](https://rustup.rs)), Node 24 LTS (`nvm use`
-reads `.nvmrc`), and the [Tauri system dependencies](https://v2.tauri.app/start/prerequisites/)
+**Prerequisites:** Rust (via [`rustup`](https://rustup.rs), which installs the version pinned
+in `rust-toolchain.toml`), Node 24 LTS (`nvm use` reads `.nvmrc`), and the [Tauri system dependencies](https://v2.tauri.app/start/prerequisites/)
 for your OS — Xcode Command Line Tools on macOS; MSVC Build Tools + WebView2 on Windows.
 
 ```sh
@@ -137,7 +137,7 @@ Design rules (contributor conventions live in [AGENTS.md](AGENTS.md)):
 | `src/lib/generated/bindings/` | TypeScript types generated from Rust DTOs by ts-rs (committed; CI checks drift) |
 | `scripts/dev/` | Mock OpenAI (Chat Completions + Responses), Gemini, Anthropic and MCP servers for local testing |
 | `docs/` | Feature guide, release & versioning policy, and branding assets |
-| `.github/workflows/ci.yml` | macOS + Windows checks, tests, and unsigned build |
+| `.github/workflows/ci.yml` | macOS + Windows checks and tests on every PR; unsigned release-profile build on pushes to `main` |
 | `.github/workflows/release.yml` | Tag-driven installers (universal macOS `.dmg`, Windows `.exe` + `.msi`) as a draft GitHub release |
 
 ## Roadmap

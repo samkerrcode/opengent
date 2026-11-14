@@ -30,6 +30,11 @@ Contributor guidelines: see CONTRIBUTING.md. Security scope: SECURITY.md.
 - `npm run tauri:dev` – run the desktop app (generates product artifacts first).
 - `npm run tauri:build` – release bundle (unsigned unless signing is configured). Only when asked; see Workflow.
 - `npm run verify` – svelte-check, vitest, cargo fmt/clippy/test.
+- CI (`.github/workflows/ci.yml`): PRs run `verify`'s checks, the bindings drift check and `npm run build` on macOS +
+  Windows; the release-profile `tauri:build -- --no-bundle` runs only on pushes to `main` (`release-build` job).
+  The Rust cache is saved from `main` only.
+- Rust version is pinned in `rust-toolchain.toml` (CI and release install from it via `rustup toolchain install`);
+  bump it in its own `chore/` PR.
 - Releases (`docs/releasing.md`): `.github/workflows/release.yml` builds a universal macOS `.dmg` and Windows
   `.exe`/`.msi`; a manual run is a dry run (artifacts only), a `vX.Y.Z[-alpha|-beta|-rc.N]` tag creates a draft
   release. `node scripts/check-release-version.mjs [tag]` is the gate: `product.json`, `package.json`,

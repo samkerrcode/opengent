@@ -32,8 +32,8 @@ something, comment on the approved issue so effort isn't duplicated.
 
 ## Development setup
 
-Prerequisites and commands are in the [README](README.md#quick-start). In short: Rust stable,
-Node 24 LTS (`nvm use`), the Tauri system dependencies, then `npm install` and
+Prerequisites and commands are in the [README](README.md#quick-start). In short: Rust via `rustup`
+(the version is pinned in `rust-toolchain.toml`), Node 24 LTS (`nvm use`), the Tauri system dependencies, then `npm install` and
 `npm run tauri:dev`. Mock OpenAI and MCP servers for local testing live in `scripts/dev/` (see
 [AGENTS.md](AGENTS.md#commands)).
 
