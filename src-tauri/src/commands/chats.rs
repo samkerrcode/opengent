@@ -175,8 +175,12 @@ async fn import_paths(
 /// merges it into the visible chat's pending list. Rust can't see the visible chat's model
 /// here, so images are imported unconditionally (`include_images: true`) and the chat store
 /// moves the ones its model can't accept to the rejection notice.
-pub(crate) fn handle_dropped_paths(app: &AppHandle, paths: Vec<PathBuf>) {
-    let paths: Vec<PathBuf> = paths.into_iter().take(MAX_ATTACHMENTS_PER_PICK).collect();
+pub(crate) fn handle_dropped_paths(app: &AppHandle, paths: &[PathBuf]) {
+    let paths: Vec<PathBuf> = paths
+        .iter()
+        .take(MAX_ATTACHMENTS_PER_PICK)
+        .cloned()
+        .collect();
     if paths.is_empty() {
         return;
     }

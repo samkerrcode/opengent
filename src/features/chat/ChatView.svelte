@@ -27,9 +27,10 @@
   let dropping = $state(false);
   onMount(() => {
     const unlisten = getCurrentWebview().onDragDropEvent((event) => {
-      const type = event.payload.type;
-      if (type === "enter") dropping = true;
-      else if (type === "leave" || type === "drop") dropping = false;
+      const p = event.payload;
+      // Text/URL drags carry no paths and would be dropped as a no-op — no affordance.
+      if (p.type === "enter") dropping = p.paths.length > 0;
+      else if (p.type === "leave" || p.type === "drop") dropping = false;
     });
     return () => void unlisten.then((f) => f());
   });

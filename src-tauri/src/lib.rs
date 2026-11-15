@@ -86,7 +86,7 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) = event {
                 if window.label() == "main" {
-                    commands::handle_dropped_paths(window.app_handle(), paths.clone());
+                    commands::handle_dropped_paths(window.app_handle(), paths);
                 }
             }
         })

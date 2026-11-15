@@ -257,14 +257,25 @@ class ChatStore {
 
   async pickAttachments(chat: Chat) {
     try {
-      const picked = await commands.pickAttachments(this.supportsImages(chat));
-      for (const a of picked.attached) if (!chat.pending.some((p) => p.id === a.id)) chat.pending.push(a);
-      if (picked.rejected.length) {
-        this.error = picked.rejected.map((r) => `${r.name}: ${r.reason}`).join("\n");
-      }
+      const images = this.supportsImages(chat);
+      this.mergePicked(chat, await commands.pickAttachments(images), images);
     } catch (e) {
       this.error = describeError(e);
     }
+  }
+
+  /** Adds imported files to the chat's pending list (deduped by id) and reports rejections.
+   * With `images` false, image attachments join the rejection notice instead of pending. */
+  private mergePicked(chat: Chat, picked: PickedAttachments, images: boolean) {
+    const rejected = picked.rejected.map((r) => `${r.name}: ${r.reason}`);
+    for (const a of picked.attached) {
+      if (!images && a.mime.startsWith("image/")) {
+        rejected.push(`${a.name}: the selected model does not accept image attachments`);
+      } else if (!chat.pending.some((p) => p.id === a.id)) {
+        chat.pending.push(a);
+      }
+    }
+    if (rejected.length) this.error = rejected.join("\n");
   }
 
   removePending(chat: Chat, id: string) {
@@ -281,16 +292,7 @@ class ChatStore {
       this.error = "Files can only be dropped onto an open chat.";
       return;
     }
-    const rejected = picked.rejected.map((r) => `${r.name}: ${r.reason}`);
-    const images = this.supportsImages(chat);
-    for (const a of picked.attached) {
-      if (!images && a.mime.startsWith("image/")) {
-        rejected.push(`${a.name}: the selected model does not accept image attachments`);
-      } else if (!chat.pending.some((p) => p.id === a.id)) {
-        chat.pending.push(a);
-      }
-    }
-    if (rejected.length) this.error = rejected.join("\n");
+    this.mergePicked(chat, picked, this.supportsImages(chat));
   }
 
   async send(chat: Chat, prompt: string, replaceFrom: string | null = null) {
