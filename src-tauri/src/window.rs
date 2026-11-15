@@ -8,7 +8,7 @@ use tauri::{App, LogicalSize, Manager, PhysicalPosition, Runtime, WebviewWindow}
 const MIN_WIDTH: f64 = 900.0;
 const MIN_HEIGHT: f64 = 600.0;
 /// Share of the monitor's work area the window opens at, per dimension.
-const WORK_AREA_FRACTION: f64 = 0.75;
+const WORK_AREA_FRACTION: f64 = 0.8;
 
 /// Target outer size and minimum outer size, both in logical pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -17,7 +17,7 @@ struct Fit {
     min: (f64, f64),
 }
 
-/// 75% of the work area, raised to the minimum, never larger than the work area. A work area
+/// 80% of the work area, raised to the minimum, never larger than the work area. A work area
 /// smaller than the minimum lowers the minimum to fit.
 fn fit(work_width: f64, work_height: f64) -> Fit {
     let axis = |avail: f64, min: f64| {
@@ -97,18 +97,18 @@ mod tests {
     }
 
     #[test]
-    fn uhd_at_100_percent_uses_three_quarters() {
+    fn uhd_at_100_percent_uses_four_fifths() {
         let (w, h) = work_area(3840.0, 2160.0, 1.0);
         let fit = fit(w, h);
-        assert_eq!(fit.outer, (2880.0, 1584.0));
+        assert_eq!(fit.outer, (w * 0.8, h * 0.8));
         assert_eq!(fit.min, (MIN_WIDTH, MIN_HEIGHT));
     }
 
     #[test]
-    fn uhd_at_150_percent_uses_three_quarters() {
+    fn uhd_at_150_percent_uses_four_fifths() {
         let (w, h) = work_area(3840.0, 2160.0, 1.5);
         let fit = fit(w, h);
-        assert_eq!(fit.outer, (1920.0, 1044.0));
+        assert_eq!(fit.outer, (w * 0.8, h * 0.8));
         assert_eq!(fit.min, (MIN_WIDTH, MIN_HEIGHT));
     }
 
@@ -117,15 +117,15 @@ mod tests {
         let (w, h) = work_area(3840.0, 2160.0, 3.0);
         assert_eq!((w, h), (1280.0, 672.0));
         let fit = fit(w, h);
-        assert_eq!(fit.outer, (960.0, 600.0));
+        assert_eq!(fit.outer, (1024.0, 600.0));
         assert_eq!(fit.min, (MIN_WIDTH, MIN_HEIGHT));
     }
 
     #[test]
-    fn full_hd_uses_three_quarters() {
+    fn full_hd_uses_four_fifths() {
         let (w, h) = work_area(1920.0, 1080.0, 1.0);
         let fit = fit(w, h);
-        assert_eq!(fit.outer, (1440.0, 774.0));
+        assert_eq!(fit.outer, (w * 0.8, h * 0.8));
         assert_eq!(fit.min, (MIN_WIDTH, MIN_HEIGHT));
     }
 

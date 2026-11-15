@@ -37,7 +37,7 @@ Each feature is described the same way:
 | [Privacy & data](#privacy--data) | [Local data](#local-data) | Everything under `~/.opengent`; no account, no telemetry |
 | | [Secrets](#secrets) | API keys and tokens only in the OS credential store |
 | [Appearance](#appearance) | [Activity indicator & theme](#activity-indicator--theme) | Live run phases, light/dark theme, reduced motion |
-| | [Window size](#window-size) | Opens at about 75% of the screen, centred, at any display scaling |
+| | [Window size](#window-size) | Opens at about 80% of the screen, centred, at any display scaling |
 
 Keyboard shortcuts: **⌘N / Ctrl+N** new chat · **⌘, / Ctrl+,** provider settings · **Esc**
 stop the current reply or close a dialog · **Shift+Enter** new line in the composer.
@@ -576,7 +576,7 @@ light or dark theme.
 **What.** The app window opens at a size that fits the screen it appears on, centred in the
 area not taken by the taskbar or Dock.
 
-**How it works.** The window takes about 75% of the screen's usable width and height, measured
+**How it works.** The window takes about 80% of the screen's usable width and height, measured
 after display scaling, so a 4K screen at 300% gets the same proportion as a 1080p screen at
 100%. It is never smaller than 900 × 600 unless the screen itself is smaller, in which case it
 fills the usable area. Resize it freely once it is open.

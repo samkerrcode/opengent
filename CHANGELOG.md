@@ -25,7 +25,9 @@ under *Unreleased*.
 - **Chat**: Scrolling up inside a streaming Thinking block is no longer snapped back to the
   bottom; returning to its bottom resumes following.
 
-- **Platform**: The window now opens at about 75% of the screen's usable area, centred, instead
+- **Tools**: The composer's ⚒ Tools menu now stays inside the window when it is small,
+  shifting left and shrinking to fit instead of overflowing the right edge or top.
+- **Platform**: The window now opens at about 80% of the screen's usable area, centred, instead
   of a fixed 1280 × 820 that overflowed high-DPI screens such as 4K at 300% scaling.
 - **Providers**: **Save & test** stays on the form after a successful test so the discovered
   model list is visible; plain **Save** still returns to the picker.

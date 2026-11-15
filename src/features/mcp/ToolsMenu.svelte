@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { mcpStore } from "./mcp-store.svelte";
   import ToolAccessBadge from "./ToolAccessBadge.svelte";
   import ToolPolicySelect from "./ToolPolicySelect.svelte";
@@ -27,6 +28,19 @@
   let menuEl = $state<HTMLElement>();
   let openServer = $state<string | null>(null);
   let error = $state<string | null>(null);
+  let shiftX = $state(0);
+  let maxH = $state(460);
+
+  // Keep the menu inside the window: it is anchored to the chip's left edge, so on a
+  // small window it can overflow the right side or the top (it opens upward).
+  function fit() {
+    const anchor = menuEl?.parentElement?.getBoundingClientRect();
+    if (!menuEl || !anchor) return;
+    const left = Math.max(8, Math.min(anchor.left, window.innerWidth - 8 - menuEl.offsetWidth));
+    shiftX = left - anchor.left;
+    maxH = Math.min(460, Math.max(160, anchor.top - 16));
+  }
+  onMount(fit);
 
   const loadings: { value: ToolLoading; label: string }[] = [
     { value: "auto", label: "Auto — all tools when the set is small, on-demand when large" },
@@ -124,9 +138,9 @@
   }
 </script>
 
-<svelte:window onmousedown={onDown} onkeydown={onKey} />
+<svelte:window onmousedown={onDown} onkeydown={onKey} onresize={fit} />
 
-<div class="menu" bind:this={menuEl} role="menu" aria-label="Tools and connections">
+<div class="menu" bind:this={menuEl} style:transform="translateX({shiftX}px)" style:max-height="{maxH}px" role="menu" aria-label="Tools and connections">
   <header class="head">
     <span class="h">{isAgent && agent ? `Tools · ${agent.name}` : "Tools · this chat"}</span>
     {#if mcpStore.servers.length}<span class="n">{mcpStore.activeToolCountFor(scope)} active</span>{/if}
@@ -228,7 +242,7 @@
     position: absolute;
     bottom: calc(100% + 8px);
     left: 0;
-    width: 400px;
+    width: min(400px, calc(100vw - 16px));
     max-height: 460px;
     display: flex;
     flex-direction: column;
