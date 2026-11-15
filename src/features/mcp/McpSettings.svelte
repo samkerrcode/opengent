@@ -521,7 +521,7 @@
   .result { margin: 0; padding: 8px 10px; border-radius: var(--radius-md); font-size: 13px; overflow-wrap: anywhere; }
   .result.ok { background: var(--accent-soft); }
   .result.bad { background: var(--danger-soft); color: var(--danger); }
-  .result.info { display: flex; align-items: center; gap: var(--space-3); background: var(--bg); border: 1px solid var(--border); color: var(--fg-muted); }
+  .result.info { display: flex; align-items: center; gap: var(--space-3); background: var(--warning-soft); border: 1px solid var(--warning-border); color: var(--warning); }
   .result.info span { flex: 1; min-width: 0; }
   .signed { flex: none; font-size: 11.5px; color: var(--fg-faint); }
   .phint code { font-size: 11px; overflow-wrap: anywhere; }
