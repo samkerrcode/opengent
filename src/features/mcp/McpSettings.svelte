@@ -268,7 +268,6 @@
             {:else if current.enabled && current.status.kind === "needs_auth"}
               <div class="result info" role="status">
                 <span>{current.status.reason ?? "Sign in with your browser to connect."}</span>
-                <button class="btn-outline btn-sm" onclick={() => act(mcpStore.signIn(current.id))} disabled={busy}>Sign in</button>
               </div>
             {:else if current.enabled && current.status.kind === "authorizing"}
               <p class="result ok" role="status">Finish signing in in your browser. This page updates when you're done.</p>
