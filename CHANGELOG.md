@@ -14,6 +14,8 @@ under *Unreleased*.
 
 ## Unreleased
 
+## 0.1.2 — 2026-11-15
+
 ### Fixed
 
 - **Chat**: On Windows the chat could stop following a streaming reply, leaving the
