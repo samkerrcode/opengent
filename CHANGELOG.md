@@ -14,6 +14,8 @@ under *Unreleased*.
 
 ## Unreleased
 
+## 0.1.1 — 2026-11-14
+
 ### Added
 
 - **Chat**: Drag files from the file manager and drop them anywhere on the chat to attach
