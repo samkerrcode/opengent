@@ -32,7 +32,7 @@ something, comment on the approved issue so effort isn't duplicated.
 
 ## Development setup
 
-Prerequisites and commands are in the [README](README.md#quick-start). In short: Rust via `rustup`
+Prerequisites and commands are in the [README](README.md#build-from-source). In short: Rust via `rustup`
 (the version is pinned in `rust-toolchain.toml`), Node 24 LTS (`nvm use`), the Tauri system dependencies, then `npm install` and
 `npm run tauri:dev`. Mock OpenAI and MCP servers for local testing live in `scripts/dev/` (see
 [AGENTS.md](AGENTS.md#commands)).
@@ -74,6 +74,10 @@ The full list is in [AGENTS.md](AGENTS.md). These are the ones most often missed
 - New IPC DTOs derive `Serialize` + `TS` with `#[ts(export)]`.
 - CSS must stay within the Safari 15.6 baseline (the macOS 12 WKWebView).
 - Product names come from `product.json` only. Never hardcode "OpenGent".
+
+> **Naming.** "OpenGent" is a working name and may be rebranded. `product.json` is the single
+> identity source, so changing the display name is a config change. Candidates under
+> consideration: Bastion, Aegis, Remit, Cadre, Quorum, Syndic, Signet.
 
 ## Dependency policy
 

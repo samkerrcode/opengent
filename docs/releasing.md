@@ -44,7 +44,7 @@ shasum -a 256 -c SHA256SUMS.txt --ignore-missing        # macOS
 ```
 
 ```powershell
-Get-FileHash .\OpenGent_0.1.0_x64-setup.exe -Algorithm SHA256   # Windows; compare with SHA256SUMS.txt
+Get-FileHash .\OpenGent_<version>_x64-setup.exe -Algorithm SHA256   # Windows; compare with SHA256SUMS.txt
 ```
 
 **macOS.** Open the `.dmg` and drag OpenGent to Applications. Because the app isn't notarized,
