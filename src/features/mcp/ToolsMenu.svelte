@@ -361,6 +361,7 @@
     border-radius: var(--radius-md);
     background: var(--bg);
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 4px;
   }
   .def {
@@ -390,9 +391,7 @@
   .tname {
     flex: 1;
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
   .warn {
     flex: none;

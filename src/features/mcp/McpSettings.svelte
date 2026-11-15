@@ -522,16 +522,16 @@
   .switch input:checked { background: var(--accent); }
   .switch input:checked::after { transform: translateX(13px); }
   .switch input:disabled { opacity: 0.5; cursor: default; }
-  .perms { border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-2) var(--space-3) var(--space-3); display: grid; gap: 8px; margin: 0; min-width: 0; }
+  .perms { border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-2) var(--space-3) var(--space-3); display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; margin: 0; min-width: 0; }
   .perms legend { font-size: 12px; color: var(--fg-muted); padding: 0 4px; }
   .perms legend small { color: var(--fg-faint); }
   .defrow { display: flex; align-items: center; gap: var(--space-2); font-size: 12.5px; color: var(--fg-muted); }
   .defrow :global(.policy) { font-size: 12px; padding: 3px 8px; }
-  .tools { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; max-height: 260px; overflow-y: auto; border-top: 1px solid var(--border); padding-top: 6px; }
+  .tools { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; max-height: 260px; overflow-y: auto; border-top: 1px solid var(--border); padding-top: 6px; }
   .tool { display: flex; align-items: center; gap: 6px; font-size: 12.5px; padding: 3px 2px; border-radius: var(--radius-sm); }
   .tool:hover { background: var(--bg-hover); }
   .tool.off .tname { opacity: 0.5; }
-  .tname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tname { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   .tname small { color: var(--fg-faint); font-family: var(--font-mono); font-size: 11px; }
   .warn { flex: none; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--warning); border: 1px solid var(--warning); border-radius: var(--radius-sm); padding: 0 4px; }
   .phint { margin: 0; font-size: 11.5px; color: var(--fg-faint); line-height: 1.45; }
