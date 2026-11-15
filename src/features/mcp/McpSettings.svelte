@@ -157,6 +157,23 @@
     }
   }
 
+  // Sign-in and Reconnect act on the saved config, so save the form first —
+  // a just-typed client ID or secret must be in effect.
+  async function saveAnd(action: (id: string) => Promise<unknown>) {
+    if (!editing) return;
+    busy = true;
+    notice = null;
+    try {
+      const id = await mcpStore.save(toInput(editing), false);
+      if (editing && !editing.id) editing.id = id;
+      await action(id);
+    } catch (e) {
+      notice = { ok: false, text: describeError(e) };
+    } finally {
+      busy = false;
+    }
+  }
+
   async function setEnabled(s: McpServerView, enabled: boolean) {
     notice = null;
     try {
@@ -253,11 +270,11 @@
                   <span class="signed" title="Tokens are stored in the system credential store">Signed in</span>
                   <button class="btn-ghost btn-sm" onclick={() => act(mcpStore.signOut(current.id))} disabled={busy}>Sign out</button>
                 {:else}
-                  <button class="btn-outline btn-sm" onclick={() => act(mcpStore.signIn(current.id))} disabled={busy}>Sign in</button>
+                  <button class="btn-outline btn-sm" onclick={() => void saveAnd((id) => mcpStore.signIn(id))} disabled={busy}>Sign in</button>
                 {/if}
               {/if}
               {#if current.enabled && current.status.kind !== "authorizing"}
-                <button class="btn-ghost btn-sm" onclick={() => act(mcpStore.reconnect(current.id))} disabled={busy || current.status.kind === "connecting"}>Reconnect</button>
+                <button class="btn-ghost btn-sm" onclick={() => void saveAnd((id) => mcpStore.reconnect(id))} disabled={busy || current.status.kind === "connecting"}>Reconnect</button>
               {/if}
             </div>
             {#if current.enabled && current.status.kind === "failed"}
