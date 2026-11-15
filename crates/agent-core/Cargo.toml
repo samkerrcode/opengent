@@ -34,7 +34,7 @@ rmcp = { version = "3.6.0", default-features = false, features = [
     "auth",
 ], optional = true }
 # rmcp's `CredentialStore` is an `async_trait`; already in the lockfile via rmcp.
-async-trait = { version = "0.1.92", optional = true }
+async-trait = { version = "=0.1.92", optional = true }
 # Process-group / job-object wrappers so spawned MCP servers are killed wholesale,
 # including grandchildren (`npx` -> `node`), on disconnect or app exit.
 process-wrap = { version = "=10.0.1", default-features = false, features = [

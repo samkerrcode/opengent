@@ -45,26 +45,23 @@ export function authForm(auth: McpAuth): AuthForm {
   }
 }
 
-/** A blank or non-numeric port means "any free port"; Rust validates the range. */
-function parsePort(raw: string): number | null {
+/** Blank means "any free port" (`null`); anything outside 1024–65535 is `undefined`. */
+function parsePort(raw: string): number | null | undefined {
   const t = raw.trim();
   if (!t) return null;
   const n = Number(t);
-  return Number.isInteger(n) && n > 0 && n <= 65535 ? n : null;
+  return Number.isInteger(n) && n >= 1024 && n <= 65535 ? n : undefined;
 }
 
 export function authInput(f: AuthForm): McpAuthInput {
   switch (f.kind) {
     case "none":
       return { kind: "none" };
-    case "oauth_user":
-      return {
-        kind: "oauth_user",
-        client_id: f.client_id,
-        client_secret: f.client_secret,
-        scopes: f.scopes,
-        redirect_port: parsePort(f.redirect_port),
-      };
+    case "oauth_user": {
+      const redirect_port = parsePort(f.redirect_port);
+      if (redirect_port === undefined) throw new Error("callback port must be 1024–65535");
+      return { kind: "oauth_user", client_id: f.client_id, client_secret: f.client_secret, scopes: f.scopes, redirect_port };
+    }
     case "oauth_client_credentials":
       return { kind: "oauth_client_credentials", client_id: f.client_id, client_secret: f.client_secret, scopes: f.scopes };
   }
@@ -73,7 +70,7 @@ export function authInput(f: AuthForm): McpAuthInput {
 /** The redirect URI to register with an authorization server for browser sign-in. */
 export function redirectUri(port: string): string {
   const p = parsePort(port);
-  return `http://127.0.0.1:${p ?? "<any port>"}/callback`;
+  return `http://127.0.0.1:${p === null ? "<any port>" : (p ?? "<invalid port>")}/callback`;
 }
 
 /** Short connection status for the server list and status bar. */

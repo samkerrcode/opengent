@@ -24,10 +24,13 @@ describe("auth form", () => {
     expect(authInput(blankAuth())).toEqual({ kind: "none" });
   });
 
-  it("treats a blank or invalid port as any port", () => {
+  it("treats a blank port as any port and rejects an invalid one", () => {
     expect(authInput({ ...blankAuth(), kind: "oauth_user", redirect_port: " " })).toMatchObject({ redirect_port: null });
-    expect(authInput({ ...blankAuth(), kind: "oauth_user", redirect_port: "70000" })).toMatchObject({ redirect_port: null });
+    for (const bad of ["70000", "80", "abc"]) {
+      expect(() => authInput({ ...blankAuth(), kind: "oauth_user", redirect_port: bad })).toThrow("callback port");
+    }
     expect(redirectUri("")).toBe("http://127.0.0.1:<any port>/callback");
     expect(redirectUri("9000")).toBe("http://127.0.0.1:9000/callback");
+    expect(redirectUri("abc")).toBe("http://127.0.0.1:<invalid port>/callback");
   });
 });

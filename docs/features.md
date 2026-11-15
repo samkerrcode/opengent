@@ -350,7 +350,8 @@ proposes a call; your permissions decide whether it runs.
     let the app register itself with the server, or enter the ID (and secret, if the
     server issued one) of an app you registered. **Scopes** narrows or widens what you
     grant. **Callback port** fixes the redirect URI `http://127.0.0.1:<port>/callback` for
-    servers that need it registered exactly. **Sign out** forgets the sign-in.
+    servers that need it registered exactly. **Sign out** forgets the sign-in on this
+    device; it doesn't revoke the tokens at the server.
   - *OAuth — client credentials*: a client ID and secret are exchanged for a token without a
     browser, for service accounts.
   Custom headers stay available in every mode, except `Authorization` with OAuth.
@@ -369,7 +370,9 @@ closes after the sign-in (or after 5 minutes). Tokens and client secrets are kep
 credential store; signed-in connections reconnect at launch without a browser and refresh
 expired tokens on their own. A browser only ever opens when you press **Sign in** —
 startup, reconnects and scheduled runs never start one; a connection whose sign-in expired
-shows "sign-in required". Client-credentials tokens are renewed shortly before they expire.
+shows "sign-in required". Client-credentials tokens are renewed shortly before they expire
+(retrying briefly if the authorization server can't be reached), and again after a new
+secret or scopes are saved.
 Errors are reported in one line, such as "This server requires authentication" with what to
 do next.
 

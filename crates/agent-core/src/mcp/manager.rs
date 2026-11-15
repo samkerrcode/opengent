@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use rmcp::model::{CallToolRequestParams, ClientConfig};
 use rmcp::service::{NotificationContext, Peer, RunningService};
@@ -158,8 +158,9 @@ struct Inner {
     signed_in: HashSet<String>,
     /// The open sign-in per server; cancelled by a new sign-in, sign-out or disconnect.
     sign_ins: HashMap<String, CancellationToken>,
-    /// Last `WWW-Authenticate` challenge per server, seeding the next sign-in's discovery.
-    challenges: HashMap<String, String>,
+    /// Last `WWW-Authenticate` challenge per server with the URL that sent it, seeding the
+    /// next sign-in's discovery (ignored once the URL changes).
+    challenges: HashMap<String, (String, String)>,
     /// Serialises token refreshes per server across authorization managers.
     refresh_locks: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
 }
@@ -186,8 +187,29 @@ const MIN_RENEW_DELAY: Duration = Duration::from_secs(5);
 /// How long a browser sign-in waits for the redirect.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Waits between failed client-credentials renewals; their sum stays under `RENEW_MARGIN`.
+const RENEW_RETRIES: [Duration; 3] = [
+    Duration::from_secs(5),
+    Duration::from_secs(15),
+    Duration::from_secs(30),
+];
+/// Renewal sleeps in steps of at most this, re-reading the wall clock: tokio timers don't
+/// advance while the machine sleeps, token lifetimes do.
+const WALL_CLOCK_STEP: Duration = Duration::from_secs(30);
+
 fn renew_delay(remaining: Duration) -> Duration {
     remaining.saturating_sub(RENEW_MARGIN).max(MIN_RENEW_DELAY)
+}
+
+/// Sleeps until the wall-clock `deadline`; false if `live` was dropped meanwhile.
+async fn sleep_until(deadline: SystemTime, live: &Weak<Live>) -> bool {
+    while let Ok(left) = deadline.duration_since(SystemTime::now()) {
+        if left.is_zero() || live.strong_count() == 0 {
+            break;
+        }
+        tokio::time::sleep(left.min(WALL_CLOCK_STEP)).await;
+    }
+    live.strong_count() > 0
 }
 
 /// `expires_in` of a token response, read through serde to avoid depending on `oauth2`.
@@ -746,6 +768,12 @@ impl McpManager {
         if self.store.get(id).is_ok() {
             self.set_status(id, McpServerStatus::Idle);
         } else {
+            {
+                let mut inner = self.inner.lock().expect("mcp lock");
+                inner.signed_in.remove(id);
+                inner.challenges.remove(id);
+                inner.refresh_locks.remove(id);
+            }
             self.notify();
         }
     }
@@ -808,7 +836,9 @@ impl McpManager {
                 let status = {
                     let mut inner = self.inner.lock().expect("mcp lock");
                     if let Some(challenge) = classified.challenge {
-                        inner.challenges.insert(id.to_owned(), challenge);
+                        inner
+                            .challenges
+                            .insert(id.to_owned(), (config.url.clone(), challenge));
                     }
                     match classified.failure {
                         Failure::NeedsAuth(reason) => {
@@ -859,48 +889,70 @@ impl McpManager {
                 mut remaining,
             } = renewal;
             while let Some(left) = remaining {
-                tokio::time::sleep(renew_delay(left)).await;
-                let Some(live) = live.upgrade() else { return };
-                if !this.is_live(&id, &live) {
+                let now = SystemTime::now();
+                let expires = now + left;
+                if !sleep_until(now + renew_delay(left), &live).await {
                     return;
                 }
-                let ctx = AuthContext::new(
-                    &this.store.get(&id).map(|c| c.auth).unwrap_or(McpAuth::None),
-                    false,
-                    true,
-                );
-                let renewed = oauth_step(
-                    async {
-                        manager
-                            .lock()
-                            .await
-                            .exchange_client_credentials(&config)
-                            .await
-                    },
-                    ctx,
-                )
-                .await;
-                match renewed {
-                    Ok(token) => remaining = expires_in(&token),
-                    Err(c) => {
-                        this.fail_session(&id, &live, failure_text(c));
+                let mut retries = RENEW_RETRIES.iter();
+                loop {
+                    let Some(live) = live.upgrade() else { return };
+                    if !this.is_live(&id, &live) {
                         return;
+                    }
+                    let ctx = AuthContext::new(
+                        &this.store.get(&id).map(|c| c.auth).unwrap_or(McpAuth::None),
+                        false,
+                        true,
+                    );
+                    let renewed = oauth_step(
+                        async {
+                            manager
+                                .lock()
+                                .await
+                                .exchange_client_credentials(&config)
+                                .await
+                        },
+                        ctx,
+                    )
+                    .await;
+                    match renewed {
+                        Ok(token) => {
+                            remaining = expires_in(&token);
+                            break;
+                        }
+                        // Retry a failure (e.g. a network blip) while the current token
+                        // still outlives the wait.
+                        Err(c) => match retries.next() {
+                            Some(wait) if SystemTime::now() + *wait < expires => {
+                                tracing::debug!(server = %id, "client-credentials renewal failed; retrying");
+                                drop(live);
+                                tokio::time::sleep(*wait).await;
+                            }
+                            _ => {
+                                this.fail_session(&id, &live, failure_text(c));
+                                return;
+                            }
+                        },
                     }
                 }
             }
         });
     }
 
-    fn credential_store(&self, id: &str) -> KeychainCredentialStore {
-        let lock = Arc::clone(
+    fn refresh_lock(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(
             self.inner
                 .lock()
                 .expect("mcp lock")
                 .refresh_locks
                 .entry(id.to_owned())
                 .or_default(),
-        );
-        KeychainCredentialStore::new(self.store.secrets(), id, lock)
+        )
+    }
+
+    fn credential_store(&self, id: &str) -> KeychainCredentialStore {
+        KeychainCredentialStore::new(self.store.secrets(), id, self.refresh_lock(id))
     }
 
     /// Runs a browser sign-in for an `OauthUser` server: opens the authorization page via
@@ -930,7 +982,13 @@ impl McpManager {
             .insert(id.to_owned(), cancel.clone());
         self.set_status(id, McpServerStatus::Authorizing);
 
-        let result = self.authorize(&config, &cancel, open).await;
+        // Raced with the cancel so it also stops discovery/registration, and the browser
+        // is never opened for a sign-in that was already cancelled.
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err("cancelled".to_owned()),
+            r = self.authorize(&config, &cancel, open) => r,
+        };
         if !self.is_current(id, epoch) {
             return Err("sign-in was cancelled".into());
         }
@@ -990,7 +1048,8 @@ impl McpManager {
             .expect("mcp lock")
             .challenges
             .get(&config.id)
-            .cloned();
+            .filter(|(url, _)| *url == config.url)
+            .map(|(_, c)| c.clone());
         let resolution = oauth_step(
             manager.resolve_metadata_from_challenge(challenge.as_deref()),
             ctx,
@@ -1052,9 +1111,12 @@ impl McpManager {
         }
     }
 
-    /// Forgets the server's tokens and disconnects it.
-    pub fn sign_out(&self, id: &str) -> crate::Result<()> {
+    /// Forgets the server's tokens and disconnects it. Tokens are cleared under the refresh
+    /// lock, so a refresh already in flight on the old session can't write them back.
+    pub async fn sign_out(&self, id: &str) -> crate::Result<()> {
         self.disconnect(id);
+        let lock = self.refresh_lock(id);
+        let _guard = lock.lock().await;
         self.store.clear_oauth_tokens(id)?;
         let needs_auth = self
             .store
@@ -1305,6 +1367,15 @@ impl McpManager {
                             .map_err(failed)?
                             .is_some_and(|c| c.token_response.is_some());
                         ctx = AuthContext::new(&config.auth, has_headers, had_tokens);
+                        // Stored tokens mean signed in even if this connect fails for
+                        // another reason (offline), so Sign out stays available.
+                        if had_tokens {
+                            self.inner
+                                .lock()
+                                .expect("mcp lock")
+                                .signed_in
+                                .insert(config.id.clone());
+                        }
                         if !had_tokens {
                             // Never contact the server (or open a browser) without a sign-in.
                             return Err(Classified {
@@ -1382,6 +1453,7 @@ impl McpManager {
                             .filter(|s| s.client_id == *client_id && s.token_response.is_some())
                             .and_then(|s| token_remaining(&s))
                             .filter(|left| *left > RENEW_MARGIN);
+                        let reused = reusable.is_some();
                         let remaining = match reusable {
                             Some(left) => Some(left),
                             None => {
@@ -1401,7 +1473,14 @@ impl McpManager {
                         tokio::time::timeout(CONNECT_TIMEOUT, handler.serve(transport))
                             .await
                             .map_err(timed_out)?
-                            .map_err(|e| classify_init(&e, ctx))?
+                            .map_err(|e| {
+                                // A reused token may have been revoked; drop it so the
+                                // next connect exchanges for a fresh one.
+                                if reused {
+                                    let _ = self.store.clear_oauth_tokens(&config.id);
+                                }
+                                classify_init(&e, ctx)
+                            })?
                     }
                 }
             }

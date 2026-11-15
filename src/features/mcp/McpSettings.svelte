@@ -158,15 +158,16 @@
   }
 
   // Sign-in and Reconnect act on the saved config, so save the form first —
-  // a just-typed client ID or secret must be in effect.
-  async function saveAnd(action: (id: string) => Promise<unknown>) {
+  // a just-typed client ID or secret must be in effect. The save connects and waits for
+  // the outcome (Reconnect needs nothing more; Sign in can't race a background connect).
+  async function saveAnd(action?: (id: string) => Promise<unknown>) {
     if (!editing) return;
     busy = true;
     notice = null;
     try {
-      const id = await mcpStore.save(toInput(editing), false);
+      const id = await mcpStore.save(toInput(editing), true);
       if (editing && !editing.id) editing.id = id;
-      await action(id);
+      await action?.(id);
     } catch (e) {
       notice = { ok: false, text: describeError(e) };
     } finally {
@@ -274,7 +275,7 @@
                 {/if}
               {/if}
               {#if current.enabled && current.status.kind !== "authorizing"}
-                <button class="btn-ghost btn-sm" onclick={() => void saveAnd((id) => mcpStore.reconnect(id))} disabled={busy || current.status.kind === "connecting"}>Reconnect</button>
+                <button class="btn-ghost btn-sm" onclick={() => void saveAnd()} disabled={busy || current.status.kind === "connecting"}>Reconnect</button>
               {/if}
             </div>
             {#if current.enabled && current.status.kind === "failed"}

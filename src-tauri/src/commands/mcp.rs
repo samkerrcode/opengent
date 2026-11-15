@@ -151,8 +151,8 @@ pub fn mcp_cancel_sign_in(state: State<'_, AppState>, id: String) {
 
 /// Forgets the connection's OAuth tokens and disconnects it.
 #[tauri::command]
-pub fn mcp_sign_out(state: State<'_, AppState>, id: String) -> Result<(), Error> {
-    state.mcp.sign_out(&id)
+pub async fn mcp_sign_out(state: State<'_, AppState>, id: String) -> Result<(), Error> {
+    state.mcp.sign_out(&id).await
 }
 
 #[tauri::command]

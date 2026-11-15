@@ -534,7 +534,7 @@ async fn browser_sign_in_connects_persists_and_signs_out() {
     assert_eq!(h2.status(&id), McpServerStatus::Connected { tool_count: 1 });
     h2.manager.shutdown();
 
-    h.manager.sign_out(&id).unwrap();
+    h.manager.sign_out(&id).await.unwrap();
     assert_eq!(h.status(&id), McpServerStatus::NeedsAuth { reason: None });
     assert!(!h.view(&id).signed_in);
     assert!(!h.manager.store().has_oauth_tokens(&id));

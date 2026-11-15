@@ -130,8 +130,16 @@ impl KeychainCredentialStore {
     }
 
     pub(crate) fn load_sync(&self) -> Result<Option<StoredCredentials>> {
-        Ok(read_tokens(self.secrets.as_ref(), &self.server_id)?
-            .and_then(|blob| serde_json::from_str(&blob).ok()))
+        // Chunks aren't written atomically: an interrupted write reads as signed out.
+        Ok(
+            read_tokens(self.secrets.as_ref(), &self.server_id)?.and_then(|blob| {
+                serde_json::from_str(&blob)
+                    .inspect_err(|_| {
+                        tracing::warn!("stored OAuth tokens are corrupt; ignoring them")
+                    })
+                    .ok()
+            }),
+        )
     }
 }
 
@@ -190,6 +198,7 @@ pub(crate) fn token_remaining(c: &StoredCredentials) -> Option<Duration> {
 
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_CONNECTIONS: usize = 16;
 const CALLBACK_PATH: &str = "/callback";
 
 const PAGE_DONE: &str = "<!doctype html><meta charset=utf-8><title>Signed in</title>\
@@ -228,32 +237,39 @@ impl LoopbackCallback {
     /// Serves connections until a `GET /callback` carrying `expected_state` arrives, and
     /// returns its full URL — or the authorization server's `error=` as a message. Other
     /// requests (wrong path, foreign state, oversized) are answered and ignored, so a
-    /// stray local request can't end the sign-in.
+    /// stray local request can't end the sign-in. Connections are served concurrently
+    /// (bounded), so an idle one — browsers open speculative connections — can't hold up
+    /// the real redirect or a cancel.
     pub(crate) async fn wait(
         self,
         expected_state: &str,
         cancel: &CancellationToken,
     ) -> std::result::Result<String, String> {
+        let mut connections = tokio::task::JoinSet::new();
         loop {
-            let (stream, _) = tokio::select! {
+            tokio::select! {
                 _ = cancel.cancelled() => return Err("cancelled".into()),
                 r = self.listener.accept() => match r {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::debug!(error = %e, "loopback accept failed");
-                        continue;
+                    Ok((stream, _)) if connections.len() < MAX_CONNECTIONS => {
+                        let (port, state) = (self.port, expected_state.to_owned());
+                        connections.spawn(async move {
+                            tokio::time::timeout(
+                                CONNECTION_TIMEOUT,
+                                handle_connection(stream, port, &state),
+                            )
+                            .await
+                            .ok()
+                            .flatten()
+                        });
                     }
+                    Ok(_) => tracing::debug!("loopback connection limit reached"),
+                    Err(e) => tracing::debug!(error = %e, "loopback accept failed"),
                 },
-            };
-            let handled = tokio::time::timeout(
-                CONNECTION_TIMEOUT,
-                handle_connection(stream, self.port, expected_state),
-            )
-            .await;
-            match handled {
-                Ok(Some(outcome)) => return outcome,
-                Ok(None) => {}
-                Err(_) => tracing::debug!("loopback connection timed out"),
+                Some(handled) = connections.join_next() => {
+                    if let Ok(Some(outcome)) = handled {
+                        return outcome;
+                    }
+                }
             }
         }
     }
@@ -663,10 +679,28 @@ fn classify_root(root: &(dyn StdError + 'static), ctx: AuthContext) -> Classifie
     }
 }
 
-/// Classifies a failed MCP handshake. The full chain goes to the debug log; the message
-/// never includes tokens, secrets or the raw `WWW-Authenticate` value.
+/// The error chain for the debug log, without the `WWW-Authenticate` values carried by
+/// the auth-required/insufficient-scope errors.
+fn log_chain(e: &(dyn StdError + 'static)) -> String {
+    let mut parts = Vec::new();
+    let mut cur = Some(e);
+    while let Some(e) = cur {
+        parts.push(if e.is::<AuthRequiredError>() {
+            "authorization required".to_owned()
+        } else if e.is::<InsufficientScopeError>() {
+            "insufficient scope".to_owned()
+        } else {
+            e.to_string()
+        });
+        cur = e.source();
+    }
+    parts.join(": ")
+}
+
+/// Classifies a failed MCP handshake. The chain goes to the debug log; neither it nor the
+/// message includes tokens, secrets or the raw `WWW-Authenticate` value.
 pub(crate) fn classify_init(e: &ClientInitializeError, ctx: AuthContext) -> Classified {
-    tracing::debug!(error = ?e, "MCP initialize failed");
+    tracing::debug!(error = %log_chain(e), "MCP initialize failed");
     match e {
         ClientInitializeError::TransportError { error, .. } => {
             classify_root(error.error.as_ref(), ctx)
@@ -680,7 +714,7 @@ pub(crate) fn classify_init(e: &ClientInitializeError, ctx: AuthContext) -> Clas
 
 /// Classifies a failed request on an established session (e.g. `tools/list`).
 pub(crate) fn classify_service(e: &ServiceError, ctx: AuthContext) -> Classified {
-    tracing::debug!(error = ?e, "MCP request failed");
+    tracing::debug!(error = %log_chain(e), "MCP request failed");
     match e {
         ServiceError::TransportSend(d) => classify_root(d.error.as_ref(), ctx),
         other => Classified::failed(clean(&other.to_string())),
@@ -796,6 +830,8 @@ mod tests {
             let _ = s.read_to_string(&mut out).await;
             out
         };
+        // An idle connection (browser preconnect) must not hold up the others.
+        let _idle = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         assert!(send("GET /nope HTTP/1.1\r\n\r\n".into())
             .await
             .starts_with("HTTP/1.1 404"));
@@ -870,6 +906,10 @@ mod tests {
         };
         assert!(m.starts_with("This server requires authentication"));
         assert!(!m.contains("Transport [") && !m.contains("resource_metadata"));
+        let ClientInitializeError::TransportError { error, .. } = auth_required() else {
+            unreachable!()
+        };
+        assert!(!log_chain(error.error.as_ref()).contains("resource_metadata"));
         assert!(c
             .challenge
             .as_deref()

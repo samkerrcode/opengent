@@ -1124,22 +1124,26 @@ impl McpStore {
 
         let old_auth = existing.as_ref().map(|s| &s.auth);
         let (auth, new_secret) = resolve_auth(auth_input, old_auth)?;
-        let secret_ref = oauth_ref(&id, CLIENT_SECRET)?;
+        let client_secret_ref = oauth_ref(&id, CLIENT_SECRET)?;
         if let Some(secret) = &new_secret {
-            self.secrets.set(&secret_ref, secret)?;
+            self.secrets.set(&client_secret_ref, secret)?;
         }
         if old_auth.is_some_and(McpAuth::has_client_secret) && !auth.has_client_secret() {
-            stale_secrets.push(secret_ref);
+            stale_secrets.push(client_secret_ref);
         }
         let url = match input.transport {
             McpTransport::StreamableHttp => normalize_base_url(&input.url)?,
             McpTransport::Stdio => String::new(),
         };
-        // Tokens belong to the server and client they were issued for.
+        // Tokens belong to the server and client they were issued for. A client-credentials
+        // token is also re-issued when its scopes or secret change (a browser sign-in
+        // keeps its tokens: new scopes need a new sign-in anyway).
         let clear_tokens = existing.as_ref().is_some_and(|old| {
             old.url != url
                 || old.auth.kind() != auth.kind()
                 || old.auth.client_id() != auth.client_id()
+                || (matches!(auth, McpAuth::OauthClientCredentials { .. })
+                    && (new_secret.is_some() || old.auth.scopes() != auth.scopes()))
         });
 
         let config = McpServerConfig {
@@ -1785,6 +1789,26 @@ mod tests {
         s.save(edit(McpAuthInput::None, "http://localhost:8901/mcp"))
             .unwrap();
         assert!(!s.has_oauth_tokens(&id), "auth kind change clears tokens");
+        // A client-credentials token is re-issued for new scopes or a new secret.
+        let cc = |secret: &str, scopes: &str| {
+            edit(
+                McpAuthInput::OauthClientCredentials {
+                    client_id: "svc".into(),
+                    client_secret: secret.into(),
+                    scopes: scopes.into(),
+                },
+                "http://localhost:8901/mcp",
+            )
+        };
+        s.save(cc("s1", "a")).unwrap();
+        seed();
+        s.save(cc("", "a")).unwrap();
+        assert!(s.has_oauth_tokens(&id), "an unchanged save keeps the token");
+        s.save(cc("", "a b")).unwrap();
+        assert!(!s.has_oauth_tokens(&id), "scope change clears the token");
+        seed();
+        s.save(cc("s2", "a b")).unwrap();
+        assert!(!s.has_oauth_tokens(&id), "secret change clears the token");
         std::fs::remove_dir_all(tmp).unwrap();
     }
 
