@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { onMount, tick } from "svelte";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { chatStore, type Chat, type TurnItem } from "./chat-store.svelte";
   import Composer from "./Composer.svelte";
   import AssistantTurnView from "./AssistantTurn.svelte";
@@ -19,6 +20,19 @@
   let expectedTop: number | null = null;
   let editingTitle = $state(false);
   let titleDraft = $state("");
+  // Files dragged over the window. The drop itself is imported in Rust and reaches
+  // chatStore via "attachments-dropped"; this only shows the affordance. Tauri fires one
+  // window-level enter and one leave per drag, so a boolean suffices — no per-element
+  // enter/leave counting. With a modal open the drop would be ignored, so no overlay.
+  let dropping = $state(false);
+  onMount(() => {
+    const unlisten = getCurrentWebview().onDragDropEvent((event) => {
+      const type = event.payload.type;
+      if (type === "enter") dropping = true;
+      else if (type === "leave" || type === "drop") dropping = false;
+    });
+    return () => void unlisten.then((f) => f());
+  });
 
   const agent = $derived(chatStore.agentFor(chat));
 
@@ -247,6 +261,12 @@
   {onopenconnections}
 />
 
+{#if dropping && !nav.modal}
+  <div class="drop-overlay" aria-hidden="true">
+    <span class="drop-label">Drop files to attach</span>
+  </div>
+{/if}
+
 <style>
   .topbar {
     display: flex;
@@ -436,5 +456,28 @@
   .jump.btn-outline:not(:disabled):hover {
     background: var(--bg-elevated);
     border-color: var(--accent);
+  }
+  /* Whole chat view is the drop target. pointer-events: none keeps it out of the way —
+     drops are OS-level, so hit-testing isn't needed. */
+  .drop-overlay {
+    position: absolute;
+    inset: var(--space-4);
+    display: grid;
+    place-items: center;
+    border: 2px dashed var(--accent);
+    border-radius: var(--radius-xl);
+    background: var(--accent-soft);
+    pointer-events: none;
+    z-index: 4;
+  }
+  .drop-label {
+    padding: 8px 16px;
+    border-radius: 999px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    font-size: 13px;
+    font-weight: 500;
+    box-shadow: var(--shadow-2);
   }
 </style>

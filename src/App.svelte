@@ -19,8 +19,6 @@
 
   let appInfo = $state<AppInfo | null>(null);
   let bootError = $state<string | null>(null);
-  let settingsOpen = $state(false);
-  let connectionsOpen = $state(false);
 
   onMount(async () => {
     try {
@@ -45,7 +43,7 @@
       void chatStore.newChat();
     } else if (e.key === ",") {
       e.preventDefault();
-      settingsOpen = !settingsOpen;
+      nav.modal = nav.modal === "settings" ? null : "settings";
     }
   }
 
@@ -99,7 +97,7 @@
 <svelte:document onclick={onClick} />
 
 <div class="shell">
-  <Sidebar {appInfo} onopensettings={() => (settingsOpen = true)} onopenconnections={() => (connectionsOpen = true)} />
+  <Sidebar {appInfo} onopensettings={() => (nav.modal = "settings")} onopenconnections={() => (nav.modal = "connections")} />
   <main class="canvas" aria-label="Conversation">
     {#if bootError}
       <div class="boot-error" role="alert">
@@ -110,12 +108,12 @@
       <AgentsView />
     {:else if nav.view.kind === "agent"}
       {#key nav.view.agentId}
-        <AgentEditor agentId={nav.view.agentId} onopenconnections={() => (connectionsOpen = true)} />
+        <AgentEditor agentId={nav.view.agentId} onopenconnections={() => (nav.modal = "connections")} />
       {/key}
     {:else if chatStore.active}
-      <ChatView chat={chatStore.active} onopensettings={() => (settingsOpen = true)} onopenconnections={() => (connectionsOpen = true)} />
+      <ChatView chat={chatStore.active} onopensettings={() => (nav.modal = "settings")} onopenconnections={() => (nav.modal = "connections")} />
     {/if}
-    {#if chatStore.error && nav.view.kind === "chat"}
+    {#if chatStore.error}
       <div class="toast" role="alert">
         <span>{chatStore.error}</span>
         <button class="btn-ghost btn-sm" onclick={() => (chatStore.error = null)} aria-label="Dismiss">✕</button>
@@ -124,12 +122,12 @@
   </main>
 </div>
 
-{#if settingsOpen}
-  <ProviderSettings onclose={() => (settingsOpen = false)} />
+{#if nav.modal === "settings"}
+  <ProviderSettings onclose={() => (nav.modal = null)} />
 {/if}
 
-{#if connectionsOpen}
-  <McpSettings onclose={() => (connectionsOpen = false)} />
+{#if nav.modal === "connections"}
+  <McpSettings onclose={() => (nav.modal = null)} />
 {/if}
 
 {#if ctxMenu}

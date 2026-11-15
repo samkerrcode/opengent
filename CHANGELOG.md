@@ -14,6 +14,12 @@ under *Unreleased*.
 
 ## Unreleased
 
+### Added
+
+- **Chat**: Drag files from the file manager and drop them anywhere on the chat to attach
+  them — same rules as the **⌁ Attach** picker, including per-file rejection reasons.
+  Drops while the Agents view or a settings dialog is open are ignored with a notice.
+
 ### Changed
 
 - **Chat**: Each reasoning step gets its own Thinking block, shown in order between tool calls

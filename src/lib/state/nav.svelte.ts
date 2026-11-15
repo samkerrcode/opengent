@@ -4,6 +4,8 @@ export type View = { kind: "chat" } | { kind: "agents" } | { kind: "agent"; agen
 
 class Nav {
   view = $state<View>({ kind: "chat" });
+  /** A modal dialog open over the canvas; file drops are ignored while one is up. */
+  modal = $state<"settings" | "connections" | null>(null);
 
   showChat() {
     this.view = { kind: "chat" };

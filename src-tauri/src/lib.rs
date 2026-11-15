@@ -7,7 +7,7 @@ mod scheduler;
 mod state;
 mod window;
 
-use tauri::Manager;
+use tauri::{DragDropEvent, Manager, WindowEvent};
 use tracing_subscriber::EnvFilter;
 
 pub use state::AppState;
@@ -80,6 +80,16 @@ pub fn run() {
             commands::delete_schedule,
             commands::run_schedule_now,
         ])
+        // Native drag-and-drop: with `dragDropEnabled` on (the default), HTML5 drops never
+        // reach the webview — the OS drop lands here instead. Imported in Rust so file
+        // paths never come from the webview; the result is emitted for the chat store.
+        .on_window_event(|window, event| {
+            if let WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) = event {
+                if window.label() == "main" {
+                    commands::handle_dropped_paths(window.app_handle(), paths.clone());
+                }
+            }
+        })
         .build(tauri::generate_context!())
         .expect("error while building the desktop application")
         .run(|app, event| {

@@ -20,7 +20,7 @@ Each feature is described the same way:
 |---|---|---|
 | [Chat](#chat) | [Conversations](#conversations) | Streaming replies with Stop, Regenerate, copy and live token usage |
 | | [Rich rendering](#rich-rendering) | Sanitized Markdown, code highlighting, KaTeX math, Thinking blocks |
-| | [Attachments](#attachments) | Text files and images (PNG, JPEG, GIF, WebP) in a prompt |
+| | [Attachments](#attachments) | Text files and images (PNG, JPEG, GIF, WebP) in a prompt — picker or drag-and-drop |
 | | [History & search](#history--search) | Chats saved locally, searchable, recovered after a crash |
 | [Models & providers](#models--providers) | [Provider types](#provider-types) | OpenAI, Google Gemini, Anthropic, any OpenAI-compatible server, Simulated |
 | | [Provider settings](#provider-settings) | Add, test and manage connections; keys go to the OS keychain |
@@ -94,9 +94,12 @@ provider: some send full reasoning, most hosted models send a summary.
 **What.** Attach text files and images to a message. Text is included in the prompt as
 labeled excerpts; images go to models that can see them.
 
-**How to use.** Click **⌁ Attach** and pick up to 20 files. Attached files appear as chips
-(images as thumbnails) in the composer and in the sent message. Files that can't be used are
-skipped individually, each with a reason.
+**How to use.** Click **⌁ Attach** and pick up to 20 files, or drag files from your file
+manager and drop them anywhere on the chat — an overlay confirms the drop while you hover.
+Dropped files follow the same rules as picked ones. Attached files appear as chips (images
+as thumbnails) in the composer and in the sent message. Files that can't be used are
+skipped individually, each with a reason. Drops are ignored while the Agents view or a
+settings dialog is open.
 
 | Kind | Accepted | Notes |
 |---|---|---|

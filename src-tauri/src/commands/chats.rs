@@ -6,10 +6,11 @@ use agent_core::storage::chats as repo;
 use agent_core::storage::{AttachmentMeta, ChatDetail, ChatSummary};
 use agent_core::Error;
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use ts_rs::TS;
 
+use crate::state::ATTACHMENTS_DROPPED_EVENT;
 use crate::AppState;
 
 const LIST_LIMIT: usize = 500;
@@ -121,6 +122,17 @@ pub async fn pick_attachments(
         .filter_map(|p| p.into_path().ok())
         .take(MAX_ATTACHMENTS_PER_PICK)
         .collect();
+    import_paths(&state, paths, include_images).await
+}
+
+/// Imports each path as an immutable attachment snapshot, collecting a per-file reason for
+/// the ones that fail so one bad file doesn't discard the rest. Shared by the picker above
+/// and the native drop handler; `include_images` applies the active model's image gate.
+async fn import_paths(
+    state: &AppState,
+    paths: Vec<PathBuf>,
+    include_images: bool,
+) -> Result<PickedAttachments, Error> {
     if paths.is_empty() {
         return Ok(PickedAttachments {
             attached: Vec::new(),
@@ -155,6 +167,33 @@ pub async fn pick_attachments(
             Ok(PickedAttachments { attached, rejected })
         })
         .await
+}
+
+/// Native drag-and-drop entry point (wired in `lib.rs`'s `on_window_event`): files dropped
+/// on the window are imported exactly like picked ones — paths come from the OS drop,
+/// never from the webview. The result goes out on `ATTACHMENTS_DROPPED_EVENT`; the frontend
+/// merges it into the visible chat's pending list. Rust can't see the visible chat's model
+/// here, so images are imported unconditionally (`include_images: true`) and the chat store
+/// moves the ones its model can't accept to the rejection notice.
+pub(crate) fn handle_dropped_paths(app: &AppHandle, paths: Vec<PathBuf>) {
+    let paths: Vec<PathBuf> = paths.into_iter().take(MAX_ATTACHMENTS_PER_PICK).collect();
+    if paths.is_empty() {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Some(state) = app.try_state::<AppState>() else {
+            return;
+        };
+        match import_paths(&state, paths, true).await {
+            Ok(picked) => {
+                if let Err(e) = app.emit(ATTACHMENTS_DROPPED_EVENT, picked) {
+                    tracing::warn!(error = %e, "could not announce dropped attachments");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "failed to import dropped files"),
+        }
+    });
 }
 
 /// Returns a `data:` URL for an image attachment so the webview can render thumbnails
