@@ -8,6 +8,9 @@ pub mod chats;
 mod db;
 mod migrations;
 
-pub use attachments::{AttachmentMeta, AttachmentStore, MAX_ATTACHMENT_BYTES};
+pub use attachments::{
+    AttachmentKind, AttachmentMeta, AttachmentSource, AttachmentStore, LoadedFile, PageRef,
+    PreparedAttachment, MAX_ATTACHMENT_BYTES, MAX_PDF_BYTES,
+};
 pub use chats::{ChatDetail, ChatSummary, MessageStatus, StoredMessage};
 pub use db::Db;

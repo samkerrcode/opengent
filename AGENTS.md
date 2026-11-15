@@ -92,6 +92,10 @@ Contributor guidelines: see CONTRIBUTING.md. Security scope: SECURITY.md.
 - Dependencies: pin exact versions published ≥ 7 days ago; use `cargo update -p <crate> --precise <ver>` to hold back
   transitive bumps; keep features minimal.
 - CSS: no `light-dark()`, `:has()`, or other post-Safari-15 features — the macOS 12 WKWebView baseline is Safari 15.6. Theme via `prefers-color-scheme`.
+- Attachments: PDFs are rendered only by the OS engine behind `pdf::PdfRasterizer` (feature `native-pdf`; tests use
+  a fake or the generated `pdf::fixtures`). Rendering and blob reads stay off the SQLite worker: `AttachmentStore`
+  `load`/`prepare`/`load_content` are file-only, `find`/`commit`/`source` are DB-only. One gate decides what a model
+  can be sent: `AttachmentMeta::unusable_reason`, mirrored by `blockedReason` in `src/lib/attachments.ts`.
 - Streaming to the UI goes through `tauri::ipc::Channel` (ordered); text deltas are coalesced in `RunEmitter`.
 - Product branding only via `product.json`; `slug`, `dataDirName`, `identifier` are stable – renaming needs a migration.
 - Prefer first-party code; add external dependencies only for key capabilities.

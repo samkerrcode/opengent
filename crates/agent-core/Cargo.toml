@@ -7,9 +7,18 @@ license.workspace = true
 description = "UI-independent agent runtime: providers, MCP, policy, storage, orchestration"
 
 [features]
-default = ["native-secrets", "mcp"]
+default = ["native-secrets", "mcp", "native-pdf"]
 native-secrets = ["dep:keyring-core", "dep:apple-native-keyring-store", "dep:windows-native-keyring-store"]
 mcp = ["dep:rmcp", "dep:process-wrap", "dep:async-trait"]
+# OS PDF renderers behind `pdf::PdfRasterizer` (CoreGraphics + ImageIO on macOS,
+# Windows.Data.Pdf on Windows). Without it PDF attachments are rejected as unsupported.
+native-pdf = [
+    "dep:objc2",
+    "dep:objc2-core-foundation",
+    "dep:objc2-core-graphics",
+    "dep:objc2-image-io",
+    "dep:windows",
+]
 
 [dependencies]
 serde.workspace = true
@@ -50,12 +59,46 @@ chrono = { version = "=0.4.45", default-features = false, features = ["clock", "
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1.0.2", features = ["keychain"], optional = true }
+objc2 = { version = "=0.6.5", default-features = false, features = ["std"], optional = true }
+objc2-core-foundation = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CFCGTypes",
+    "CFData",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+], optional = true }
+objc2-core-graphics = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGDataProvider",
+    "CGImage",
+    "CGPDFDocument",
+    "CGPDFPage",
+], optional = true }
+objc2-image-io = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CGImageDestination",
+    "objc2-core-graphics",
+], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-native-keyring-store = { version = "1.1.0", optional = true }
+windows = { version = "=0.62.2", features = [
+    "Data_Pdf",
+    "Foundation",
+    "Graphics_Imaging",
+    "Storage_Streams",
+    "UI",
+    "Win32_System_WinRT",
+], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
 rustls-pki-types = "1.15.1"
+# Decodes rendered PDF pages in the rasterizer tests. Already in the lockfile via Tauri.
+png = "=0.18.1"
 rcgen = { version = "=0.14.7", default-features = false, features = ["ring", "pem"] }

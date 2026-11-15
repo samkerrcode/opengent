@@ -33,6 +33,9 @@ pub enum ContentBlock {
         mime: String,
         #[ts(type = "number")]
         char_count: i64,
+        /// PDFs only: pages in the document. Absent from blocks stored before PDF support.
+        #[serde(default)]
+        page_count: Option<u32>,
     },
     /// An image ready to send to a vision-capable provider (`data` is base64). Produced by
     /// context compilation for the request path only — never persisted in message blocks.

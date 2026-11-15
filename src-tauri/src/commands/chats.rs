@@ -2,8 +2,9 @@ use std::path::PathBuf;
 
 use agent_core::domain::{AgentId, ChatId};
 use agent_core::mcp::PermissionScope;
+use agent_core::storage::attachments::data_url;
 use agent_core::storage::chats as repo;
-use agent_core::storage::{AttachmentMeta, ChatDetail, ChatSummary};
+use agent_core::storage::{AttachmentKind, AttachmentMeta, ChatDetail, ChatSummary};
 use agent_core::Error;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -97,16 +98,16 @@ pub async fn delete_chat(state: State<'_, AppState>, id: ChatId) -> Result<(), E
 
 /// Opens the native file picker and imports the chosen files as immutable attachment
 /// snapshots. Paths never come from the webview; the dialog result stays in Rust.
-/// The picker is intentionally unfiltered — `import_file` decides by content (any UTF-8
-/// text file, or a magic-byte-sniffed PNG/JPEG/GIF/WebP), which no extension list can
-/// describe without hiding attachable files. `include_images` reflects the active model's
-/// image capability: images picked for a text-only model come back in `rejected` with a
-/// per-file reason instead of failing the whole pick.
+/// The picker is intentionally unfiltered — the store decides by content (any UTF-8 text
+/// file, a `%PDF-` file, or a magic-byte-sniffed PNG/JPEG/GIF/WebP), which no extension
+/// list can describe without hiding attachable files. Everything importable is imported:
+/// whether the chat's model can be sent it is decided by the chat store for display
+/// (`AttachmentMeta::unusable_reason`, mirrored in `src/lib/attachments.ts`) and enforced
+/// by `launch_run`.
 #[tauri::command]
 pub async fn pick_attachments(
     app: AppHandle,
     state: State<'_, AppState>,
-    include_images: bool,
 ) -> Result<PickedAttachments, Error> {
     let picked = tauri::async_runtime::spawn_blocking(move || {
         app.dialog()
@@ -122,59 +123,61 @@ pub async fn pick_attachments(
         .filter_map(|p| p.into_path().ok())
         .take(MAX_ATTACHMENTS_PER_PICK)
         .collect();
-    import_paths(&state, paths, include_images).await
+    Ok(import_paths(&state, paths).await)
 }
 
 /// Imports each path as an immutable attachment snapshot, collecting a per-file reason for
-/// the ones that fail so one bad file doesn't discard the rest. Shared by the picker above
-/// and the native drop handler; `include_images` applies the active model's image gate.
-async fn import_paths(
-    state: &AppState,
-    paths: Vec<PathBuf>,
-    include_images: bool,
-) -> Result<PickedAttachments, Error> {
-    if paths.is_empty() {
-        return Ok(PickedAttachments {
-            attached: Vec::new(),
-            rejected: Vec::new(),
-        });
+/// the ones that fail (too large, unsupported, password-protected or damaged PDF) so one
+/// bad file doesn't discard the rest. Shared by the picker above and the native drop
+/// handler. Files go one at a time, which bounds memory to a single file and its pages.
+async fn import_paths(state: &AppState, paths: Vec<PathBuf>) -> PickedAttachments {
+    let mut attached = Vec::with_capacity(paths.len());
+    let mut rejected = Vec::new();
+    for path in paths {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_owned();
+        match import_path(state, path).await {
+            Ok(meta) => attached.push(meta),
+            Err(e) => rejected.push(RejectedAttachment {
+                name,
+                reason: e.to_string(),
+            }),
+        }
     }
+    PickedAttachments { attached, rejected }
+}
+
+/// Reading and PDF rendering run on blocking threads; the database worker only looks up
+/// the content hash and records the result. A file that was attached before is found by
+/// its hash and never rendered again.
+async fn import_path(state: &AppState, path: PathBuf) -> Result<AttachmentMeta, Error> {
+    let store = state.attachments.clone();
+    let file = super::blocking(move || store.load(&path)).await?;
+    let store = state.attachments.clone();
+    let (existing, file) = state
+        .db
+        .call(move |conn| Ok((store.find(conn, &file)?, file)))
+        .await?;
+    if let Some(meta) = existing {
+        return Ok(meta);
+    }
+    let store = state.attachments.clone();
+    let prepared = super::blocking(move || store.prepare(file)).await?;
     let store = state.attachments.clone();
     state
         .db
-        .call(move |conn| {
-            let mut attached = Vec::with_capacity(paths.len());
-            let mut rejected = Vec::new();
-            for path in &paths {
-                match store.import_file(conn, path) {
-                    Ok(meta) if meta.mime.starts_with("image/") && !include_images => {
-                        rejected.push(RejectedAttachment {
-                            name: meta.name,
-                            reason: "the selected model does not accept image attachments".into(),
-                        });
-                    }
-                    Ok(meta) => attached.push(meta),
-                    Err(e) => rejected.push(RejectedAttachment {
-                        name: path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("file")
-                            .to_owned(),
-                        reason: e.to_string(),
-                    }),
-                }
-            }
-            Ok(PickedAttachments { attached, rejected })
-        })
+        .call(move |conn| store.commit(conn, prepared))
         .await
 }
 
 /// Native drag-and-drop entry point (wired in `lib.rs`'s `on_window_event`): files dropped
 /// on the window are imported exactly like picked ones — paths come from the OS drop,
 /// never from the webview. The result goes out on `ATTACHMENTS_DROPPED_EVENT`; the frontend
-/// merges it into the visible chat's pending list. Rust can't see the visible chat's model
-/// here, so images are imported unconditionally (`include_images: true`) and the chat store
-/// moves the ones its model can't accept to the rejection notice.
+/// merges it into the visible chat's pending list and moves the files its model can't
+/// accept to the rejection notice.
 pub(crate) fn handle_dropped_paths(app: &AppHandle, paths: &[PathBuf]) {
     let paths: Vec<PathBuf> = paths
         .iter()
@@ -189,35 +192,45 @@ pub(crate) fn handle_dropped_paths(app: &AppHandle, paths: &[PathBuf]) {
         let Some(state) = app.try_state::<AppState>() else {
             return;
         };
-        match import_paths(&state, paths, true).await {
-            Ok(picked) => {
-                if let Err(e) = app.emit(ATTACHMENTS_DROPPED_EVENT, picked) {
-                    tracing::warn!(error = %e, "could not announce dropped attachments");
-                }
-            }
-            Err(e) => tracing::warn!(error = %e, "failed to import dropped files"),
+        let picked = import_paths(&state, paths).await;
+        if let Err(e) = app.emit(ATTACHMENTS_DROPPED_EVENT, picked) {
+            tracing::warn!(error = %e, "could not announce dropped attachments");
         }
     });
 }
 
-/// Returns a `data:` URL for an image attachment so the webview can render thumbnails
-/// without any file access (CSP allows `img-src data:`).
+/// Returns a `data:` URL for an image attachment — or page 1 of a PDF — so the webview
+/// can render thumbnails without any file access (CSP allows `img-src data:`).
 #[tauri::command]
 pub async fn attachment_data_url(
     state: State<'_, AppState>,
     attachment_id: String,
 ) -> Result<String, Error> {
     let store = state.attachments.clone();
-    state
+    let (meta, page) = state
         .db
         .call(move |conn| {
             let meta = store
                 .get(conn, &attachment_id)?
                 .ok_or_else(|| Error::NotFound(format!("attachment {attachment_id}")))?;
-            if !meta.mime.starts_with("image/") {
-                return Err(Error::InvalidInput("attachment is not an image".into()));
-            }
-            store.read_data_url(&meta)
+            let page = match meta.kind() {
+                AttachmentKind::Image => None,
+                AttachmentKind::Pdf => Some(store.first_page(conn, &meta)?.ok_or_else(|| {
+                    Error::NotFound(format!("pages of attachment {attachment_id}"))
+                })?),
+                AttachmentKind::Text => {
+                    return Err(Error::InvalidInput("attachment has no preview".into()))
+                }
+            };
+            Ok((meta, page))
         })
-        .await
+        .await?;
+    let store = state.attachments.clone();
+    super::blocking(move || {
+        Ok(match page {
+            Some(page) => data_url(&page.mime, &store.read_page(&page)?),
+            None => data_url(&meta.mime, &store.read_bytes(&meta)?),
+        })
+    })
+    .await
 }

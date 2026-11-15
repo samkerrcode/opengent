@@ -11,11 +11,9 @@ pub use chats::*;
 pub use mcp::*;
 pub use providers::*;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use agent_core::agent::context::{
-    self, AgentPrompt, AttachmentContent, PromptProfile, ToolContext,
-};
+use agent_core::agent::context::{self, AgentPrompt, PromptProfile, ToolContext};
 use agent_core::agent::{FallbackModel, RunRecorder, RunRequest, RunSink};
 use agent_core::config::{product, ProductInfo};
 use agent_core::domain::{ChatId, ContentBlock, Role, RunEvent, RunId};
@@ -107,6 +105,15 @@ pub async fn start_run(
         |_| {},
     )
     .await
+}
+
+/// Runs file- or CPU-bound work off the async runtime and off the database worker.
+pub(crate) async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, Error> + Send + 'static,
+) -> Result<T, Error> {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))?
 }
 
 /// Inputs to `launch_run`.
@@ -238,79 +245,102 @@ pub(crate) async fn launch_run<S: RunSink>(
     }
     let run_id = RunId::new();
 
+    // Attachments are resolved in two steps each: what to read comes from the database,
+    // the bytes are read and base64-encoded on a blocking thread. Page images make these
+    // reads far too large for the single database worker.
+    // This turn's attachments first, so nothing is stored if one is unusable or unreadable.
+    let store = state.attachments.clone();
+    let (ids, gate) = (attachment_ids.clone(), caps.clone());
+    let sources = state
+        .db
+        .call(move |conn| {
+            ids.iter()
+                .map(|id| {
+                    let meta = store
+                        .get(conn, id)?
+                        .ok_or_else(|| Error::NotFound(format!("attachment {id}")))?;
+                    // The authority on what a model can be sent; the UI only mirrors it.
+                    if let Some(reason) = meta.unusable_reason(&gate) {
+                        return Err(Error::InvalidInput(format!("{}: {reason}", meta.name)));
+                    }
+                    store.source(conn, meta, gate.images)
+                })
+                .collect::<Result<Vec<_>, Error>>()
+        })
+        .await?;
+    let mut contents = HashMap::new();
+    let mut blocks = Vec::new();
+    if !sources.is_empty() {
+        let store = state.attachments.clone();
+        let loaded = blocking(move || {
+            sources
+                .into_iter()
+                .map(|s| Ok((store.load_content(&s)?, s.meta)))
+                .collect::<Result<Vec<_>, Error>>()
+        })
+        .await?;
+        for (content, meta) in loaded {
+            contents.insert(meta.id.clone(), content);
+            blocks.push(ContentBlock::Attachment {
+                id: meta.id,
+                name: meta.name,
+                mime: meta.mime,
+                char_count: meta.char_count,
+                page_count: meta.page_count,
+            });
+        }
+    }
+    if !prompt.is_empty() {
+        blocks.push(ContentBlock::Text { text: prompt });
+    }
+
     // One database round trip: truncate (retry), persist the user turn, create the placeholder,
     // and load everything needed to compile the request.
     let store = state.attachments.clone();
     let (pid, mdl) = (provider_id.clone(), model.clone());
-    let allow_images = caps.images;
+    let images = caps.images;
     let prepared = state
         .db
         .call(move |conn| {
             if let Some(from) = replace_from {
                 repo::truncate_from(conn, chat_id, &from)?;
             }
-            let mut blocks = Vec::new();
-            let mut contents = HashMap::new();
-            for id in &attachment_ids {
-                let meta = store
-                    .get(conn, id)?
-                    .ok_or_else(|| Error::NotFound(format!("attachment {id}")))?;
-                let is_image = meta.mime.starts_with("image/");
-                if is_image && !allow_images {
-                    return Err(Error::InvalidInput(format!(
-                        "{}: the selected model does not accept image attachments",
-                        meta.name
-                    )));
-                }
-                contents.insert(
-                    meta.id.clone(),
-                    if is_image {
-                        AttachmentContent::image(meta.mime.clone(), &store.read_bytes(&meta)?)
-                    } else {
-                        AttachmentContent::Text(store.read_text(&meta)?)
-                    },
-                );
-                blocks.push(ContentBlock::Attachment {
-                    id: meta.id,
-                    name: meta.name,
-                    mime: meta.mime,
-                    char_count: meta.char_count,
-                });
-            }
-            if !prompt.is_empty() {
-                blocks.push(ContentBlock::Text { text: prompt });
-            }
             let user_id =
                 repo::append_message(conn, chat_id, Role::User, &blocks, &attachment_ids)?;
             let assistant_id = repo::begin_assistant_message(conn, chat_id, run_id, &pid, &mdl)?;
             let messages = repo::list_messages(conn, chat_id)?;
             // Attachment payloads for earlier turns too, so history stays coherent.
+            let mut seen: HashSet<&str> = attachment_ids.iter().map(String::as_str).collect();
+            let mut earlier = Vec::new();
             for m in &messages {
                 for b in &m.blocks {
                     if let ContentBlock::Attachment { id, .. } = b {
-                        if !contents.contains_key(id) {
+                        if seen.insert(id) {
                             if let Some(meta) = store.get(conn, id)? {
-                                let content = if meta.mime.starts_with("image/") {
-                                    store
-                                        .read_bytes(&meta)
-                                        .ok()
-                                        .map(|b| AttachmentContent::image(meta.mime.clone(), &b))
-                                } else {
-                                    store.read_text(&meta).ok().map(AttachmentContent::Text)
-                                };
-                                if let Some(c) = content {
-                                    contents.insert(id.clone(), c);
-                                }
+                                earlier.push(store.source(conn, meta, images)?);
                             }
                         }
                     }
                 }
             }
             let chat = repo::get_summary(conn, chat_id)?;
-            Ok((user_id, assistant_id, messages, contents, chat))
+            Ok((user_id, assistant_id, messages, earlier, chat))
         })
         .await?;
-    let (user_id, assistant_id, messages, contents, chat) = prepared;
+    let (user_id, assistant_id, messages, earlier, chat) = prepared;
+    if !earlier.is_empty() {
+        let store = state.attachments.clone();
+        // Best effort: an earlier attachment that can no longer be read is sent as
+        // "unavailable" rather than failing the new turn.
+        let loaded = blocking(move || {
+            Ok(earlier
+                .into_iter()
+                .filter_map(|s| Some((s.meta.id.clone(), store.load_content(&s).ok()?)))
+                .collect::<Vec<_>>())
+        })
+        .await?;
+        contents.extend(loaded);
+    }
 
     let user_message = messages
         .iter()

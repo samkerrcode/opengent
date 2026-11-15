@@ -19,6 +19,10 @@ under *Unreleased*.
 - **Tools**: Remote MCP connections can sign in with OAuth in your browser (authorization
   code + PKCE, with automatic client registration or your own client ID), or use OAuth
   client credentials. Tokens stay in the OS credential store and refresh on their own.
+- **Chat**: Attach PDFs (up to 32 MiB) by picker or drag-and-drop. The first 20 pages are
+  sent to vision-capable models as page images, so layout, tables and scans come through;
+  chips show a thumbnail of page 1 and the page count. Password-protected and damaged PDFs
+  are skipped with a reason.
 
 ### Changed
 
@@ -33,6 +37,12 @@ under *Unreleased*.
 - **Tools**: Remote MCP servers such as GitHub's (`api.githubcopilot.com/mcp`) now connect —
   they negotiate the session down from the protocol version the client advertised and then
   rejected every request, so a valid PAT reported only "Transport channel closed".
+
+### Security
+
+- **Chat**: PDFs are parsed and drawn only by the operating system's own renderer
+  (CoreGraphics on macOS, Windows.Data.Pdf on Windows), with caps on file size, pages,
+  pixels per page and rendering time. No PDF parser is bundled with the app.
 
 ## 0.1.2 — 2026-11-15
 

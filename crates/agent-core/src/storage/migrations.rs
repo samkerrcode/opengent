@@ -80,6 +80,15 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX chats_agent ON chats(agent_id);",
     // v3: per-chat tool permission overrides (JSON `ChatToolOverrides`; NULL = none).
     "ALTER TABLE chats ADD COLUMN tool_overrides TEXT;",
+    // v4: PDF attachments — pages in the document, and one image blob per rendered page.
+    "ALTER TABLE attachments ADD COLUMN page_count INTEGER;
+    CREATE TABLE attachment_pages (
+        attachment_id TEXT NOT NULL REFERENCES attachments(id),
+        page_index    INTEGER NOT NULL,
+        sha256        TEXT NOT NULL,
+        mime          TEXT NOT NULL,
+        PRIMARY KEY (attachment_id, page_index)
+    );",
 ];
 
 pub fn apply(conn: &mut Connection) -> Result<()> {

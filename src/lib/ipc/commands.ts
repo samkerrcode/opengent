@@ -138,8 +138,7 @@ export const commands = {
   getChat: (id: ChatId) => invoke<ChatDetail>("get_chat", { id }),
   renameChat: (id: ChatId, title: string) => invoke<void>("rename_chat", { id, title }),
   deleteChat: (id: ChatId) => invoke<void>("delete_chat", { id }),
-  pickAttachments: (includeImages: boolean) =>
-    invoke<PickedAttachments>("pick_attachments", { includeImages }),
+  pickAttachments: () => invoke<PickedAttachments>("pick_attachments"),
   attachmentDataUrl: (attachmentId: string) =>
     invoke<string>("attachment_data_url", { attachmentId }),
 

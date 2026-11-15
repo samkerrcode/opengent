@@ -4,7 +4,7 @@
   import { chatStore, type Chat, type TurnItem } from "./chat-store.svelte";
   import Composer from "./Composer.svelte";
   import AssistantTurnView from "./AssistantTurn.svelte";
-  import { attachmentDataUrl } from "$lib/attachments";
+  import { attachmentDataUrl, attachmentKind, pdfLabel } from "$lib/attachments";
   import { product } from "$lib/generated/product";
   import BrandMark from "$lib/components/BrandMark.svelte";
   import { providerStore } from "$features/providers/provider-store.svelte";
@@ -233,7 +233,7 @@
           {#if item.attachments.length}
             <ul class="user-files">
               {#each item.attachments as a (a.id)}
-                {#if a.mime.startsWith("image/")}
+                {#if attachmentKind(a) === "image"}
                   {#await attachmentDataUrl(a.id) then url}
                     {#if url}
                       <li class="user-image"><img src={url} alt={a.name} title={a.name} /></li>
@@ -241,6 +241,14 @@
                       <li title={a.name}>▤ {a.name}</li>
                     {/if}
                   {/await}
+                {:else if attachmentKind(a) === "pdf"}
+                  <li class="user-pdf" title={a.name}>
+                    {#await attachmentDataUrl(a.id) then url}
+                      {#if url}<img src={url} alt="" />{:else}<span aria-hidden="true">▤</span>{/if}
+                    {/await}
+                    <span class="user-pdf-name">{a.name}</span>
+                    <span class="user-pdf-meta">{pdfLabel(a.page_count)}</span>
+                  </li>
                 {:else}
                   <li title="{a.char_count} characters">▤ {a.name}</li>
                 {/if}
@@ -456,6 +464,33 @@
     max-height: 180px;
     border-radius: var(--radius-lg);
     border: 1px solid var(--border);
+  }
+  .user-files .user-pdf {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 320px;
+    padding: 3px 9px 3px 4px;
+    border-radius: var(--radius-md);
+  }
+  .user-pdf img {
+    width: 22px;
+    height: 28px;
+    object-fit: cover;
+    object-position: top;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background: #fff;
+    flex: none;
+  }
+  .user-pdf-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .user-pdf-meta {
+    color: var(--fg-faint);
+    white-space: nowrap;
   }
   .jump {
     position: absolute;

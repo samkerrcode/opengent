@@ -46,6 +46,7 @@ matter:
 | **Webview** | Escaping the CSP or capability set to get shell, filesystem, or network access from the UI. |
 | **Network** | Plain HTTP accepted for a non-loopback host, redirects followed on provider or remote MCP connections, or TLS verification bypassed without the user choosing it. |
 | **Dependencies** | A known vulnerability in a pinned dependency that is reachable from OpenGent. |
+| **Attachments** | A file the user attaches that leads to code execution, a read or write outside the attachments directory, or unbounded memory, disk or CPU use while it is imported. |
 
 **Out of scope (by design):**
 
@@ -54,6 +55,16 @@ matter:
 - Unencrypted local chat data. It relies on OS account isolation and disk encryption;
   per-chat encryption is a planned feature.
 - Attacks that need an already-compromised user account or a malicious local administrator.
+
+**Untrusted PDFs.** An attached PDF is parsed and rasterized in the app's own process by
+the operating system's renderer — CoreGraphics on macOS, Windows.Data.Pdf on Windows — and
+by nothing else: OpenGent bundles no PDF parser, runs no script or action a PDF contains,
+never asks for or stores a PDF password, and gives the webview only finished page images.
+The import is bounded (32 MiB per file, 20 pages, 1,568 px per page side, a time budget
+checked between pages). A memory-safety bug in the OS renderer is therefore the remaining
+exposure, the same one as opening the file in Preview or Edge, and is fixed by OS updates;
+report it to the OS vendor, and to us if OpenGent's handling makes it worse. Pages reach a
+model provider as images, like any other image attachment.
 
 ## Data handling by provider
 

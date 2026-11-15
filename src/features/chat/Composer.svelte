@@ -3,7 +3,7 @@
   import ModelPicker from "$features/providers/ModelPicker.svelte";
   import ToolsMenu from "$features/mcp/ToolsMenu.svelte";
   import { mcpStore } from "$features/mcp/mcp-store.svelte";
-  import { attachmentDataUrl } from "$lib/attachments";
+  import { attachmentDataUrl, attachmentKind, blockedReason, pdfLabel } from "$lib/attachments";
   import type { Agent, AttachmentMeta, PermissionScope } from "$lib/ipc/commands";
 
   let {
@@ -50,10 +50,16 @@
     textarea?.focus();
   }
 
-  // Pending images the current model can't accept — e.g. attached under a vision model
-  // before switching to a text-only one. Sending would fail, so flag them and hold Send.
+  // Pending images and PDFs the current model can't accept — e.g. attached under a vision
+  // model before switching to a text-only one. Sending would fail, so flag them (with the
+  // reason) and hold Send.
   const unsupported = $derived(
-    new Set(pending.filter((a) => a.mime.startsWith("image/") && !supportsImages).map((a) => a.id)),
+    new Map(
+      pending.flatMap((a): [string, string][] => {
+        const reason = blockedReason(a, { images: supportsImages });
+        return reason ? [[a.id, reason]] : [];
+      }),
+    ),
   );
   const canSend = $derived(!busy && unsupported.size === 0 && (value.trim().length > 0 || pending.length > 0));
 
@@ -77,9 +83,14 @@
   }
 
   function fmtMeta(a: AttachmentMeta) {
-    return a.mime.startsWith("image/")
-      ? `${Math.max(1, Math.round(a.size_bytes / 1024))} KiB`
-      : fmtChars(a.char_count);
+    switch (attachmentKind(a)) {
+      case "image":
+        return `${Math.max(1, Math.round(a.size_bytes / 1024))} KiB`;
+      case "pdf":
+        return pdfLabel(a.page_count, a.pages_rendered);
+      default:
+        return fmtChars(a.char_count);
+    }
   }
 
   $effect(() => {
@@ -97,7 +108,8 @@
       <ul class="pending" aria-label="Attachments for this message">
         {#each pending as a (a.id)}
           <li class="file" class:unsupported={unsupported.has(a.id)}>
-            {#if a.mime.startsWith("image/")}
+            {#if attachmentKind(a) !== "text"}
+              <!-- Images show themselves; PDFs show page 1. -->
               {#await attachmentDataUrl(a.id) then url}
                 {#if url}<img class="file-thumb" src={url} alt="" />{/if}
               {/await}
@@ -106,9 +118,7 @@
             {/if}
             <span
               class="file-name"
-              title={unsupported.has(a.id)
-                ? `${a.name}: the selected model does not accept image attachments`
-                : a.name}
+              title={unsupported.has(a.id) ? `${a.name}: ${unsupported.get(a.id)}` : a.name}
             >{a.name}</span>
             <span class="file-meta">{fmtMeta(a)}</span>
             <button type="button" class="file-remove" aria-label="Remove {a.name}" onclick={() => onremoveattachment(a.id)}>✕</button>
@@ -148,8 +158,8 @@
           onclick={onattach}
           disabled={busy}
           title={supportsImages
-            ? "Attach files or images (up to 2 MiB each)"
-            : "Attach text files (up to 2 MiB each) — the selected model does not accept images"}
+            ? "Attach text files or images (up to 2 MiB each) or PDFs (up to 32 MiB each)"
+            : "Attach text files (up to 2 MiB each) — the selected model does not accept images or PDFs"}
         >
           ⌁ Attach{pending.length ? ` (${pending.length})` : ""}
         </button>

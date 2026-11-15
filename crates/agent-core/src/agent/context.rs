@@ -196,21 +196,46 @@ pub fn estimate_tokens(text: &str) -> u32 {
     (text.chars().count() as u32).div_ceil(3)
 }
 
+/// One rendered PDF page, ready to send as an image.
+#[derive(Debug, Clone)]
+pub struct PageData {
+    pub mime: String,
+    pub data_base64: String,
+}
+
+impl PageData {
+    pub fn new(mime: String, bytes: &[u8]) -> Self {
+        use base64::Engine;
+        Self {
+            mime,
+            data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        }
+    }
+}
+
 /// Payload for one attachment, keyed by attachment id and supplied by the host from the
 /// attachment store. Images carry their mime and base64-encoded bytes.
 #[derive(Debug, Clone)]
 pub enum AttachmentContent {
     Text(String),
-    Image { mime: String, data_base64: String },
+    Image {
+        mime: String,
+        data_base64: String,
+    },
+    /// A PDF as page images: the leading `pages` of a document with `total` pages.
+    Pages {
+        total: u32,
+        pages: Vec<PageData>,
+    },
+    /// An image or PDF whose bytes were not loaded because the model cannot see images;
+    /// it renders as the same placeholder a loaded one would.
+    Omitted,
 }
 
 impl AttachmentContent {
     pub fn image(mime: String, bytes: &[u8]) -> Self {
-        use base64::Engine;
-        Self::Image {
-            mime,
-            data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-        }
+        let PageData { mime, data_base64 } = PageData::new(mime, bytes);
+        Self::Image { mime, data_base64 }
     }
 }
 
@@ -246,6 +271,21 @@ fn expand_attachment(id: &str, name: &str, mime: &str, contents: &AttachmentCont
     out
 }
 
+/// Announces a PDF whose pages follow as images, and says so when only the leading pages
+/// are included.
+fn pdf_manifest(name: &str, mime: &str, total: u32, shown: usize) -> String {
+    let mut out = format!(
+        "<attachment name=\"{}\" type=\"{}\" pages=\"{total}\" shown=\"{shown}\"",
+        escape(name),
+        escape(mime)
+    );
+    if (shown as u64) < u64::from(total) {
+        out.push_str(&format!(" note=\"showing pages 1–{shown} of {total}\""));
+    }
+    out.push_str(" />");
+    out
+}
+
 fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('"', "&quot;")
@@ -256,6 +296,7 @@ fn escape(s: &str) -> String {
 /// Flattens a message for the request path: text attachments expand to labeled excerpts,
 /// image attachments become `Image` blocks when the model accepts them and a labeled
 /// placeholder otherwise (so old image turns degrade gracefully on text-only models).
+/// PDFs become a manifest line plus one `Image` block per rendered page, in page order.
 pub fn render_message(
     m: &Message,
     contents: &AttachmentContents,
@@ -278,7 +319,20 @@ pub fn render_message(
                         data: data_base64.clone(),
                     });
                 }
-                Some(AttachmentContent::Image { .. }) => attachments.push(format!(
+                Some(AttachmentContent::Pages { total, pages })
+                    if images_supported && !pages.is_empty() =>
+                {
+                    attachments.push(pdf_manifest(name, mime, *total, pages.len()));
+                    images.extend(pages.iter().map(|p| ContentBlock::Image {
+                        mime: p.mime.clone(),
+                        data: p.data_base64.clone(),
+                    }));
+                }
+                Some(
+                    AttachmentContent::Image { .. }
+                    | AttachmentContent::Pages { .. }
+                    | AttachmentContent::Omitted,
+                ) => attachments.push(format!(
                     "<attachment name=\"{}\" type=\"{}\" status=\"omitted\" \
                      reason=\"the selected model cannot process images\" />",
                     escape(name),
@@ -467,7 +521,7 @@ fn message_tokens(m: &Message) -> u32 {
         .map(|b| match b {
             ContentBlock::Text { text } => estimate_tokens(text),
             // Vision token cost is roughly flat per image; counting the base64 string would
-            // overestimate by orders of magnitude.
+            // overestimate by orders of magnitude. A PDF costs this once per rendered page.
             ContentBlock::Image { .. } => 1_500,
             other => estimate_tokens(&serde_json::to_string(other).unwrap_or_default()),
         })
@@ -691,12 +745,14 @@ mod tests {
                     name: "ma<in>.rs".into(),
                     mime: "text/x-source".into(),
                     char_count: 12,
+                    page_count: None,
                 },
                 ContentBlock::Attachment {
                     id: "missing".into(),
                     name: "gone.txt".into(),
                     mime: "text/plain".into(),
                     char_count: 0,
+                    page_count: None,
                 },
             ],
         };
@@ -723,6 +779,7 @@ mod tests {
                 name: "big.txt".into(),
                 mime: "text/plain".into(),
                 char_count: 0,
+                page_count: None,
             }],
         };
         let ContentBlock::Text { text } = &render_message(&msg, &texts, false).blocks[0] else {
@@ -1016,6 +1073,7 @@ mod tests {
                     name: "shot.png".into(),
                     mime: "image/png".into(),
                     char_count: 0,
+                    page_count: None,
                 },
             ],
         };
@@ -1037,5 +1095,88 @@ mod tests {
         };
         assert!(text.contains("shot.png"));
         assert!(text.contains("cannot process images"));
+    }
+
+    fn pdf_message(pages: usize, total: u32) -> (Message, AttachmentContents) {
+        let mut contents = HashMap::new();
+        contents.insert(
+            "p1".to_string(),
+            AttachmentContent::Pages {
+                total,
+                pages: (0..pages)
+                    .map(|i| PageData::new("image/png".into(), format!("page {i}").as_bytes()))
+                    .collect(),
+            },
+        );
+        let msg = Message {
+            role: Role::User,
+            blocks: vec![
+                ContentBlock::Attachment {
+                    id: "p1".into(),
+                    name: "re\"port.pdf".into(),
+                    mime: "application/pdf".into(),
+                    char_count: 0,
+                    page_count: Some(total),
+                },
+                ContentBlock::Text {
+                    text: "summarize".into(),
+                },
+            ],
+        };
+        (msg, contents)
+    }
+
+    #[test]
+    fn pdf_becomes_a_manifest_and_one_image_per_page_in_order() {
+        let (msg, contents) = pdf_message(3, 3);
+        let r = render_message(&msg, &contents, true);
+        let ContentBlock::Text { text } = &r.blocks[0] else {
+            panic!()
+        };
+        assert_eq!(
+            text,
+            "<attachment name=\"re&quot;port.pdf\" type=\"application/pdf\" pages=\"3\" \
+             shown=\"3\" />\n\nsummarize"
+        );
+        let images: Vec<&str> = r.blocks[1..]
+            .iter()
+            .map(|b| match b {
+                ContentBlock::Image { mime, data } if mime == "image/png" => data.as_str(),
+                other => panic!("unexpected block {other:?}"),
+            })
+            .collect();
+        let expected: Vec<String> = (0..3)
+            .map(|i| PageData::new(String::new(), format!("page {i}").as_bytes()).data_base64)
+            .collect();
+        assert_eq!(images, expected);
+        // Each page is budgeted like an image.
+        assert!(message_tokens(&r) >= 3 * 1_500);
+    }
+
+    #[test]
+    fn pdf_manifest_discloses_pages_that_were_left_out() {
+        let (msg, contents) = pdf_message(20, 57);
+        let r = render_message(&msg, &contents, true);
+        let ContentBlock::Text { text } = &r.blocks[0] else {
+            panic!()
+        };
+        assert!(text.contains("pages=\"57\" shown=\"20\" note=\"showing pages 1–20 of 57\" />"));
+        assert_eq!(r.blocks.len(), 21);
+    }
+
+    #[test]
+    fn pdf_degrades_to_a_placeholder_on_a_text_only_model() {
+        let (msg, mut contents) = pdf_message(2, 2);
+        // Loaded or deliberately not loaded, a text-only model gets the same placeholder.
+        for _ in 0..2 {
+            let r = render_message(&msg, &contents, false);
+            assert_eq!(r.blocks.len(), 1);
+            let ContentBlock::Text { text } = &r.blocks[0] else {
+                panic!()
+            };
+            assert!(text.contains("type=\"application/pdf\" status=\"omitted\""));
+            assert!(text.contains("cannot process images"));
+            contents.insert("p1".into(), AttachmentContent::Omitted);
+        }
     }
 }
