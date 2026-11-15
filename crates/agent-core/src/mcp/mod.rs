@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod manager;
+mod oauth;
 pub mod permissions;
 pub mod stdio;
 
@@ -19,8 +20,8 @@ use ts_rs::TS;
 use crate::{config::product, Error, Result};
 
 pub use config::{
-    split_command, KeyValueEntry, KeyValueInput, McpServerConfig, McpServerInput, McpStore,
-    McpTransport,
+    split_command, KeyValueEntry, KeyValueInput, McpAuth, McpAuthInput, McpServerConfig,
+    McpServerInput, McpStore, McpTransport,
 };
 pub use manager::{
     McpManager, McpServerStatus, McpServerView, ScopedServerView, ScopedToolView, ToolInfo,

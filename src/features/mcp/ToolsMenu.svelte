@@ -60,7 +60,8 @@
     if (!s.enabled || !inScope(s)) return "off";
     switch (s.status.kind) {
       case "connected": return "ok";
-      case "connecting": return "busy";
+      case "connecting":
+      case "authorizing": return "busy";
       case "failed": return "bad";
       default: return "off";
     }
@@ -81,6 +82,8 @@
       }
       case "connecting": return "connecting…";
       case "failed": return "failed";
+      case "needs_auth": return "sign-in required";
+      case "authorizing": return "signing in…";
       default: return "idle";
     }
   }

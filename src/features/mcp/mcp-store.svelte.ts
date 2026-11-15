@@ -171,6 +171,18 @@ class McpStore {
     return this.run(commands.reconnectMcpServer(id));
   }
 
+  signIn(id: string) {
+    return this.run(commands.mcpSignIn(id));
+  }
+
+  cancelSignIn(id: string) {
+    return this.run(commands.mcpCancelSignIn(id));
+  }
+
+  signOut(id: string) {
+    return this.run(commands.mcpSignOut(id));
+  }
+
   setToolPolicy(serverId: string, tool: string, policy: ToolPolicy) {
     return this.run(commands.setMcpToolPolicy(serverId, tool, policy));
   }

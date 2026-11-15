@@ -9,13 +9,13 @@ description = "UI-independent agent runtime: providers, MCP, policy, storage, or
 [features]
 default = ["native-secrets", "mcp"]
 native-secrets = ["dep:keyring-core", "dep:apple-native-keyring-store", "dep:windows-native-keyring-store"]
-mcp = ["dep:rmcp", "dep:process-wrap"]
+mcp = ["dep:rmcp", "dep:process-wrap", "dep:async-trait"]
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync", "time", "rt", "macros", "process", "fs"] }
+tokio = { workspace = true, features = ["sync", "time", "rt", "macros", "process", "fs", "net", "io-util"] }
 tokio-util.workspace = true
 tracing.workspace = true
 uuid = { workspace = true, features = ["v4", "serde"] }
@@ -31,7 +31,10 @@ rmcp = { version = "3.6.0", default-features = false, features = [
     "transport-child-process",
     "transport-streamable-http-client-reqwest",
     "which-command",
+    "auth",
 ], optional = true }
+# rmcp's `CredentialStore` is an `async_trait`; already in the lockfile via rmcp.
+async-trait = { version = "0.1.92", optional = true }
 # Process-group / job-object wrappers so spawned MCP servers are killed wholesale,
 # including grandchildren (`npx` -> `node`), on disconnect or app exit.
 process-wrap = { version = "=10.0.1", default-features = false, features = [

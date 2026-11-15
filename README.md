@@ -109,8 +109,8 @@ To update, download and install the newer release; your data in `~/.opengent` is
 
 OpenGent is **pre-1.0** and under active development. Installers for macOS and Windows are on
 the [Releases](https://github.com/samkerrcode/opengent/releases) page, and both platforms are
-verified by hand. Phases 0–3 of the [roadmap](#roadmap) are complete and Phase 4 (OAuth for
-MCP servers) is next. Installers are unsigned until signing and notarization land in Phase 7.
+verified by hand. Phases 0–4 of the [roadmap](#roadmap) are complete and Phase 5 (native
+providers) is in progress. Installers are unsigned until signing and notarization land in Phase 7.
 Versioning and the release process are described in [docs/releasing.md](docs/releasing.md).
 
 ## Roadmap
@@ -125,7 +125,7 @@ detailed in [CHANGELOG.md](CHANGELOG.md); shipped features are documented in
 | **1 – Workspace & persistence** | SQLite (WAL) chat history, search, attachments as immutable content-hashed snapshots, restart recovery, command palette, inspector panel | ✅ Done (command palette and inspector deferred) |
 | **2 – Custom/local providers** | OpenAI-compatible Chat Completions streaming, provider/model settings, capability flags, incremental sanitized Markdown, context limits. *First usable chat.* | ✅ Done |
 | **3 – MCP agent** | stdio + Streamable HTTP servers, tool discovery, Allow / Ask / Disable permissions, approval UI, full loop: model → approval → tool → result → model. *Agent alpha.* | ✅ Done |
-| **4 – OAuth** | Browser sign-in (authorization code + PKCE, U2M) and client credentials (M2M) for MCP servers; token lifecycle in the keychain | Next |
+| **4 – OAuth** | Browser sign-in (authorization code + PKCE, U2M) and client credentials (M2M) for MCP servers; token lifecycle in the keychain | ✅ Done |
 | **5 – Native providers** | One adapter per vendor protocol, each shipped independently — see [Native providers](#native-providers) | In progress (Gemini, OpenAI, Anthropic done; xAI next) |
 | **6 – Provider context & caching** | Provider-aware prompt caching (OpenAI `prompt_cache_key`, Anthropic `cache_control`), cross-provider context projection, summarization checkpoints | |
 | **7 – Release hardening** | Performance profiling, accessibility, export/import, signing & notarization, installers | |
@@ -173,7 +173,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how proposals are approved.
   built-in tools or images inside tool results yet) and Anthropic (API key; no Bedrock/Vertex,
   Anthropic built-in tools or prompt caching yet). The remaining native adapters — xAI
   first — arrive during [Phase 5](#native-providers).
-- MCP servers that need OAuth sign-in can't connect until Phase 4.
 - Scheduled runs only fire while the app is open.
 - Installers are unsigned, so macOS and Windows warn on first launch (see [Install](#install)).
 

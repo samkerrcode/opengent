@@ -24,7 +24,10 @@ import type { SecretProbe } from "$lib/generated/bindings/SecretProbe";
 import type { TlsMode } from "$lib/generated/bindings/TlsMode";
 import type { ApprovalDecision } from "$lib/generated/bindings/ApprovalDecision";
 import type { KeyValueInput } from "$lib/generated/bindings/KeyValueInput";
+import type { McpAuth } from "$lib/generated/bindings/McpAuth";
+import type { McpAuthInput } from "$lib/generated/bindings/McpAuthInput";
 import type { McpServerInput } from "$lib/generated/bindings/McpServerInput";
+import type { McpServerStatus } from "$lib/generated/bindings/McpServerStatus";
 import type { McpServerView } from "$lib/generated/bindings/McpServerView";
 import type { McpTransport } from "$lib/generated/bindings/McpTransport";
 import type { PermissionScope } from "$lib/generated/bindings/PermissionScope";
@@ -73,7 +76,10 @@ export type {
   KindSpec,
   ProviderKind,
   ProviderPreset,
+  McpAuth,
+  McpAuthInput,
   McpServerInput,
+  McpServerStatus,
   McpServerView,
   McpTransport,
   PermissionScope,
@@ -161,6 +167,10 @@ export const commands = {
   setMcpServerEnabled: (id: string, enabled: boolean) =>
     invoke<void>("set_mcp_server_enabled", { id, enabled }),
   reconnectMcpServer: (id: string) => invoke<void>("reconnect_mcp_server", { id }),
+  /** Starts a browser sign-in in the background; progress arrives as status changes. */
+  mcpSignIn: (id: string) => invoke<void>("mcp_sign_in", { id }),
+  mcpCancelSignIn: (id: string) => invoke<void>("mcp_cancel_sign_in", { id }),
+  mcpSignOut: (id: string) => invoke<void>("mcp_sign_out", { id }),
   setMcpToolPolicy: (serverId: string, tool: string, policy: ToolPolicy) =>
     invoke<void>("set_mcp_tool_policy", { serverId, tool, policy }),
   setMcpDefaultPolicy: (serverId: string, policy: ToolPolicy) =>

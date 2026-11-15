@@ -11,6 +11,7 @@
   import ToolAccessBadge from "$features/mcp/ToolAccessBadge.svelte";
   import ToolPolicySelect from "$features/mcp/ToolPolicySelect.svelte";
   import { allowedSummary, ownAccess, snapshotAccess, toolOn, toolPolicy, withTool } from "$features/mcp/permissions";
+  import { statusText } from "$features/mcp/connection";
   import {
     describeError,
     type Agent,
@@ -231,7 +232,7 @@
                   {#if !s.enabled}
                     disabled in Connections
                   {:else}
-                    {s.status.kind === "connected" ? `${s.tools.length} tools` : s.tools.length ? `${s.status.kind} · last seen ${s.tools.length} tools` : s.status.kind}
+                    {s.status.kind === "connected" ? `${s.tools.length} tools` : s.tools.length ? `${statusText(s)} · last seen ${s.tools.length} tools` : statusText(s)}
                   {/if}
                 </span>
                 {#if cur?.on}

@@ -80,6 +80,10 @@ Contributor guidelines: see CONTRIBUTING.md. Security scope: SECURITY.md.
   (drop the base URL/model for real Anthropic).
 - `node scripts/dev/mock-mcp-server.mjs` – fake MCP server (tools: echo, add, get_time, fail, slow).
   Stdio by default (use `node <abs path>` as a stdio command); `--http 8788` serves Streamable HTTP at `/mcp`; `--many 50` adds filler tools for on-demand loading tests.
+  `--http 8788 --oauth` requires a bearer token and serves the OAuth flow on the same origin (metadata, DCR,
+  auto-approving `/authorize`, `/token`); add `--no-dcr` (any Client ID works), `--expires-in N`, `--reject-refresh`.
+  Client credentials: `mock-client` / `mock-secret`. The automated equivalent is `crates/agent-core/tests/mcp_oauth.rs`
+  (in-process mock; renewal test takes ~8 s).
 
 ## Conventions
 

@@ -123,6 +123,38 @@ pub async fn reconnect_mcp_server(state: State<'_, AppState>, id: String) -> Res
     Ok(())
 }
 
+/// Starts a browser sign-in for an OAuth connection in the background. The authorization
+/// page opens in the system browser (Rust-side, so the webview never sees the URL or any
+/// token); progress and the outcome arrive as status changes via `mcp-changed`.
+#[tauri::command]
+pub fn mcp_sign_in(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), Error> {
+    known_server(&state, &id)?;
+    let manager = state.mcp.clone();
+    tauri::async_runtime::spawn(async move {
+        let open = move |url: &str| {
+            use tauri_plugin_opener::OpenerExt;
+            app.opener()
+                .open_url(url, None::<&str>)
+                .map_err(|e| format!("couldn't open the browser: {e}"))
+        };
+        if let Err(e) = manager.sign_in(&id, open).await {
+            tracing::debug!(server = %id, "MCP sign-in ended: {e}");
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn mcp_cancel_sign_in(state: State<'_, AppState>, id: String) {
+    state.mcp.cancel_sign_in(&id);
+}
+
+/// Forgets the connection's OAuth tokens and disconnects it.
+#[tauri::command]
+pub fn mcp_sign_out(state: State<'_, AppState>, id: String) -> Result<(), Error> {
+    state.mcp.sign_out(&id)
+}
+
 #[tauri::command]
 pub fn set_mcp_tool_policy(
     state: State<'_, AppState>,

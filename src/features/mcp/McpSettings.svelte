@@ -2,6 +2,7 @@
   import { mcpStore } from "./mcp-store.svelte";
   import ToolAccessBadge from "./ToolAccessBadge.svelte";
   import ToolPolicySelect from "./ToolPolicySelect.svelte";
+  import { authForm, authInput, blankAuth, redirectUri, statusText, type AuthForm } from "./connection";
   import {
     describeError,
     type KeyValueInput,
@@ -23,6 +24,7 @@
     env: KeyValueInput[];
     url: string;
     headers: KeyValueInput[];
+    auth: AuthForm;
     default_policy: ToolPolicy;
     call_timeout_secs: string;
   };
@@ -42,7 +44,7 @@
   let showImport = $state(false);
 
   function blankForm(): Form {
-    return { id: null, name: "", transport: "stdio", command: "", cwd: "", env: [], url: "", headers: [], default_policy: "ask", call_timeout_secs: "120" };
+    return { id: null, name: "", transport: "stdio", command: "", cwd: "", env: [], url: "", headers: [], auth: blankAuth(), default_policy: "ask", call_timeout_secs: "120" };
   }
 
   function startNew() {
@@ -64,6 +66,7 @@
       env: s.env.map((e) => ({ name: e.name, value: e.secret ? "" : e.value, secret: e.secret })),
       url: s.url,
       headers: s.headers.map((e) => ({ name: e.name, value: e.secret ? "" : e.value, secret: e.secret })),
+      auth: authForm(s.auth),
       default_policy: s.default_policy,
       call_timeout_secs: String(s.call_timeout_secs),
     };
@@ -83,6 +86,7 @@
       cwd: f.transport === "stdio" ? f.cwd.trim() || null : null,
       url: f.transport === "streamable_http" ? f.url : "",
       headers: f.transport === "streamable_http" ? f.headers.filter((e) => e.name.trim()) : [],
+      auth: f.transport === "streamable_http" ? authInput(f.auth) : { kind: "none" },
       default_policy: f.default_policy,
       call_timeout_secs: Number.isFinite(timeout) && timeout > 0 ? timeout : 120,
     };
@@ -140,6 +144,8 @@
       } else if (s?.status.kind === "connected") {
         const n = s.tools.length;
         notice = { ok: true, text: `Saved and connected · ${n} tool${n === 1 ? "" : "s"} discovered${n ? " — set their permissions below." : "."}` };
+      } else if (s?.status.kind === "needs_auth") {
+        notice = { ok: true, text: "Saved. Sign in to connect." };
       } else {
         notice = { ok: false, text: "Saved, but the connection failed — see the error above." };
       }
@@ -183,16 +189,6 @@
       notice = { ok: false, text: describeError(e) };
     } finally {
       busy = false;
-    }
-  }
-
-  function statusText(s: McpServerView): string {
-    if (!s.enabled) return "disabled";
-    switch (s.status.kind) {
-      case "connected": return `${s.status.tool_count} tools`;
-      case "connecting": return "connecting…";
-      case "failed": return "failed";
-      default: return "idle";
     }
   }
 
@@ -250,7 +246,17 @@
                   Not connected and not offered to any chat or agent.
                 {/if}
               </span>
-              {#if current.enabled}
+              {#if current.enabled && current.auth.kind === "oauth_user"}
+                {#if current.status.kind === "authorizing"}
+                  <button class="btn-ghost btn-sm" onclick={() => act(mcpStore.cancelSignIn(current.id))}>Cancel sign-in</button>
+                {:else if current.signed_in}
+                  <span class="signed" title="Tokens are stored in the system credential store">Signed in</span>
+                  <button class="btn-ghost btn-sm" onclick={() => act(mcpStore.signOut(current.id))} disabled={busy}>Sign out</button>
+                {:else}
+                  <button class="btn-outline btn-sm" onclick={() => act(mcpStore.signIn(current.id))} disabled={busy}>Sign in</button>
+                {/if}
+              {/if}
+              {#if current.enabled && current.status.kind !== "authorizing"}
                 <button class="btn-ghost btn-sm" onclick={() => act(mcpStore.reconnect(current.id))} disabled={busy || current.status.kind === "connecting"}>Reconnect</button>
               {/if}
             </div>
@@ -259,6 +265,13 @@
               {#if current.stderr_tail.length}
                 <pre class="stderr selectable">{current.stderr_tail.slice(-8).join("\n")}</pre>
               {/if}
+            {:else if current.enabled && current.status.kind === "needs_auth"}
+              <div class="result info" role="status">
+                <span>{current.status.reason ?? "Sign in with your browser to connect."}</span>
+                <button class="btn-outline btn-sm" onclick={() => act(mcpStore.signIn(current.id))} disabled={busy}>Sign in</button>
+              </div>
+            {:else if current.enabled && current.status.kind === "authorizing"}
+              <p class="result ok" role="status">Finish signing in in your browser. This page updates when you're done.</p>
             {/if}
           {/if}
 
@@ -302,6 +315,47 @@
               <span>URL <small>(Streamable HTTP endpoint, e.g. https://host/mcp)</small></span>
               <input type="url" bind:value={editing.url} placeholder="https://example.com/mcp" />
             </label>
+            <fieldset class="kvs">
+              <legend>Authentication</legend>
+              <select bind:value={editing.auth.kind} aria-label="Authentication method">
+                <option value="none">None — or credentials in headers below</option>
+                <option value="oauth_user">OAuth — sign in with browser</option>
+                <option value="oauth_client_credentials">OAuth — client credentials (no browser)</option>
+              </select>
+              {#if editing.auth.kind !== "none"}
+                {@const cc = editing.auth.kind === "oauth_client_credentials"}
+                <div class="row2">
+                  <label>
+                    <span>Client ID <small>{cc ? "(required)" : "(optional — registers automatically if blank)"}</small></span>
+                    <input type="text" bind:value={editing.auth.client_id} spellcheck="false" autocomplete="off" />
+                  </label>
+                  <label>
+                    <span>Client secret <small>{cc ? "(required)" : "(optional)"}</small></span>
+                    <input type="password" bind:value={editing.auth.client_secret} autocomplete="off" placeholder={editing.auth.has_client_secret ? "saved — blank keeps it" : ""} />
+                  </label>
+                </div>
+                <div class="row2">
+                  <label>
+                    <span>Scopes <small>(space-separated, optional)</small></span>
+                    <input type="text" bind:value={editing.auth.scopes} spellcheck="false" placeholder={cc ? "" : "server default"} />
+                  </label>
+                  {#if !cc}
+                    <label>
+                      <span>Callback port <small>(optional)</small></span>
+                      <input type="text" inputmode="numeric" bind:value={editing.auth.redirect_port} placeholder="any free port" />
+                    </label>
+                  {/if}
+                </div>
+                <p class="phint">
+                  {#if cc}
+                    The client ID and secret are exchanged for a token directly; the secret is kept in the system credential store.
+                  {:else}
+                    Redirect URI: <code class="selectable">{redirectUri(editing.auth.redirect_port)}</code> — set a fixed port if your
+                    authorization server needs the exact URI registered. Tokens are kept in the system credential store.
+                  {/if}
+                </p>
+              {/if}
+            </fieldset>
             <fieldset class="kvs">
               <legend>Headers <small>(mark secrets like tokens — stored in the keychain)</small></legend>
               {#each editing.headers as e, i (i)}
@@ -422,7 +476,7 @@
   .dialog { width: min(860px, calc(100vw - 48px)); height: min(620px, calc(100vh - 48px)); background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-xl); box-shadow: var(--shadow-2); display: flex; flex-direction: column; overflow: hidden; outline: none; }
   .head { display: flex; align-items: center; justify-content: space-between; padding: var(--space-4) var(--space-5); border-bottom: 1px solid var(--border); }
   h2 { margin: 0; font-size: 16px; font-weight: 600; }
-  .body { display: grid; grid-template-columns: 260px 1fr; flex: 1; min-height: 0; }
+  .body { display: grid; grid-template-columns: 260px minmax(0, 1fr); flex: 1; min-height: 0; }
   .list { border-right: 1px solid var(--border); padding: var(--space-3); display: flex; flex-direction: column; gap: 4px; overflow-y: auto; background: var(--bg); }
   .item { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 8px 10px; text-align: left; width: 100%; }
   .item:hover { background: var(--bg-hover); }
@@ -434,7 +488,7 @@
   .glabel { font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--fg-faint); }
   .global select { font-size: 12px; padding: 5px 8px; }
   .ghint { margin: 0; font-size: 11.5px; color: var(--fg-faint); line-height: 1.45; }
-  .form { padding: var(--space-5); display: flex; flex-direction: column; gap: var(--space-3); overflow-y: auto; }
+  .form { padding: var(--space-5); display: flex; flex-direction: column; gap: var(--space-3); overflow-y: auto; min-width: 0; }
   label { display: grid; gap: 6px; font-size: 13px; color: var(--fg-muted); }
   label small, .kvs legend small { color: var(--fg-faint); font-weight: normal; }
   .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); align-items: end; }
@@ -465,10 +519,14 @@
   .tname small { color: var(--fg-faint); font-family: var(--font-mono); font-size: 11px; }
   .warn { flex: none; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--warning); border: 1px solid var(--warning); border-radius: var(--radius-sm); padding: 0 4px; }
   .phint { margin: 0; font-size: 11.5px; color: var(--fg-faint); line-height: 1.45; }
-  .result { margin: 0; padding: 8px 10px; border-radius: var(--radius-md); font-size: 13px; }
+  .result { margin: 0; padding: 8px 10px; border-radius: var(--radius-md); font-size: 13px; overflow-wrap: anywhere; }
   .result.ok { background: var(--accent-soft); }
   .result.bad { background: var(--danger-soft); color: var(--danger); }
-  .stderr { margin: 0; font-size: 11px; color: var(--fg-faint); max-height: 100px; overflow-y: auto; white-space: pre-wrap; }
+  .result.info { display: flex; align-items: center; gap: var(--space-3); background: var(--bg); border: 1px solid var(--border); color: var(--fg-muted); }
+  .result.info span { flex: 1; min-width: 0; }
+  .signed { flex: none; font-size: 11.5px; color: var(--fg-faint); }
+  .phint code { font-size: 11px; overflow-wrap: anywhere; }
+  .stderr { margin: 0; font-size: 11px; color: var(--fg-faint); max-height: 100px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
   .actions { display: flex; gap: var(--space-2); align-items: center; margin-top: auto; padding-top: var(--space-3); }
   .spacer { flex: 1; }
   .placeholder { margin: auto; max-width: 42ch; text-align: center; display: grid; gap: var(--space-3); justify-items: center; }

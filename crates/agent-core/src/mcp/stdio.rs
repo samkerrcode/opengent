@@ -238,6 +238,7 @@ mod tests {
             cwd: None,
             url: String::new(),
             headers: vec![],
+            auth: Default::default(),
             default_policy: crate::domain::ToolPolicy::Ask,
             tool_policies: HashMap::new(),
             call_timeout_secs: 60,

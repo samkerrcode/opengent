@@ -5,12 +5,16 @@
 //! Status changes are pushed to the host through an `on_change` callback (the Tauri layer
 //! emits an app event; the UI refetches `list_mcp_servers`).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use rmcp::model::{CallToolRequestParams, ClientConfig};
 use rmcp::service::{NotificationContext, Peer, RunningService};
+use rmcp::transport::auth::{
+    AuthClient, AuthError, AuthorizationManager, AuthorizationRequest, AuthorizationSession,
+    ClientCredentialsConfig, OAuthClientConfig,
+};
 use rmcp::transport::streamable_http_client::{
     StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
 };
@@ -23,13 +27,19 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 
-use super::config::{KnownTool, McpServerConfig, McpStore, McpTransport};
+use super::config::{KnownTool, McpAuth, McpServerConfig, McpStore, McpTransport};
+use super::oauth::{
+    browser_url_allowed, build_manager, classify_auth, classify_init, classify_service,
+    token_remaining, url_state, AuthContext, Classified, Failure, KeychainCredentialStore,
+    LoopbackCallback,
+};
 use super::permissions::{PermissionScope, PinSource, ScopePolicies};
 use super::{client_config, StdioServerSpec};
 use crate::agent::context::{estimate_tokens, tools_prompt, ServerBrief};
 use crate::agent::tools::{
     resolve_on_demand, RunTools, ToolEntry, ToolFuture, ToolHost, ToolNamer, ToolOutput,
 };
+use crate::config::product;
 use crate::domain::{Message, ToolAccess, ToolPolicy};
 use crate::providers::ToolSpec;
 
@@ -84,6 +94,13 @@ pub enum McpServerStatus {
     Failed {
         error: String,
     },
+    /// Browser sign-in is required (no tokens, or they expired or were rejected). `reason`
+    /// explains why when it isn't simply the first sign-in.
+    NeedsAuth {
+        reason: Option<String>,
+    },
+    /// A sign-in is open in the browser; waiting for the redirect.
+    Authorizing,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -117,6 +134,8 @@ pub struct McpServerView {
     pub tools_cached: bool,
     /// Recent stderr lines for stdio servers that failed to start.
     pub stderr_tail: Vec<String>,
+    /// Browser sign-in connections: tokens are stored (as of the last connect or sign-in).
+    pub signed_in: bool,
 }
 
 struct Live {
@@ -134,6 +153,72 @@ struct Inner {
     /// Bumped on every connect/disconnect so a slow handshake finishing late can't install
     /// a session for a server that was disabled, deleted or reconnected meanwhile.
     epochs: HashMap<String, u64>,
+    /// Browser sign-in servers with stored tokens, tracked here so `list_views` never
+    /// reads the keychain.
+    signed_in: HashSet<String>,
+    /// The open sign-in per server; cancelled by a new sign-in, sign-out or disconnect.
+    sign_ins: HashMap<String, CancellationToken>,
+    /// Last `WWW-Authenticate` challenge per server, seeding the next sign-in's discovery.
+    challenges: HashMap<String, String>,
+    /// Serialises token refreshes per server across authorization managers.
+    refresh_locks: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
+}
+
+/// A connected session plus what `connect` installs alongside it.
+struct Established {
+    live: Live,
+    tool_changed_rx: mpsc::UnboundedReceiver<Peer<RoleClient>>,
+    renewal: Option<Renewal>,
+}
+
+/// Client-credentials token renewal: there is no refresh token, so the client re-exchanges
+/// its credentials shortly before the token expires.
+struct Renewal {
+    manager: Arc<tokio::sync::Mutex<AuthorizationManager>>,
+    config: ClientCredentialsConfig,
+    remaining: Option<Duration>,
+}
+
+/// Re-exchange client credentials this long before expiry — beyond rmcp's own 30 s
+/// "nearly expired" window, in which it would stop sending the token.
+const RENEW_MARGIN: Duration = Duration::from_secs(60);
+const MIN_RENEW_DELAY: Duration = Duration::from_secs(5);
+/// How long a browser sign-in waits for the redirect.
+const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn renew_delay(remaining: Duration) -> Duration {
+    remaining.saturating_sub(RENEW_MARGIN).max(MIN_RENEW_DELAY)
+}
+
+/// `expires_in` of a token response, read through serde to avoid depending on `oauth2`.
+fn expires_in<T: Serialize>(token: &T) -> Option<Duration> {
+    serde_json::to_value(token)
+        .ok()?
+        .get("expires_in")?
+        .as_u64()
+        .map(Duration::from_secs)
+}
+
+/// Runs an OAuth step under the connect timeout, classifying its error.
+async fn oauth_step<T>(
+    fut: impl std::future::Future<Output = std::result::Result<T, AuthError>>,
+    ctx: AuthContext,
+) -> std::result::Result<T, Classified> {
+    tokio::time::timeout(CONNECT_TIMEOUT, fut)
+        .await
+        .map_err(|_| {
+            Classified::failed(format!(
+                "the authorization server didn't respond within {CONNECT_TIMEOUT:?}"
+            ))
+        })?
+        .map_err(|e| classify_auth(&e, ctx))
+}
+
+fn failure_text(c: Classified) -> String {
+    match c.failure {
+        Failure::Failed(m) => m,
+        Failure::NeedsAuth(r) => r.unwrap_or_else(|| "authorization was refused".into()),
+    }
 }
 
 /// sha256 over the fields that define what a tool does. `AlwaysAllow` grants record the
@@ -518,9 +603,15 @@ impl McpManager {
             .iter()
             .filter(|c| c.enabled)
             .filter(|c| {
+                // A sign-in only happens when the user starts one, so it never blocks.
                 !matches!(
                     inner.status.get(&c.id),
-                    Some(McpServerStatus::Connected { .. } | McpServerStatus::Failed { .. })
+                    Some(
+                        McpServerStatus::Connected { .. }
+                            | McpServerStatus::Failed { .. }
+                            | McpServerStatus::NeedsAuth { .. }
+                            | McpServerStatus::Authorizing
+                    )
                 )
             })
             .count()
@@ -533,6 +624,9 @@ impl McpManager {
             let mut inner = self.inner.lock().expect("mcp lock");
             inner.epochs.clear();
             inner.status.clear();
+            for (_, c) in inner.sign_ins.drain() {
+                c.cancel();
+            }
             inner.live.drain().map(|(_, l)| l).collect()
         };
         for live in lives {
@@ -598,6 +692,8 @@ impl McpManager {
                                 .collect()
                         })
                         .unwrap_or_default(),
+                    signed_in: matches!(config.auth, McpAuth::OauthUser { .. })
+                        && inner.signed_in.contains(&config.id),
                     config,
                 }
             })
@@ -635,6 +731,9 @@ impl McpManager {
             let mut inner = self.inner.lock().expect("mcp lock");
             *inner.epochs.entry(id.to_owned()).or_insert(0) += 1;
             inner.status.remove(id);
+            if let Some(sign_in) = inner.sign_ins.remove(id) {
+                sign_in.cancel();
+            }
             inner.live.remove(id)
         };
         if let Some(live) = live {
@@ -665,7 +764,11 @@ impl McpManager {
         self.set_status(id, McpServerStatus::Connecting);
 
         match self.establish(&config, epoch).await {
-            Ok((live, tool_changed_rx)) => {
+            Ok(Established {
+                live,
+                tool_changed_rx,
+                renewal,
+            }) => {
                 if !self.is_current(id, epoch)
                     || !self.store.get(id).map(|c| c.enabled).unwrap_or(false)
                 {
@@ -679,11 +782,14 @@ impl McpManager {
                     self.record_catalog(id, &tools);
                     tools.len() as u32
                 };
-                self.inner
-                    .lock()
-                    .expect("mcp lock")
-                    .live
-                    .insert(id.to_owned(), Arc::clone(&live));
+                {
+                    let mut inner = self.inner.lock().expect("mcp lock");
+                    inner.live.insert(id.to_owned(), Arc::clone(&live));
+                    if matches!(config.auth, McpAuth::OauthUser { .. }) {
+                        inner.signed_in.insert(id.to_owned());
+                    }
+                    inner.challenges.remove(id);
+                }
                 self.set_status(id, McpServerStatus::Connected { tool_count: count });
                 self.spawn_watchdog(id.to_owned(), Arc::clone(&live));
                 self.spawn_tool_change_listener(
@@ -691,13 +797,280 @@ impl McpManager {
                     Arc::downgrade(&live),
                     tool_changed_rx,
                 );
+                if let Some(renewal) = renewal {
+                    self.spawn_renewal(id.to_owned(), Arc::downgrade(&live), renewal);
+                }
             }
-            Err(error) => {
-                if self.is_current(id, epoch) {
-                    self.set_status(id, McpServerStatus::Failed { error });
+            Err(classified) => {
+                if !self.is_current(id, epoch) {
+                    return;
+                }
+                let status = {
+                    let mut inner = self.inner.lock().expect("mcp lock");
+                    if let Some(challenge) = classified.challenge {
+                        inner.challenges.insert(id.to_owned(), challenge);
+                    }
+                    match classified.failure {
+                        Failure::NeedsAuth(reason) => {
+                            inner.signed_in.remove(id);
+                            McpServerStatus::NeedsAuth { reason }
+                        }
+                        Failure::Failed(error) => McpServerStatus::Failed { error },
+                    }
+                };
+                self.set_status(id, status);
+            }
+        }
+    }
+
+    /// Whether `live` is still the installed session for `id`.
+    fn is_live(&self, id: &str, live: &Arc<Live>) -> bool {
+        self.inner
+            .lock()
+            .expect("mcp lock")
+            .live
+            .get(id)
+            .is_some_and(|cur| Arc::ptr_eq(cur, live))
+    }
+
+    /// Drops `live` if it is still installed and marks the server `Failed`.
+    fn fail_session(&self, id: &str, live: &Arc<Live>, error: String) {
+        let removed = {
+            let mut inner = self.inner.lock().expect("mcp lock");
+            match inner.live.get(id) {
+                Some(cur) if Arc::ptr_eq(cur, live) => inner.live.remove(id).is_some(),
+                _ => false,
+            }
+        };
+        if removed {
+            live.service.cancellation_token().cancel();
+            self.set_status(id, McpServerStatus::Failed { error });
+        }
+    }
+
+    /// Re-exchanges client credentials before each token expires, for as long as the
+    /// session it belongs to is installed. A failed renewal ends the session.
+    fn spawn_renewal(self: &Arc<Self>, id: String, live: Weak<Live>, renewal: Renewal) {
+        let this = Arc::clone(self);
+        self.handle.spawn(async move {
+            let Renewal {
+                manager,
+                config,
+                mut remaining,
+            } = renewal;
+            while let Some(left) = remaining {
+                tokio::time::sleep(renew_delay(left)).await;
+                let Some(live) = live.upgrade() else { return };
+                if !this.is_live(&id, &live) {
+                    return;
+                }
+                let ctx = AuthContext::new(
+                    &this.store.get(&id).map(|c| c.auth).unwrap_or(McpAuth::None),
+                    false,
+                    true,
+                );
+                let renewed = oauth_step(
+                    async {
+                        manager
+                            .lock()
+                            .await
+                            .exchange_client_credentials(&config)
+                            .await
+                    },
+                    ctx,
+                )
+                .await;
+                match renewed {
+                    Ok(token) => remaining = expires_in(&token),
+                    Err(c) => {
+                        this.fail_session(&id, &live, failure_text(c));
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    fn credential_store(&self, id: &str) -> KeychainCredentialStore {
+        let lock = Arc::clone(
+            self.inner
+                .lock()
+                .expect("mcp lock")
+                .refresh_locks
+                .entry(id.to_owned())
+                .or_default(),
+        );
+        KeychainCredentialStore::new(self.store.secrets(), id, lock)
+    }
+
+    /// Runs a browser sign-in for an `OauthUser` server: opens the authorization page via
+    /// `open`, waits (up to 5 minutes) for the loopback redirect, stores the tokens and
+    /// connects. Only ever user-initiated. A new sign-in, sign-out, disconnect or
+    /// `shutdown` cancels it; the outcome is reflected in the server's status too.
+    pub async fn sign_in(
+        self: &Arc<Self>,
+        id: &str,
+        open: impl FnOnce(&str) -> std::result::Result<(), String> + Send,
+    ) -> std::result::Result<(), String> {
+        let config = self.store.get(id).map_err(|e| e.to_string())?;
+        if !matches!(config.auth, McpAuth::OauthUser { .. }) {
+            return Err("this connection doesn't use browser sign-in".into());
+        }
+        if !config.enabled {
+            return Err("turn the connection on first".into());
+        }
+        // Drops any session and cancels an earlier sign-in or in-flight connect.
+        self.disconnect(id);
+        let epoch = self.next_epoch(id);
+        let cancel = CancellationToken::new();
+        self.inner
+            .lock()
+            .expect("mcp lock")
+            .sign_ins
+            .insert(id.to_owned(), cancel.clone());
+        self.set_status(id, McpServerStatus::Authorizing);
+
+        let result = self.authorize(&config, &cancel, open).await;
+        if !self.is_current(id, epoch) {
+            return Err("sign-in was cancelled".into());
+        }
+        {
+            let mut inner = self.inner.lock().expect("mcp lock");
+            inner.sign_ins.remove(id);
+            match &result {
+                Ok(()) => {
+                    inner.signed_in.insert(id.to_owned());
+                    inner.challenges.remove(id);
+                }
+                Err(error) => {
+                    let reason = (!cancel.is_cancelled()).then(|| error.clone());
+                    inner
+                        .status
+                        .insert(id.to_owned(), McpServerStatus::NeedsAuth { reason });
                 }
             }
         }
+        match result {
+            Ok(()) => self.connect(id).await,
+            Err(_) => self.notify(),
+        }
+        result
+    }
+
+    async fn authorize(
+        &self,
+        config: &McpServerConfig,
+        cancel: &CancellationToken,
+        open: impl FnOnce(&str) -> std::result::Result<(), String>,
+    ) -> std::result::Result<(), String> {
+        let McpAuth::OauthUser {
+            client_id,
+            scopes,
+            redirect_port,
+            ..
+        } = &config.auth
+        else {
+            return Err("this connection doesn't use browser sign-in".into());
+        };
+        let ctx = AuthContext::new(&config.auth, false, false);
+        let callback = LoopbackCallback::bind(*redirect_port).await?;
+        let mut manager = oauth_step(
+            build_manager(
+                &config.url,
+                self.http.clone(),
+                self.credential_store(&config.id),
+            ),
+            ctx,
+        )
+        .await
+        .map_err(failure_text)?;
+        let challenge = self
+            .inner
+            .lock()
+            .expect("mcp lock")
+            .challenges
+            .get(&config.id)
+            .cloned();
+        let resolution = oauth_step(
+            manager.resolve_metadata_from_challenge(challenge.as_deref()),
+            ctx,
+        )
+        .await
+        .map_err(failure_text)?;
+        manager.set_metadata(resolution.metadata);
+
+        let mut request = AuthorizationRequest::new(callback.redirect_uri())
+            .with_client_name(product().display_name);
+        if !scopes.is_empty() {
+            request = request.with_scopes(scopes.iter().cloned());
+        }
+        if let Some(client_id) = client_id {
+            request = request.with_preregistered_client(client_id);
+            if let Some(secret) = self
+                .store
+                .oauth_client_secret(config)
+                .map_err(|e| e.to_string())?
+            {
+                request = request.with_client_secret(secret);
+            }
+        }
+        let session = oauth_step(
+            async {
+                AuthorizationSession::new(manager, request)
+                    .await
+                    .map_err(|(_, e)| e)
+            },
+            ctx,
+        )
+        .await
+        .map_err(failure_text)?;
+
+        let auth_url = reqwest::Url::parse(session.get_authorization_url())
+            .map_err(|_| "the authorization server's sign-in address is invalid".to_owned())?;
+        if !browser_url_allowed(&auth_url) {
+            return Err(
+                "the authorization server's sign-in page isn't HTTPS; refusing to open it".into(),
+            );
+        }
+        let state = url_state(&auth_url)
+            .ok_or_else(|| "the sign-in request is missing its state parameter".to_owned())?;
+        open(auth_url.as_str())?;
+
+        let redirect = tokio::time::timeout(SIGN_IN_TIMEOUT, callback.wait(&state, cancel))
+            .await
+            .map_err(|_| "sign-in timed out — try again".to_owned())??;
+        oauth_step(session.handle_callback_url(&redirect), ctx)
+            .await
+            .map(|_| ())
+            .map_err(failure_text)
+    }
+
+    /// Cancels an open sign-in; the server goes back to "sign-in required".
+    pub fn cancel_sign_in(&self, id: &str) {
+        if let Some(c) = self.inner.lock().expect("mcp lock").sign_ins.get(id) {
+            c.cancel();
+        }
+    }
+
+    /// Forgets the server's tokens and disconnects it.
+    pub fn sign_out(&self, id: &str) -> crate::Result<()> {
+        self.disconnect(id);
+        self.store.clear_oauth_tokens(id)?;
+        let needs_auth = self
+            .store
+            .get(id)
+            .is_ok_and(|c| c.enabled && matches!(c.auth, McpAuth::OauthUser { .. }));
+        {
+            let mut inner = self.inner.lock().expect("mcp lock");
+            inner.signed_in.remove(id);
+            if needs_auth {
+                inner
+                    .status
+                    .insert(id.to_owned(), McpServerStatus::NeedsAuth { reason: None });
+            }
+        }
+        self.notify();
+        Ok(())
     }
 
     /// Marks the server `Failed` if its transport dies (server exit, network drop). Bound
@@ -795,18 +1168,20 @@ impl McpManager {
         &self,
         config: &McpServerConfig,
         epoch: u64,
-    ) -> std::result::Result<(Live, mpsc::UnboundedReceiver<Peer<RoleClient>>), String> {
+    ) -> std::result::Result<Established, Classified> {
         let (tool_changed_tx, tool_changed_rx) = mpsc::unbounded_channel::<Peer<RoleClient>>();
         let stderr = Arc::new(Mutex::new(VecDeque::<String>::new()));
         let handler = AppClientHandler {
             info: client_config(),
             tool_changed: tool_changed_tx,
         };
+        let failed = |e: crate::Error| Classified::failed(e.to_string());
+        let mut ctx = AuthContext::new(&McpAuth::None, false, false);
+        let mut renewal = None;
 
         let service = match config.transport {
             McpTransport::Stdio => {
-                let env =
-                    super::stdio::build_env(&self.store, config).map_err(|e| e.to_string())?;
+                let env = super::stdio::build_env(&self.store, config).map_err(failed)?;
                 // Known secret values, scrubbed from stderr before it reaches the log or UI.
                 let secrets = self.store.secret_values(config);
                 let spec = StdioServerSpec {
@@ -845,7 +1220,9 @@ impl McpManager {
                 let (transport, stderr_stream) = TokioChildProcess::builder(cmd)
                     .stderr(std::process::Stdio::piped())
                     .spawn()
-                    .map_err(|e| format!("failed to launch `{}`: {e}", spec.command))?;
+                    .map_err(|e| {
+                        Classified::failed(format!("failed to launch `{}`: {e}", spec.command))
+                    })?;
                 // Drain stderr into a bounded, redacted tail for diagnostics + the log.
                 if let Some(mut err) = stderr_stream {
                     let tail_buf = stderr.clone();
@@ -880,53 +1257,166 @@ impl McpManager {
                     .await
                     .map_err(|_| {
                         let tail = stderr.lock().expect("stderr lock");
-                        if tail.is_empty() {
+                        Classified::failed(if tail.is_empty() {
                             format!("handshake timed out after {CONNECT_TIMEOUT:?}")
                         } else {
                             format!(
                                 "handshake timed out after {CONNECT_TIMEOUT:?}: {}",
                                 tail.iter().cloned().collect::<Vec<_>>().join(" | ")
                             )
-                        }
+                        })
                     })?
-                    .map_err(|e| format!("handshake failed: {e}"))?
+                    .map_err(|e| classify_init(&e, ctx))?
             }
             McpTransport::StreamableHttp => {
-                let (_, headers) = self
-                    .store
-                    .resolved_entries(config)
-                    .map_err(|e| e.to_string())?;
+                let (_, headers) = self.store.resolved_entries(config).map_err(failed)?;
                 let mut cfg = StreamableHttpClientTransportConfig::with_uri(config.url.clone());
                 let mut map = HashMap::new();
                 for (k, v) in headers {
                     let name = k
                         .parse::<reqwest::header::HeaderName>()
-                        .map_err(|_| format!("invalid header name `{k}`"))?;
-                    let value = v
-                        .parse::<reqwest::header::HeaderValue>()
-                        .map_err(|_| format!("invalid header value for `{k}`"))?;
+                        .map_err(|_| Classified::failed(format!("invalid header name `{k}`")))?;
+                    let value = v.parse::<reqwest::header::HeaderValue>().map_err(|_| {
+                        Classified::failed(format!("invalid header value for `{k}`"))
+                    })?;
                     map.insert(name, value);
                 }
-                if !map.is_empty() {
+                let has_headers = !map.is_empty();
+                if has_headers {
                     cfg = cfg.custom_headers(map);
                 }
-                let transport = StreamableHttpClientTransport::with_client(self.http.clone(), cfg);
-                tokio::time::timeout(CONNECT_TIMEOUT, handler.serve(transport))
-                    .await
-                    .map_err(|_| format!("handshake timed out after {CONNECT_TIMEOUT:?}"))?
-                    .map_err(|e| format!("handshake failed: {e}"))?
+                let timed_out = |_| {
+                    Classified::failed(format!("handshake timed out after {CONNECT_TIMEOUT:?}"))
+                };
+                match &config.auth {
+                    McpAuth::None => {
+                        ctx = AuthContext::new(&config.auth, has_headers, false);
+                        let transport =
+                            StreamableHttpClientTransport::with_client(self.http.clone(), cfg);
+                        tokio::time::timeout(CONNECT_TIMEOUT, handler.serve(transport))
+                            .await
+                            .map_err(timed_out)?
+                            .map_err(|e| classify_init(&e, ctx))?
+                    }
+                    McpAuth::OauthUser { client_id, .. } => {
+                        let store = self.credential_store(&config.id);
+                        let had_tokens = store
+                            .load_sync()
+                            .map_err(failed)?
+                            .is_some_and(|c| c.token_response.is_some());
+                        ctx = AuthContext::new(&config.auth, has_headers, had_tokens);
+                        if !had_tokens {
+                            // Never contact the server (or open a browser) without a sign-in.
+                            return Err(Classified {
+                                failure: Failure::NeedsAuth(None),
+                                challenge: None,
+                            });
+                        }
+                        let mut manager =
+                            oauth_step(build_manager(&config.url, self.http.clone(), store), ctx)
+                                .await?;
+                        if !oauth_step(manager.initialize_from_store(), ctx).await? {
+                            return Err(Classified {
+                                failure: Failure::NeedsAuth(Some(
+                                    "The server's authorization server changed — sign in again."
+                                        .into(),
+                                )),
+                                challenge: None,
+                            });
+                        }
+                        // `initialize_from_store` restores a public client; re-apply the
+                        // secret of a pre-registered confidential client for refreshes.
+                        if let (Some(client_id), Some(secret)) = (
+                            client_id,
+                            self.store.oauth_client_secret(config).map_err(failed)?,
+                        ) {
+                            let (stored_id, _) = oauth_step(manager.get_credentials(), ctx).await?;
+                            if stored_id == *client_id {
+                                manager
+                                    .configure_client(
+                                        OAuthClientConfig::new(client_id, config.url.clone())
+                                            .with_client_secret(secret),
+                                    )
+                                    .map_err(|e| classify_auth(&e, ctx))?;
+                            }
+                        }
+                        let client = AuthClient::new(self.http.clone(), manager);
+                        let transport = StreamableHttpClientTransport::with_client(client, cfg);
+                        tokio::time::timeout(CONNECT_TIMEOUT, handler.serve(transport))
+                            .await
+                            .map_err(timed_out)?
+                            .map_err(|e| classify_init(&e, ctx))?
+                    }
+                    McpAuth::OauthClientCredentials {
+                        client_id, scopes, ..
+                    } => {
+                        ctx = AuthContext::new(&config.auth, has_headers, false);
+                        let secret = self
+                            .store
+                            .oauth_client_secret(config)
+                            .map_err(failed)?
+                            .ok_or_else(|| {
+                                Classified::failed(
+                                    "The client secret is missing — enter it under Authentication.",
+                                )
+                            })?;
+                        let cc = ClientCredentialsConfig::ClientSecret {
+                            client_id: client_id.clone(),
+                            client_secret: secret,
+                            scopes: scopes.clone(),
+                            resource: Some(config.url.clone()),
+                        };
+                        let store = self.credential_store(&config.id);
+                        let stored = store.load_sync().map_err(failed)?;
+                        let mut manager =
+                            oauth_step(build_manager(&config.url, self.http.clone(), store), ctx)
+                                .await?;
+                        let resolution = oauth_step(manager.resolve_metadata(), ctx).await?;
+                        manager.set_metadata(resolution.metadata);
+                        manager
+                            .validate_client_credentials_metadata(&cc)
+                            .and_then(|_| manager.configure_client_credentials(&cc))
+                            .map_err(|e| classify_auth(&e, ctx))?;
+                        // Reuse a stored token with enough life left; else exchange.
+                        let reusable = stored
+                            .filter(|s| s.client_id == *client_id && s.token_response.is_some())
+                            .and_then(|s| token_remaining(&s))
+                            .filter(|left| *left > RENEW_MARGIN);
+                        let remaining = match reusable {
+                            Some(left) => Some(left),
+                            None => {
+                                let token =
+                                    oauth_step(manager.exchange_client_credentials(&cc), ctx)
+                                        .await?;
+                                expires_in(&token)
+                            }
+                        };
+                        let client = AuthClient::new(self.http.clone(), manager);
+                        renewal = Some(Renewal {
+                            manager: Arc::clone(&client.auth_manager),
+                            config: cc,
+                            remaining,
+                        });
+                        let transport = StreamableHttpClientTransport::with_client(client, cfg);
+                        tokio::time::timeout(CONNECT_TIMEOUT, handler.serve(transport))
+                            .await
+                            .map_err(timed_out)?
+                            .map_err(|e| classify_init(&e, ctx))?
+                    }
+                }
             }
         };
 
+        let superseded = || Classified::failed("connect superseded");
         if !self.is_current(&config.id, epoch) {
-            return Err("connect superseded".into());
+            return Err(superseded());
         }
         let tools = tokio::time::timeout(CONNECT_TIMEOUT, service.list_all_tools())
             .await
-            .map_err(|_| "tools/list timed out".to_owned())?
-            .map_err(|e| format!("tools/list failed: {e}"))?;
+            .map_err(|_| Classified::failed("tools/list timed out"))?
+            .map_err(|e| classify_service(&e, ctx))?;
         if !self.is_current(&config.id, epoch) {
-            return Err("connect superseded".into());
+            return Err(superseded());
         }
         let info = service.peer_info();
         let server_info = info
@@ -936,8 +1426,8 @@ impl McpManager {
             .unwrap_or_else(|| config.name.clone());
         let instructions = info.as_ref().and_then(|i| i.instructions.clone());
 
-        Ok((
-            Live {
+        Ok(Established {
+            live: Live {
                 service,
                 tools: Mutex::new(tools),
                 server_info,
@@ -945,7 +1435,8 @@ impl McpManager {
                 stderr,
             },
             tool_changed_rx,
-        ))
+            renewal,
+        })
     }
 
     /// The run-facing snapshot: a catalog of non-blocked tools from connected, enabled
@@ -1218,6 +1709,7 @@ mod tests {
                 cwd: None,
                 url: String::new(),
                 headers: Vec::new(),
+                auth: Default::default(),
                 default_policy: ToolPolicy::Ask,
                 call_timeout_secs: 60,
             })

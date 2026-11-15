@@ -124,6 +124,14 @@ In every case:
 - Provider traffic originates in Rust, never the webview. API keys live in the OS keychain.
   HTTPS is required for non-loopback endpoints unless the user explicitly opts out, and
   redirects are never followed.
+- Remote MCP OAuth (sign-in and client credentials) runs in Rust. It contacts the server's
+  advertised authorization server for metadata, client registration and tokens, always
+  sends the MCP server URL as the token `resource`, and never follows redirects. Browser
+  sign-in uses PKCE and a temporary listener bound to `127.0.0.1` only, which accepts just
+  the redirect carrying the expected `state`, reflects nothing back, and closes after the
+  sign-in or 5 minutes. Tokens and client secrets live in the OS keychain (split into chunks
+  where the store limits entry size), never in `mcp.json`, SQLite, logs or IPC; the webview
+  never sees the authorization URL or a token.
 - MCP servers are separate from model providers: a tool call sends its arguments to that
   server, and tool results are sent to the model like any other message. A remote MCP server
   is a third party in its own right.

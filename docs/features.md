@@ -26,7 +26,7 @@ Each feature is described the same way:
 | | [Provider settings](#provider-settings) | Add, test and manage connections; keys go to the OS keychain |
 | | [Model list & hiding](#model-list--hiding) | Discovered models, per-model context windows, hide the ones you don't use |
 | | [Reasoning continuity](#reasoning-continuity) | A model's reasoning carries across tool calls |
-| [Tools](#tools-mcp-connections) | [Connections](#connections) | MCP servers over stdio or Streamable HTTP |
+| [Tools](#tools-mcp-connections) | [Connections](#connections) | MCP servers over stdio or Streamable HTTP, with OAuth sign-in or client credentials |
 | | [Tool permissions](#tool-permissions) | *Allow* / *Ask* / *Disable* per tool, enforced in Rust |
 | | [Scopes](#permission-scopes) | Defaults per connection, overrides per chat, own set per agent |
 | | [Approvals](#approvals) | Allow once / Always allow / Deny on a card showing the arguments |
@@ -335,13 +335,25 @@ proposes a call; your permissions decide whether it runs.
 | Kind | You provide | Example |
 |---|---|---|
 | Local command | Command, optional working directory and environment variables | `npx -y @modelcontextprotocol/server-everything` |
-| Remote server | URL, optional headers | `https://example.com/mcp` |
+| Remote server | URL, optional authentication and headers | `https://example.com/mcp` |
 
 - Paste a standard `{"mcpServers": {…}}` JSON config to prefill the form.
 - Mark an environment variable or header as *secret* to keep its value in the OS keychain.
 - **Save & test** saves, connects and reports "connected · N tools discovered" or the error.
-  **Save** alone reconnects only if the command, directory, environment, URL or headers
-  changed.
+  **Save** alone reconnects only if the command, directory, environment, URL, authentication
+  or headers changed.
+- **Authentication** (remote servers) — pick one:
+  - *None*: no sign-in, or credentials you add as headers (for example an
+    `Authorization: Bearer …` personal access token).
+  - *OAuth — sign in with browser*: press **Sign in**; the server's sign-in page opens in
+    your browser and the connection comes up when you approve. Leave **Client ID** blank to
+    let the app register itself with the server, or enter the ID (and secret, if the
+    server issued one) of an app you registered. **Scopes** narrows or widens what you
+    grant. **Callback port** fixes the redirect URI `http://127.0.0.1:<port>/callback` for
+    servers that need it registered exactly. **Sign out** forgets the sign-in.
+  - *OAuth — client credentials*: a client ID and secret are exchanged for a token without a
+    browser, for service accounts.
+  Custom headers stay available in every mode, except `Authorization` with OAuth.
 - The **Enabled** switch turns a connection off everywhere. To turn it off for a single chat
   or agent, use the ⚒ Tools menu instead (see [Scopes](#permission-scopes)).
 
@@ -351,8 +363,21 @@ its command, working directory or environment, must be confirmed in a native OS 
 server can never be installed silently. Local servers are stopped, along with any processes
 they started, when you disconnect or quit.
 
-**Limits.** Servers that require OAuth sign-in can't connect yet
-([Phase 4](../README.md#roadmap)). A local server runs with your user account's privileges —
+OAuth follows the MCP authorization spec: the app discovers the server's authorization
+server, uses PKCE, and receives the redirect on a temporary listener on `127.0.0.1` that
+closes after the sign-in (or after 5 minutes). Tokens and client secrets are kept in the OS
+credential store; signed-in connections reconnect at launch without a browser and refresh
+expired tokens on their own. A browser only ever opens when you press **Sign in** —
+startup, reconnects and scheduled runs never start one; a connection whose sign-in expired
+shows "sign-in required". Client-credentials tokens are renewed shortly before they expire.
+Errors are reported in one line, such as "This server requires authentication" with what to
+do next.
+
+**Limits.** OAuth endpoints that redirect aren't followed, and an authorization server on a
+private or loopback address is only accepted for a server on this machine. Client
+credentials support a client secret only (no signed-JWT client authentication) and need
+tokens that live longer than about a minute. When a server asks for more scopes, the message
+names them; add them and sign in again. A local server runs with your user account's privileges —
 permissions are a consent layer, not a sandbox, so only add servers you trust.
 
 ### Tool permissions
@@ -541,7 +566,7 @@ network traffic is to the providers and MCP servers you configure.
 | Chats, messages, agents, schedules | SQLite database in `~/.opengent` |
 | Attachments | `~/.opengent/attachments` |
 | Provider and connection settings | JSON files in `~/.opengent` (no secrets) |
-| API keys, secret headers and variables | OS credential store |
+| API keys, secret headers and variables, OAuth tokens and client secrets | OS credential store |
 
 **How it works.** With a local model (Ollama, LM Studio, vLLM, llama.cpp) nothing leaves
 your machine. Hosted providers receive the conversation for each request and are used in

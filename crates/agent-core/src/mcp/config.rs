@@ -53,6 +53,274 @@ pub struct KeyValueInput {
     pub secret: bool,
 }
 
+/// How a remote (Streamable HTTP) server authenticates us, besides any custom headers.
+/// Client secrets and tokens live in the keychain under `mcp/<id>/oauth/…`; only
+/// `has_client_secret` is recorded here.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(export)]
+pub enum McpAuth {
+    /// No OAuth: unauthenticated, or credentials in custom headers.
+    #[default]
+    None,
+    /// Authorization code + PKCE in the system browser with a loopback redirect. Without
+    /// a client ID the client registers itself (Dynamic Client Registration).
+    OauthUser {
+        #[serde(default)]
+        client_id: Option<String>,
+        #[serde(default)]
+        has_client_secret: bool,
+        #[serde(default)]
+        scopes: Vec<String>,
+        /// Fixed loopback callback port for authorization servers that require an exact
+        /// redirect URI; `None` picks a free port per sign-in.
+        #[serde(default)]
+        redirect_port: Option<u16>,
+    },
+    /// Machine-to-machine: the client ID + secret are exchanged for a token directly.
+    OauthClientCredentials {
+        client_id: String,
+        #[serde(default)]
+        has_client_secret: bool,
+        #[serde(default)]
+        scopes: Vec<String>,
+    },
+}
+
+impl McpAuth {
+    pub fn is_oauth(&self) -> bool {
+        !matches!(self, McpAuth::None)
+    }
+
+    pub fn client_id(&self) -> Option<&str> {
+        match self {
+            McpAuth::None => None,
+            McpAuth::OauthUser { client_id, .. } => client_id.as_deref(),
+            McpAuth::OauthClientCredentials { client_id, .. } => Some(client_id),
+        }
+    }
+
+    fn has_client_secret(&self) -> bool {
+        matches!(
+            self,
+            McpAuth::OauthUser {
+                has_client_secret: true,
+                ..
+            } | McpAuth::OauthClientCredentials {
+                has_client_secret: true,
+                ..
+            }
+        )
+    }
+
+    pub fn scopes(&self) -> &[String] {
+        match self {
+            McpAuth::None => &[],
+            McpAuth::OauthUser { scopes, .. } | McpAuth::OauthClientCredentials { scopes, .. } => {
+                scopes
+            }
+        }
+    }
+
+    fn kind(&self) -> u8 {
+        match self {
+            McpAuth::None => 0,
+            McpAuth::OauthUser { .. } => 1,
+            McpAuth::OauthClientCredentials { .. } => 2,
+        }
+    }
+}
+
+/// Authentication settings from the UI. `client_secret` empty keeps the stored secret
+/// (when the client ID is unchanged); `scopes` is space-separated.
+#[derive(Debug, Clone, Default, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(export)]
+pub enum McpAuthInput {
+    #[default]
+    None,
+    OauthUser {
+        #[serde(default)]
+        client_id: String,
+        #[serde(default)]
+        client_secret: String,
+        #[serde(default)]
+        scopes: String,
+        #[serde(default)]
+        redirect_port: Option<u16>,
+    },
+    OauthClientCredentials {
+        #[serde(default)]
+        client_id: String,
+        #[serde(default)]
+        client_secret: String,
+        #[serde(default)]
+        scopes: String,
+    },
+}
+
+const MAX_SCOPES: usize = 32;
+const MAX_SCOPE_LEN: usize = 128;
+const MAX_CLIENT_ID_LEN: usize = 512;
+const MAX_CLIENT_SECRET_LEN: usize = 1024;
+
+/// RFC 6749 §3.3 scope tokens: printable ASCII except space, `"` and `\`.
+fn parse_scopes(raw: &str) -> Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    for s in raw.split_whitespace() {
+        if s.len() > MAX_SCOPE_LEN
+            || !s
+                .chars()
+                .all(|c| c.is_ascii_graphic() && c != '"' && c != '\\')
+        {
+            return Err(Error::InvalidInput(format!(
+                "invalid scope `{}`",
+                s.chars().take(40).collect::<String>()
+            )));
+        }
+        if !out.iter().any(|o| o == s) {
+            out.push(s.to_owned());
+        }
+    }
+    if out.len() > MAX_SCOPES {
+        return Err(Error::InvalidInput(format!("at most {MAX_SCOPES} scopes")));
+    }
+    Ok(out)
+}
+
+fn parse_client_id(raw: &str) -> Result<Option<String>> {
+    let id = raw.trim();
+    if id.len() > MAX_CLIENT_ID_LEN || id.chars().any(char::is_control) {
+        return Err(Error::InvalidInput("invalid client ID".into()));
+    }
+    Ok((!id.is_empty()).then(|| id.to_owned()))
+}
+
+/// Validates the auth input against the stored auth. Returns the auth to store and a new
+/// client secret to write, if one was entered. A blank secret keeps the stored one only
+/// while the client ID is unchanged — a secret belongs to its client.
+fn resolve_auth(input: McpAuthInput, old: Option<&McpAuth>) -> Result<(McpAuth, Option<String>)> {
+    let secret_input = |client_id: Option<&str>, secret: &str| -> Result<(bool, Option<String>)> {
+        let secret = secret.trim();
+        if secret.len() > MAX_CLIENT_SECRET_LEN || secret.chars().any(char::is_control) {
+            return Err(Error::InvalidInput("invalid client secret".into()));
+        }
+        if !secret.is_empty() {
+            return Ok((true, Some(secret.to_owned())));
+        }
+        let kept = client_id.is_some()
+            && old.is_some_and(|o| o.has_client_secret() && o.client_id() == client_id);
+        Ok((kept, None))
+    };
+    Ok(match input {
+        McpAuthInput::None => (McpAuth::None, None),
+        McpAuthInput::OauthUser {
+            client_id,
+            client_secret,
+            scopes,
+            redirect_port,
+        } => {
+            let client_id = parse_client_id(&client_id)?;
+            if client_id.is_none() && !client_secret.trim().is_empty() {
+                return Err(Error::InvalidInput(
+                    "a client secret needs a client ID".into(),
+                ));
+            }
+            if redirect_port.is_some_and(|p| p < 1024) {
+                return Err(Error::InvalidInput(
+                    "callback port must be 1024–65535".into(),
+                ));
+            }
+            let (has_client_secret, secret) = secret_input(client_id.as_deref(), &client_secret)?;
+            (
+                McpAuth::OauthUser {
+                    client_id,
+                    has_client_secret,
+                    scopes: parse_scopes(&scopes)?,
+                    redirect_port,
+                },
+                secret,
+            )
+        }
+        McpAuthInput::OauthClientCredentials {
+            client_id,
+            client_secret,
+            scopes,
+        } => {
+            let Some(client_id) = parse_client_id(&client_id)? else {
+                return Err(Error::InvalidInput(
+                    "client credentials need a client ID".into(),
+                ));
+            };
+            let (has_client_secret, secret) = secret_input(Some(&client_id), &client_secret)?;
+            if !has_client_secret {
+                return Err(Error::InvalidInput(
+                    "client credentials need a client secret".into(),
+                ));
+            }
+            (
+                McpAuth::OauthClientCredentials {
+                    client_id,
+                    has_client_secret,
+                    scopes: parse_scopes(&scopes)?,
+                },
+                secret,
+            )
+        }
+    })
+}
+
+/// Whether `input` would change the stored auth (a new secret counts as a change).
+fn auth_changed(input: &McpAuthInput, old: &McpAuth) -> bool {
+    let norm = |s: &str| s.trim().to_owned();
+    match (input, old) {
+        (McpAuthInput::None, McpAuth::None) => false,
+        (
+            McpAuthInput::OauthUser {
+                client_id,
+                client_secret,
+                scopes,
+                redirect_port,
+            },
+            McpAuth::OauthUser {
+                client_id: old_id,
+                scopes: old_scopes,
+                redirect_port: old_port,
+                ..
+            },
+        ) => {
+            old_id.as_deref().unwrap_or("") != norm(client_id)
+                || !client_secret.trim().is_empty()
+                || parse_scopes(scopes).ok().as_ref() != Some(old_scopes)
+                || redirect_port != old_port
+        }
+        (
+            McpAuthInput::OauthClientCredentials {
+                client_id,
+                client_secret,
+                scopes,
+            },
+            McpAuth::OauthClientCredentials {
+                client_id: old_id,
+                scopes: old_scopes,
+                ..
+            },
+        ) => {
+            *old_id != norm(client_id)
+                || !client_secret.trim().is_empty()
+                || parse_scopes(scopes).ok().as_ref() != Some(old_scopes)
+        }
+        _ => true,
+    }
+}
+
+pub(crate) const CLIENT_SECRET: &str = "client_secret";
+
+/// Keychain key for a server's OAuth material (`mcp/<id>/oauth/<name>`).
+pub(crate) fn oauth_ref(server_id: &str, name: &str) -> Result<SecretRef> {
+    secret_ref(server_id, "oauth", name)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct McpServerConfig {
@@ -75,6 +343,8 @@ pub struct McpServerConfig {
     pub url: String,
     #[serde(default)]
     pub headers: Vec<KeyValueEntry>,
+    #[serde(default)]
+    pub auth: McpAuth,
     /// Policy applied to tools without an explicit entry in `tool_policies`.
     #[serde(default)]
     pub default_policy: ToolPolicy,
@@ -110,6 +380,8 @@ pub struct McpServerInput {
     pub url: String,
     #[serde(default)]
     pub headers: Vec<KeyValueInput>,
+    #[serde(default)]
+    pub auth: McpAuthInput,
     #[serde(default)]
     pub default_policy: ToolPolicy,
     #[serde(default = "default_call_timeout")]
@@ -735,6 +1007,24 @@ impl McpStore {
                 .parse::<reqwest::header::HeaderValue>()
                 .map_err(|_| Error::InvalidInput(format!("invalid value for header `{n}`")))?;
         }
+        let auth_input = input.auth;
+        if !matches!(auth_input, McpAuthInput::None) {
+            if input.transport != McpTransport::StreamableHttp {
+                return Err(Error::InvalidInput(
+                    "OAuth is only available for remote servers".into(),
+                ));
+            }
+            // The OAuth bearer token goes in `Authorization`; a custom one would collide.
+            if input
+                .headers
+                .iter()
+                .any(|h| h.name.trim().eq_ignore_ascii_case("authorization"))
+            {
+                return Err(Error::InvalidInput(
+                    "remove the Authorization header: OAuth sets it".into(),
+                ));
+            }
+        }
 
         let mut state = self.state.lock().unwrap();
         let id = match input.id {
@@ -832,6 +1122,26 @@ impl McpStore {
             }
         }
 
+        let old_auth = existing.as_ref().map(|s| &s.auth);
+        let (auth, new_secret) = resolve_auth(auth_input, old_auth)?;
+        let secret_ref = oauth_ref(&id, CLIENT_SECRET)?;
+        if let Some(secret) = &new_secret {
+            self.secrets.set(&secret_ref, secret)?;
+        }
+        if old_auth.is_some_and(McpAuth::has_client_secret) && !auth.has_client_secret() {
+            stale_secrets.push(secret_ref);
+        }
+        let url = match input.transport {
+            McpTransport::StreamableHttp => normalize_base_url(&input.url)?,
+            McpTransport::Stdio => String::new(),
+        };
+        // Tokens belong to the server and client they were issued for.
+        let clear_tokens = existing.as_ref().is_some_and(|old| {
+            old.url != url
+                || old.auth.kind() != auth.kind()
+                || old.auth.client_id() != auth.client_id()
+        });
+
         let config = McpServerConfig {
             id: id.clone(),
             name: name.to_owned(),
@@ -844,11 +1154,9 @@ impl McpStore {
                 .cwd
                 .map(|c| c.trim().to_owned())
                 .filter(|c| !c.is_empty()),
-            url: match input.transport {
-                McpTransport::StreamableHttp => normalize_base_url(&input.url)?,
-                McpTransport::Stdio => String::new(),
-            },
+            url,
             headers,
+            auth,
             default_policy: input.default_policy,
             tool_policies: existing.map(|s| s.tool_policies).unwrap_or_default(),
             call_timeout_secs: input.call_timeout_secs,
@@ -861,6 +1169,11 @@ impl McpStore {
         self.persist(&state)?;
         for r in stale_secrets {
             let _ = self.secrets.delete(&r);
+        }
+        if clear_tokens {
+            if let Err(e) = super::oauth::clear_tokens(self.secrets.as_ref(), &id) {
+                tracing::warn!(error = %e, "failed to clear stale OAuth tokens");
+            }
         }
         Ok(config)
     }
@@ -904,6 +1217,7 @@ impl McpStore {
                 old.transport != input.transport
                     || normalize_base_url(&input.url).map_or(true, |u| u != old.url)
                     || entries_changed(&input.headers, &old.headers)
+                    || auth_changed(&input.auth, &old.auth)
             }
         }
     }
@@ -929,7 +1243,32 @@ impl McpStore {
                 let _ = self.secrets.delete(&secret_ref(id, scope, &e.name)?);
             }
         }
+        let _ = self.secrets.delete(&oauth_ref(id, CLIENT_SECRET)?);
+        let _ = super::oauth::clear_tokens(self.secrets.as_ref(), id);
         self.persist(&state)
+    }
+
+    /// The secret store backing this config (OAuth token storage in `mcp::oauth`).
+    pub(crate) fn secrets(&self) -> Arc<dyn SecretStore> {
+        Arc::clone(&self.secrets)
+    }
+
+    /// The stored OAuth client secret, if the server's auth records one.
+    pub fn oauth_client_secret(&self, config: &McpServerConfig) -> Result<Option<String>> {
+        if !config.auth.has_client_secret() {
+            return Ok(None);
+        }
+        self.secrets.get(&oauth_ref(&config.id, CLIENT_SECRET)?)
+    }
+
+    /// Whether OAuth tokens are stored for the server (reads the keychain).
+    pub fn has_oauth_tokens(&self, id: &str) -> bool {
+        super::oauth::read_tokens(self.secrets.as_ref(), id).is_ok_and(|t| t.is_some())
+    }
+
+    /// Forgets the server's OAuth tokens (sign out).
+    pub fn clear_oauth_tokens(&self, id: &str) -> Result<()> {
+        super::oauth::clear_tokens(self.secrets.as_ref(), id)
     }
 
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<()> {
@@ -1034,6 +1373,7 @@ mod tests {
             cwd: None,
             url: String::new(),
             headers: Vec::new(),
+            auth: McpAuthInput::None,
             default_policy: ToolPolicy::Ask,
             call_timeout_secs: 60,
         }
@@ -1309,6 +1649,200 @@ mod tests {
         assert!(s.save(userinfo).is_err());
         s.save(input("dup")).unwrap();
         assert!(s.save(input("dup")).is_err());
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    fn remote(name: &str, auth: McpAuthInput) -> McpServerInput {
+        let mut i = input(name);
+        i.transport = McpTransport::StreamableHttp;
+        i.command = String::new();
+        i.env.clear();
+        i.url = "http://localhost:8900/mcp".into();
+        i.auth = auth;
+        i
+    }
+
+    fn user_auth(client_id: &str, secret: &str) -> McpAuthInput {
+        McpAuthInput::OauthUser {
+            client_id: client_id.into(),
+            client_secret: secret.into(),
+            scopes: "read  write read".into(),
+            redirect_port: None,
+        }
+    }
+
+    #[test]
+    fn auth_less_config_loads_unchanged() {
+        let (s, tmp) = store();
+        let id = s.save(input("x")).unwrap().id;
+        // Strip `auth` as a pre-OAuth build would have written the file.
+        let path = tmp.join("mcp.json");
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        v["servers"][0].as_object_mut().unwrap().remove("auth");
+        std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        let root = resolve_data_root(Some(&tmp)).unwrap();
+        let reloaded = McpStore::load(&root, Arc::new(MemorySecretStore::default())).unwrap();
+        assert_eq!(reloaded.get(&id).unwrap().auth, McpAuth::None);
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn oauth_config_round_trips_with_secret_out_of_band() {
+        let (s, tmp) = store();
+        let c = s
+            .save(remote("r", user_auth("app-1", "cl-secret")))
+            .unwrap();
+        assert_eq!(
+            c.auth,
+            McpAuth::OauthUser {
+                client_id: Some("app-1".into()),
+                has_client_secret: true,
+                scopes: vec!["read".into(), "write".into()],
+                redirect_port: None,
+            }
+        );
+        let raw = std::fs::read_to_string(tmp.join("mcp.json")).unwrap();
+        assert!(
+            !raw.contains("cl-secret"),
+            "client secret leaked into mcp.json"
+        );
+        assert_eq!(
+            s.oauth_client_secret(&c).unwrap().as_deref(),
+            Some("cl-secret")
+        );
+        let root = resolve_data_root(Some(&tmp)).unwrap();
+        let reloaded = McpStore::load(&root, Arc::new(MemorySecretStore::default())).unwrap();
+        assert_eq!(reloaded.get(&c.id).unwrap().auth, c.auth);
+
+        // Blank secret with the same client ID keeps it.
+        let mut edit = remote("r", user_auth("app-1", ""));
+        edit.id = Some(c.id.clone());
+        assert!(!s.connection_changed(&edit));
+        let c2 = s.save(edit).unwrap();
+        assert_eq!(
+            s.oauth_client_secret(&c2).unwrap().as_deref(),
+            Some("cl-secret")
+        );
+        // A different client ID drops the old client's secret.
+        let mut edit = remote("r", user_auth("app-2", ""));
+        edit.id = Some(c.id.clone());
+        assert!(s.connection_changed(&edit));
+        let c3 = s.save(edit).unwrap();
+        assert!(!c3.auth.has_client_secret());
+        assert!(s
+            .secrets
+            .get(&oauth_ref(&c.id, CLIENT_SECRET).unwrap())
+            .unwrap()
+            .is_none());
+        // Delete removes OAuth secrets and tokens.
+        let c4 = s
+            .save({
+                let mut e = remote("r", user_auth("app-2", "s2"));
+                e.id = Some(c.id.clone());
+                e
+            })
+            .unwrap();
+        super::super::oauth::write_tokens(s.secrets.as_ref(), &c4.id, "{}").unwrap();
+        s.delete(&c4.id).unwrap();
+        assert!(!s.has_oauth_tokens(&c4.id));
+        assert!(s
+            .secrets
+            .get(&oauth_ref(&c4.id, CLIENT_SECRET).unwrap())
+            .unwrap()
+            .is_none());
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn tokens_are_cleared_when_the_server_or_client_changes() {
+        let (s, tmp) = store();
+        let id = s.save(remote("r", user_auth("", ""))).unwrap().id;
+        let seed = || super::super::oauth::write_tokens(s.secrets.as_ref(), &id, "{}").unwrap();
+        let edit = |auth: McpAuthInput, url: &str| {
+            let mut e = remote("r", auth);
+            e.id = Some(id.clone());
+            e.url = url.into();
+            e
+        };
+        seed();
+        // Scope edits keep the sign-in; it applies at the next sign-in.
+        let mut same = edit(user_auth("", ""), "http://localhost:8900/mcp");
+        if let McpAuthInput::OauthUser { scopes, .. } = &mut same.auth {
+            *scopes = "other".into();
+        }
+        assert!(s.connection_changed(&same));
+        s.save(same).unwrap();
+        assert!(s.has_oauth_tokens(&id));
+        s.save(edit(user_auth("", ""), "http://localhost:8901/mcp"))
+            .unwrap();
+        assert!(!s.has_oauth_tokens(&id), "URL change clears tokens");
+        seed();
+        s.save(edit(user_auth("cid", ""), "http://localhost:8901/mcp"))
+            .unwrap();
+        assert!(!s.has_oauth_tokens(&id), "client ID change clears tokens");
+        seed();
+        s.save(edit(McpAuthInput::None, "http://localhost:8901/mcp"))
+            .unwrap();
+        assert!(!s.has_oauth_tokens(&id), "auth kind change clears tokens");
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn auth_validation() {
+        let (s, tmp) = store();
+        let cc = |id: &str, secret: &str, scopes: &str| McpAuthInput::OauthClientCredentials {
+            client_id: id.into(),
+            client_secret: secret.into(),
+            scopes: scopes.into(),
+        };
+        assert!(
+            s.save(remote("a", cc("", "s", ""))).is_err(),
+            "client ID required"
+        );
+        assert!(
+            s.save(remote("a", cc("id", "", ""))).is_err(),
+            "secret required"
+        );
+        assert!(s.save(remote("a", cc("id", "s", "bad\"scope"))).is_err());
+        let many = (0..=MAX_SCOPES)
+            .map(|i| format!("s{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(s.save(remote("a", cc("id", "s", &many))).is_err());
+        assert!(s
+            .save(remote("a", user_auth("", "secret-without-id")))
+            .is_err());
+        assert!(s
+            .save(remote(
+                "a",
+                McpAuthInput::OauthUser {
+                    client_id: String::new(),
+                    client_secret: String::new(),
+                    scopes: String::new(),
+                    redirect_port: Some(80),
+                }
+            ))
+            .is_err());
+        let mut header = remote("a", user_auth("", ""));
+        header.headers.push(KeyValueInput {
+            name: "authorization".into(),
+            value: "Bearer x".into(),
+            secret: true,
+        });
+        assert!(
+            s.save(header).is_err(),
+            "Authorization header conflicts with OAuth"
+        );
+        let mut stdio = input("a");
+        stdio.auth = user_auth("", "");
+        assert!(s.save(stdio).is_err(), "OAuth is remote-only");
+        // A stored secret satisfies client credentials on later edits.
+        let id = s.save(remote("a", cc("id", "s", "x"))).unwrap().id;
+        let mut e = remote("a", cc("id", "", "x"));
+        e.id = Some(id);
+        assert!(!s.connection_changed(&e));
+        s.save(e).unwrap();
         std::fs::remove_dir_all(tmp).unwrap();
     }
 
