@@ -480,6 +480,7 @@ enum Cause<'a> {
     Unauthorized(Option<String>),
     Forbidden,
     Scope(Option<String>),
+    Dropped,
     Auth(&'a AuthError),
     Other(&'a (dyn StdError + 'static)),
 }
@@ -507,6 +508,7 @@ fn find_cause<'a>(root: &'a (dyn StdError + 'static)) -> Cause<'a> {
                 StreamableHttpError::UnexpectedServerResponse(m) if m.starts_with("HTTP 403") => {
                     return Cause::Forbidden
                 }
+                StreamableHttpError::TransportChannelClosed => return Cause::Dropped,
                 _ => {}
             }
         } else if let Some(a) = cur.downcast_ref::<AuthRequiredError>() {
@@ -643,6 +645,11 @@ fn classify_root(root: &(dyn StdError + 'static), ctx: AuthContext) -> Classifie
             _ => "The server refused access (HTTP 403) — the account may lack permission.",
         }),
         Cause::Scope(scope) => Classified::failed(scope_message(ctx, scope.as_deref())),
+        // rmcp swallows the HTTP error that killed the worker — name the likely cause.
+        Cause::Dropped => Classified::failed(
+            "The server closed the connection during setup — check the URL is a \
+             Streamable HTTP MCP endpoint.",
+        ),
         Cause::Auth(a) => classify_auth(a, ctx),
         Cause::Other(e) => Classified::failed(clean(&e.to_string())),
     }
@@ -935,5 +942,11 @@ mod tests {
             ctx(AuthMode::None, false, false),
         );
         assert!(matches!(c.failure, Failure::Failed(m) if m.contains("connection closed")));
+        // A server that kills the handshake mid-way (e.g. rejects the session it just
+        // issued) — rmcp drops the HTTP error, so name the likely cause instead of
+        // showing the raw variant.
+        let e = http_err(StreamableHttpError::<reqwest::Error>::TransportChannelClosed);
+        let c = classify_init(&e, ctx(AuthMode::None, false, false));
+        assert!(matches!(c.failure, Failure::Failed(m) if m.contains("closed the connection")));
     }
 }

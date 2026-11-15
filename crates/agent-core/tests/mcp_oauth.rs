@@ -10,7 +10,8 @@ use std::time::Duration;
 use agent_core::config::resolve_data_root;
 use agent_core::domain::ToolPolicy;
 use agent_core::mcp::{
-    McpAuthInput, McpManager, McpServerInput, McpServerStatus, McpStore, McpTransport,
+    KeyValueInput, McpAuthInput, McpManager, McpServerInput, McpServerStatus, McpStore,
+    McpTransport,
 };
 use agent_core::secrets::{MemorySecretStore, SecretStore};
 use base64::Engine;
@@ -34,6 +35,8 @@ struct State {
 
 const CC_ID: &str = "machine";
 const CC_SECRET: &str = "machine-secret";
+/// Spec revisions this mock knows — the released versions github-mcp-server accepts.
+const KNOWN_PROTOCOL_VERSIONS: &[&str] = &["2025-03-26", "2025-06-18", "2025-11-25"];
 
 struct Mock {
     origin: String,
@@ -301,16 +304,40 @@ async fn serve(mut sock: TcpStream, origin: &str, state: &Mutex<State>) {
             if req.method != "POST" {
                 return reply(&mut sock, "405 Method Not Allowed", &[], "").await;
             }
+            // github-mcp-server quirk: a session created by an `initialize` that
+            // requested a spec revision the server doesn't know rejects every
+            // subsequent request with `400 invalid session`.
+            if req
+                .headers
+                .get("mcp-session-id")
+                .is_some_and(|s| s.starts_with("dead-"))
+            {
+                return reply(&mut sock, "400 Bad Request", &[], "invalid session").await;
+            }
             let msg: serde_json::Value = serde_json::from_str(&req.body).unwrap();
             let Some(id) = msg.get("id").cloned() else {
                 return reply(&mut sock, "202 Accepted", &[], "").await;
             };
+            let mut session = req
+                .headers
+                .get("mcp-session-id")
+                .cloned()
+                .unwrap_or_else(|| "sess-1".into());
             let out = match msg["method"].as_str().unwrap_or("") {
-                "initialize" => serde_json::json!({"result": {
-                    "protocolVersion": "2025-06-18",
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "mock-oauth", "version": "1"},
-                }}),
+                "initialize" => {
+                    let requested = msg["params"]["protocolVersion"].as_str().unwrap_or("");
+                    let negotiated = if KNOWN_PROTOCOL_VERSIONS.contains(&requested) {
+                        requested
+                    } else {
+                        session = format!("dead-{requested}");
+                        KNOWN_PROTOCOL_VERSIONS[KNOWN_PROTOCOL_VERSIONS.len() - 1]
+                    };
+                    serde_json::json!({"result": {
+                        "protocolVersion": negotiated,
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "mock-oauth", "version": "1"},
+                    }})
+                }
                 "tools/list" => serde_json::json!({"result": {"tools": [
                     {"name": "echo", "inputSchema": {"type": "object"}},
                 ]}}),
@@ -328,7 +355,7 @@ async fn serve(mut sock: TcpStream, origin: &str, state: &Mutex<State>) {
             reply(
                 &mut sock,
                 "200 OK",
-                &[json(), ("Mcp-Session-Id", "sess-1".into())],
+                &[json(), ("Mcp-Session-Id", session)],
                 &body.to_string(),
             )
             .await
@@ -445,6 +472,42 @@ async fn unauthenticated_401_is_a_short_actionable_message() {
         "{error}"
     );
     assert!(!error.contains("Transport [") && !error.contains("resource_metadata"));
+}
+
+#[tokio::test]
+async fn static_authorization_header_connects() {
+    let mock = Mock::start(3600).await;
+    mock.state
+        .lock()
+        .unwrap()
+        .valid_tokens
+        .push("pat-token".into());
+    let h = harness();
+    let id = h
+        .manager
+        .store()
+        .save(McpServerInput {
+            id: None,
+            name: "pat".into(),
+            transport: McpTransport::StreamableHttp,
+            command: String::new(),
+            env: Vec::new(),
+            cwd: None,
+            url: mock.url(),
+            headers: vec![KeyValueInput {
+                name: "Authorization".into(),
+                value: "Bearer pat-token".into(),
+                secret: true,
+            }],
+            auth: McpAuthInput::None,
+            default_policy: ToolPolicy::Ask,
+            call_timeout_secs: 30,
+        })
+        .unwrap()
+        .id;
+    h.manager.connect(&id).await;
+    assert_eq!(h.status(&id), McpServerStatus::Connected { tool_count: 1 });
+    h.manager.shutdown();
 }
 
 #[tokio::test]
