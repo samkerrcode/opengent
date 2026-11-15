@@ -588,6 +588,14 @@ pub(crate) fn classify_auth(e: &AuthError, ctx: AuthContext) -> Classified {
             "The authorization server doesn't support PKCE (S256), which sign-in requires."
                 .to_owned()
         }
+        // Servers like GitHub answer a rejected exchange with 200 and an error
+        // object; rmcp then reports only the deserialize failure ("missing field
+        // `access_token`"), not the server's own error.
+        AuthError::TokenExchangeFailed(m) if m.contains("missing field") => {
+            "The authorization server rejected the token exchange — check the Client ID, \
+             and add a Client secret if the server requires one."
+                .to_owned()
+        }
         AuthError::TokenExchangeFailed(m) => {
             format!(
                 "The authorization server didn't issue a token: {}",
@@ -915,6 +923,19 @@ mod tests {
             ctx(AuthMode::User, false, true),
         );
         assert!(matches!(c.failure, Failure::NeedsAuth(Some(_))));
+        let c = classify_auth(
+            &AuthError::TokenExchangeFailed(
+                "error decoding response body: missing field `access_token` at line 1 column 266"
+                    .into(),
+            ),
+            ctx(AuthMode::User, false, false),
+        );
+        assert!(matches!(&c.failure, Failure::Failed(m) if m.contains("Client secret")));
+        let c = classify_auth(
+            &AuthError::TokenExchangeFailed("HTTP 500".into()),
+            ctx(AuthMode::User, false, false),
+        );
+        assert!(matches!(&c.failure, Failure::Failed(m) if m.contains("didn't issue a token")));
         let c = classify_auth(
             &AuthError::ClientCredentialsError("Token exchange failed: invalid_client".into()),
             ctx(AuthMode::ClientCredentials, false, false),
