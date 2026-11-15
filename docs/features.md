@@ -571,8 +571,12 @@ the reply ends; the label beside it names the current phase. The app follows you
 light or dark theme.
 
 **How it works.** Turning on your OS's reduced-motion setting stops the rotation.
+Scrollbars are thin overlays drawn over the content and shown while you scroll, on both
+macOS and Windows.
 
 **Limits.** The indicator shows activity, not progress. There is no in-app theme switch.
+Overlay scrollbars on Windows need WebView2 Runtime 125 or newer; older runtimes keep the
+classic scrollbar.
 
 ### Window size
 

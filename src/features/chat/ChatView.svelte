@@ -13,6 +13,7 @@
   let { chat, onopensettings, onopenconnections }: { chat: Chat; onopensettings: () => void; onopenconnections: () => void } = $props();
 
   let scroller = $state<HTMLElement | null>(null);
+  let column = $state<HTMLElement | null>(null);
   let composer = $state<Composer | null>(null);
   let pinnedToBottom = $state(true);
   // Set on programmatic scrolls so the resulting scroll events are not mistaken for the user
@@ -48,6 +49,19 @@
     expectedTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
     scroller.scrollTop = expectedTop;
   }
+
+  // Column resize covers growth the token effect misses — images resolving after the
+  // delta that referenced them, KaTeX layout, a Thinking block collapsing — and re-pins
+  // when following. Callbacks run after layout and before paint, so there is no flash.
+  $effect(() => {
+    const col = column;
+    if (!col || !scroller) return;
+    const observer = new ResizeObserver(() => {
+      if (pinnedToBottom) scrollToBottom();
+    });
+    observer.observe(col);
+    return () => observer.disconnect();
+  });
 
   // Unpinning follows user intent: any upward scroll unpins at once. Content growth never
   // decreases scrollTop, so a decrease away from the bottom is the user. Re-pinning stays position-based
@@ -175,7 +189,7 @@
 </header>
 
 <div class="scroller" bind:this={scroller} onscroll={onScroll} onwheel={onWheel}>
-  <div class="column">
+  <div class="column" bind:this={column}>
     {#if !chat.loaded}
       <p class="loading">Loading…</p>
     {:else if chat.items.length === 0 && agent}

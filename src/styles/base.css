@@ -2,6 +2,11 @@
 *::before,
 *::after {
   box-sizing: border-box;
+  /* Scroll anchoring exists only in Chromium — WKWebView doesn't implement it, and Safari
+     15 ignores the property. The app manages scroll positions itself; Blink's anchor
+     adjustments (e.g. shifting scrollTop when a Thinking block above the anchor collapses)
+     look like the user scrolling up, which unpins the chat mid-stream. Opt everything out. */
+  overflow-anchor: none;
 }
 
 html,

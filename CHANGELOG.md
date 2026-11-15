@@ -14,6 +14,15 @@ under *Unreleased*.
 
 ## Unreleased
 
+### Fixed
+
+- **Chat**: On Windows the chat could stop following a streaming reply, leaving the
+  scrollbar short of the content. Browser scroll anchoring (Windows only — macOS never had
+  it) is now off, and the view re-pins for late growth such as images, math layout and a
+  Thinking block collapsing.
+- **Platform**: Windows scrollbars are now overlay-style — thin and shown only while
+  scrolling — matching how they already behaved on macOS.
+
 ## 0.1.1 — 2026-11-14
 
 ### Added
