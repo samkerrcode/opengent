@@ -144,7 +144,8 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         for (i, sql) in MIGRATIONS.iter().take(4).enumerate() {
             conn.execute_batch(sql).unwrap();
-            conn.pragma_update(None, "user_version", i as i64 + 1).unwrap();
+            conn.pragma_update(None, "user_version", i as i64 + 1)
+                .unwrap();
         }
         conn.execute(
             "INSERT INTO attachments
@@ -179,7 +180,8 @@ mod tests {
         assert_eq!(pages, 1, "page rows survive the rebuild");
 
         conn.pragma_update(None, "foreign_keys", "ON").unwrap();
-        conn.execute("DELETE FROM attachments WHERE id = 'a'", []).unwrap();
+        conn.execute("DELETE FROM attachments WHERE id = 'a'", [])
+            .unwrap();
         let pages: i64 = conn
             .query_row("SELECT COUNT(*) FROM attachment_pages", [], |r| r.get(0))
             .unwrap();
