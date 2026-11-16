@@ -10,7 +10,11 @@ export type ContentBlock = { "type": "text", text: string, } | { "type": "thinki
 /**
  * PDFs only: pages in the document. Absent from blocks stored before PDF support.
  */
-page_count: number | null, } | { "type": "image", mime: string, data: string, } | { "type": "tool_call", id: string, 
+page_count: number | null, 
+/**
+ * PDFs only: leading pages sent as images when the message was sent.
+ */
+pages_rendered: number | null, } | { "type": "image", mime: string, data: string, } | { "type": "tool_call", id: string, 
 /**
  * Name exposed to the model.
  */

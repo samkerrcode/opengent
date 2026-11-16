@@ -21,7 +21,7 @@ use agent_core::mcp::{PermissionScope, ScopePolicies};
 use agent_core::secrets::SecretRef;
 use agent_core::storage::agents as agents_repo;
 use agent_core::storage::chats as repo;
-use agent_core::storage::{ChatSummary, StoredMessage};
+use agent_core::storage::{AttachmentKind, ChatSummary, StoredMessage};
 use agent_core::Error;
 use serde::Serialize;
 use tauri::ipc::Channel;
@@ -281,12 +281,15 @@ pub(crate) async fn launch_run<S: RunSink>(
         .await?;
         for (content, meta) in loaded {
             contents.insert(meta.id.clone(), content);
+            let pages_rendered =
+                (meta.kind() == AttachmentKind::Pdf).then_some(meta.pages_rendered);
             blocks.push(ContentBlock::Attachment {
                 id: meta.id,
                 name: meta.name,
                 mime: meta.mime,
                 char_count: meta.char_count,
                 page_count: meta.page_count,
+                pages_rendered,
             });
         }
     }

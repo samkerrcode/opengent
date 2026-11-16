@@ -46,6 +46,7 @@ import type { AgentSchedule } from "$lib/generated/bindings/AgentSchedule";
 import type { AgentServerAccess } from "$lib/generated/bindings/AgentServerAccess";
 import type { MissedRunPolicy } from "$lib/generated/bindings/MissedRunPolicy";
 import type { PickedAttachments } from "$lib/generated/bindings/PickedAttachments";
+import type { ImportProgress } from "$lib/generated/bindings/ImportProgress";
 import type { ModelRef } from "$lib/generated/bindings/ModelRef";
 import type { Recurrence } from "$lib/generated/bindings/Recurrence";
 import type { ScheduleInput } from "$lib/generated/bindings/ScheduleInput";
@@ -58,6 +59,7 @@ export type {
   AgentServerAccess,
   MissedRunPolicy,
   PickedAttachments,
+  ImportProgress,
   ModelRef,
   Recurrence,
   ScheduleInput,
@@ -138,7 +140,8 @@ export const commands = {
   getChat: (id: ChatId) => invoke<ChatDetail>("get_chat", { id }),
   renameChat: (id: ChatId, title: string) => invoke<void>("rename_chat", { id, title }),
   deleteChat: (id: ChatId) => invoke<void>("delete_chat", { id }),
-  pickAttachments: () => invoke<PickedAttachments>("pick_attachments"),
+  pickAttachments: (includeImages: boolean) =>
+    invoke<PickedAttachments>("pick_attachments", { includeImages }),
   attachmentDataUrl: (attachmentId: string) =>
     invoke<string>("attachment_data_url", { attachmentId }),
 

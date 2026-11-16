@@ -2,14 +2,19 @@
 //! `<data_root>/attachments/<sha256>`; metadata lives in SQLite. Text-like files are stored
 //! after UTF-8 validation; images are sniffed by magic bytes and stored raw so they can be
 //! sent to vision-capable models as base64. PDFs keep the original file plus one rendered
-//! image per leading page (see `crate::pdf`), each page being its own content-addressed blob.
+//! image per leading page and a page-1 thumbnail (see `crate::pdf`), each its own
+//! content-addressed blob.
 //!
 //! Importing is split so nothing slow runs on the SQLite worker: `load` and `prepare` touch
 //! only the file system and the PDF renderer, `find` and `commit` only do bounded writes.
+//!
+//! Nothing deletes attachments or blobs yet; garbage collection of blobs no message refers
+//! to is planned (page rows already cascade with their attachment).
 
+use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -17,8 +22,10 @@ use sha2::{Digest, Sha256};
 use ts_rs::TS;
 
 use super::db::{now_ms, sql_err};
-use crate::agent::context::{AttachmentContent, PageData};
-use crate::pdf::{self, PdfRasterizer, RenderOptions, RenderedPdf, PDF_MAGIC, PDF_MIME};
+use crate::agent::context::{encode_base64, AttachmentContent, PageData};
+use crate::pdf::{
+    self, PdfRasterizer, RenderOptions, RenderedPdf, PDF_MAGIC, PDF_MIME, RENDER_VERSION,
+};
 use crate::providers::Capabilities;
 use crate::{Error, Result};
 
@@ -26,6 +33,15 @@ use crate::{Error, Result};
 pub const MAX_ATTACHMENT_BYTES: u64 = 2 * 1024 * 1024;
 /// Size limit for PDFs, which are routinely larger than any text file worth attaching.
 pub const MAX_PDF_BYTES: u64 = 32 * 1024 * 1024;
+/// Base64 kept by the in-memory payload cache (`EncodedCache`).
+const ENCODED_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Why an image cannot go to a text-only model. `src/lib/attachments.ts` shows the same
+/// text; `attachment-reasons.json` pins the two together.
+pub const IMAGE_NEEDS_VISION: &str = "the selected model does not accept image attachments";
+/// Why a PDF cannot go to a text-only model.
+pub const PDF_NEEDS_VISION: &str =
+    "the selected model does not accept images, and PDFs are sent as page images";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -52,30 +68,37 @@ pub enum AttachmentKind {
     Pdf,
 }
 
+impl AttachmentKind {
+    fn of(mime: &str) -> Self {
+        if mime == PDF_MIME {
+            Self::Pdf
+        } else if mime.starts_with("image/") {
+            Self::Image
+        } else {
+            Self::Text
+        }
+    }
+
+    /// Why a model that does (`images`) or does not accept images cannot be sent this
+    /// kind, or `None` if it can.
+    pub fn unusable_reason(self, images: bool) -> Option<&'static str> {
+        match self {
+            Self::Image if !images => Some(IMAGE_NEEDS_VISION),
+            Self::Pdf if !images => Some(PDF_NEEDS_VISION),
+            _ => None,
+        }
+    }
+}
+
 impl AttachmentMeta {
     pub fn kind(&self) -> AttachmentKind {
-        if self.mime == PDF_MIME {
-            AttachmentKind::Pdf
-        } else if self.mime.starts_with("image/") {
-            AttachmentKind::Image
-        } else {
-            AttachmentKind::Text
-        }
+        AttachmentKind::of(&self.mime)
     }
 
     /// Why a model with `caps` cannot be sent this attachment, or `None` if it can. The one
     /// gate for picking, dropping and sending; `src/lib/attachments.ts` mirrors it for the UI.
-    pub fn unusable_reason(&self, caps: &Capabilities) -> Option<String> {
-        match self.kind() {
-            AttachmentKind::Image if !caps.images => {
-                Some("the selected model does not accept image attachments".into())
-            }
-            AttachmentKind::Pdf if !caps.images => Some(
-                "the selected model does not accept images, and PDFs are sent as page images"
-                    .into(),
-            ),
-            _ => None,
-        }
+    pub fn unusable_reason(&self, caps: &Capabilities) -> Option<&'static str> {
+        self.kind().unusable_reason(caps.images)
     }
 }
 
@@ -89,6 +112,16 @@ pub struct LoadedFile {
     char_count: i64,
 }
 
+impl LoadedFile {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn kind(&self) -> AttachmentKind {
+        AttachmentKind::of(self.mime)
+    }
+}
+
 /// A `LoadedFile` with everything derived from it, ready for `AttachmentStore::commit`.
 #[derive(Debug)]
 pub struct PreparedAttachment {
@@ -96,7 +129,7 @@ pub struct PreparedAttachment {
     pdf: Option<RenderedPdf>,
 }
 
-/// One rendered PDF page: where its image blob lives and what it is.
+/// One rendered PDF image (a page or the thumbnail): where its blob lives and what it is.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageRef {
     pub sha256: String,
@@ -114,9 +147,75 @@ pub struct AttachmentSource {
     pages: Vec<PageRef>,
 }
 
+/// Base64 payloads of recently sent images and pages, keyed by content hash, so each turn
+/// does not re-read, re-hash and re-encode the whole history. Blobs are immutable and were
+/// verified when first read, so an entry never goes stale. Oldest entries go first.
+#[derive(Default)]
+struct EncodedCache {
+    entries: HashMap<String, Arc<str>>,
+    order: VecDeque<String>,
+    bytes: usize,
+}
+
+impl EncodedCache {
+    fn get(&self, sha256: &str) -> Option<Arc<str>> {
+        self.entries.get(sha256).cloned()
+    }
+
+    fn insert(&mut self, sha256: &str, data: Arc<str>) {
+        if data.len() > ENCODED_CACHE_BYTES || self.entries.contains_key(sha256) {
+            return;
+        }
+        while self.bytes + data.len() > ENCODED_CACHE_BYTES {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(gone) = self.entries.remove(&oldest) {
+                self.bytes -= gone.len();
+            }
+        }
+        self.bytes += data.len();
+        self.order.push_back(sha256.to_owned());
+        self.entries.insert(sha256.to_owned(), data);
+    }
+}
+
+/// Blobs written by one `commit`. Dropped before `keep`, it deletes the ones that did not
+/// exist before, so a failed commit leaves nothing behind; blobs that other attachments
+/// already shared are never touched.
+struct NewBlobs<'a> {
+    store: &'a AttachmentStore,
+    created: Vec<PathBuf>,
+}
+
+impl NewBlobs<'_> {
+    fn write(&mut self, sha256: &str, bytes: &[u8]) -> Result<()> {
+        let path = self.store.blob_path(sha256);
+        let existed = path.exists();
+        self.store.write_blob(sha256, bytes)?;
+        if !existed {
+            self.created.push(path);
+        }
+        Ok(())
+    }
+
+    fn keep(mut self) {
+        self.created.clear();
+    }
+}
+
+impl Drop for NewBlobs<'_> {
+    fn drop(&mut self) {
+        for path in &self.created {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 pub struct AttachmentStore {
     dir: PathBuf,
     rasterizer: Arc<dyn PdfRasterizer>,
+    cache: Mutex<EncodedCache>,
 }
 
 /// `AttachmentMeta` columns for a query over `attachments a`.
@@ -168,6 +267,16 @@ fn guess_mime(name: &str) -> &'static str {
     }
 }
 
+fn regular_file(meta: std::fs::Metadata) -> Result<()> {
+    if meta.is_file() {
+        Ok(())
+    } else {
+        Err(Error::InvalidInput(
+            "only regular files can be attached".into(),
+        ))
+    }
+}
+
 impl AttachmentStore {
     /// A store that renders PDFs with the operating system's engine.
     pub fn new(dir: PathBuf) -> Self {
@@ -175,7 +284,11 @@ impl AttachmentStore {
     }
 
     pub fn with_rasterizer(dir: PathBuf, rasterizer: Arc<dyn PdfRasterizer>) -> Self {
-        Self { dir, rasterizer }
+        Self {
+            dir,
+            rasterizer,
+            cache: Mutex::default(),
+        }
     }
 
     fn blob_path(&self, sha256: &str) -> PathBuf {
@@ -185,14 +298,13 @@ impl AttachmentStore {
     /// Reads a user-selected file and decides what it is by content: a PDF (leading
     /// `%PDF-`), bounded UTF-8 text, or a known image format. No database access.
     pub fn load(&self, path: &Path) -> Result<LoadedFile> {
-        if !std::fs::metadata(path)?.is_file() {
-            return Err(Error::InvalidInput(
-                "only regular files can be attached".into(),
-            ));
-        }
+        // The path is checked first so a FIFO or device is never opened (that can block),
+        // and the open handle again, because that is what is actually read.
+        regular_file(std::fs::metadata(path)?)?;
+        let mut file = std::fs::File::open(path)?;
+        regular_file(file.metadata()?)?;
         // The size limit depends on the kind, so sniff the first bytes and then read at
         // most one byte past that kind's limit — never trusting a size reported earlier.
-        let mut file = std::fs::File::open(path)?;
         let mut bytes = Vec::new();
         file.by_ref()
             .take(PDF_MAGIC.len() as u64)
@@ -244,10 +356,31 @@ impl AttachmentStore {
         })
     }
 
-    /// The stored attachment with the same content, if any. Checking before `prepare`
-    /// means a file that was attached before is never rendered again.
+    /// The stored attachment with the same content, if any and if it is complete. Checking
+    /// before `prepare` means a file that was attached before is never rendered again —
+    /// unless its stored pages are stale (`is_stale`).
     pub fn find(&self, conn: &Connection, file: &LoadedFile) -> Result<Option<AttachmentMeta>> {
-        self.get_by_hash(conn, &file.sha256)
+        match self.get_by_hash(conn, &file.sha256)? {
+            Some(meta) if !self.is_stale(conn, &meta)? => Ok(Some(meta)),
+            _ => Ok(None),
+        }
+    }
+
+    /// A PDF whose pages should be rendered again: by an older renderer
+    /// (`pdf::RENDER_VERSION`), or cut short by the time budget on an earlier import.
+    fn is_stale(&self, conn: &Connection, meta: &AttachmentMeta) -> Result<bool> {
+        if meta.kind() != AttachmentKind::Pdf {
+            return Ok(false);
+        }
+        let version: Option<u32> = conn
+            .query_row(
+                "SELECT render_version FROM attachments WHERE id = ?1",
+                params![meta.id],
+                |r| r.get(0),
+            )
+            .map_err(sql_err)?;
+        let expected = RenderOptions::default().expected_pages(meta.page_count.unwrap_or(0));
+        Ok(version != Some(RENDER_VERSION) || meta.pages_rendered < expected)
     }
 
     /// Derives what will be stored next to the original — for PDFs, the page images.
@@ -262,53 +395,100 @@ impl AttachmentStore {
         Ok(PreparedAttachment { file, pdf })
     }
 
-    /// Stores the blobs and records the attachment and its pages in one transaction.
-    /// Identical content that was committed in the meantime returns the existing record.
+    /// Stores the blobs and records the attachment and its pages in one transaction; on
+    /// failure, blobs it created are removed again. Identical content committed in the
+    /// meantime returns the existing record, unless that record is stale: then its pages
+    /// are replaced and it keeps its id, so messages that refer to it see the new pages.
     pub fn commit(
         &self,
         conn: &Connection,
         prepared: PreparedAttachment,
     ) -> Result<AttachmentMeta> {
         let PreparedAttachment { file, pdf } = prepared;
-        if let Some(existing) = self.get_by_hash(conn, &file.sha256)? {
-            return Ok(existing);
+        let existing = self.get_by_hash(conn, &file.sha256)?;
+        if let Some(existing) = &existing {
+            if !self.is_stale(conn, existing)? {
+                return Ok(existing.clone());
+            }
         }
         std::fs::create_dir_all(&self.dir)?;
-        self.write_blob(&file.sha256, &file.bytes)?;
+        let mut blobs = NewBlobs {
+            store: self,
+            created: Vec::new(),
+        };
+        blobs.write(&file.sha256, &file.bytes)?;
         let mut pages = Vec::new();
         for page in pdf.iter().flat_map(|p| &p.pages) {
             let sha256 = hex(&Sha256::digest(&page.bytes));
-            self.write_blob(&sha256, &page.bytes)?;
+            blobs.write(&sha256, &page.bytes)?;
             pages.push((sha256, page.mime));
         }
+        let thumbnail = match &pdf {
+            Some(p) => {
+                let sha256 = hex(&Sha256::digest(&p.thumbnail.bytes));
+                blobs.write(&sha256, &p.thumbnail.bytes)?;
+                Some((sha256, p.thumbnail.mime))
+            }
+            None => None,
+        };
+        let (thumb_sha, thumb_mime) = thumbnail.unzip();
+        let render_version = pdf.is_some().then_some(RENDER_VERSION);
 
-        let record = AttachmentMeta {
+        let replacing = existing.is_some();
+        let mut record = existing.unwrap_or_else(|| AttachmentMeta {
             id: uuid::Uuid::new_v4().to_string(),
             sha256: file.sha256,
             name: file.name,
             mime: file.mime.to_owned(),
             size_bytes: file.bytes.len() as i64,
             char_count: file.char_count,
-            page_count: pdf.as_ref().map(|p| p.page_count),
-            pages_rendered: pages.len() as u32,
-        };
+            page_count: None,
+            pages_rendered: 0,
+        });
+        record.page_count = pdf.as_ref().map(|p| p.page_count);
+        record.pages_rendered = pages.len() as u32;
+
         let tx = conn.unchecked_transaction().map_err(sql_err)?;
-        tx.execute(
-            "INSERT INTO attachments
-                 (id, sha256, name, mime, size_bytes, char_count, page_count, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                record.id,
-                record.sha256,
-                record.name,
-                record.mime,
-                record.size_bytes,
-                record.char_count,
-                record.page_count,
-                now_ms()
-            ],
-        )
-        .map_err(sql_err)?;
+        if replacing {
+            tx.execute(
+                "UPDATE attachments SET page_count = ?2, render_version = ?3,
+                     thumbnail_sha256 = ?4, thumbnail_mime = ?5 WHERE id = ?1",
+                params![
+                    record.id,
+                    record.page_count,
+                    render_version,
+                    thumb_sha,
+                    thumb_mime
+                ],
+            )
+            .map_err(sql_err)?;
+            tx.execute(
+                "DELETE FROM attachment_pages WHERE attachment_id = ?1",
+                params![record.id],
+            )
+            .map_err(sql_err)?;
+        } else {
+            tx.execute(
+                "INSERT INTO attachments
+                     (id, sha256, name, mime, size_bytes, char_count, page_count, created_at,
+                      render_version, thumbnail_sha256, thumbnail_mime)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    record.id,
+                    record.sha256,
+                    record.name,
+                    record.mime,
+                    record.size_bytes,
+                    record.char_count,
+                    record.page_count,
+                    now_ms(),
+                    render_version,
+                    thumb_sha,
+                    thumb_mime
+                ],
+            )
+            .map_err(sql_err)?;
+        }
         for (index, (sha256, mime)) in pages.iter().enumerate() {
             tx.execute(
                 "INSERT INTO attachment_pages (attachment_id, page_index, sha256, mime)
@@ -318,6 +498,7 @@ impl AttachmentStore {
             .map_err(sql_err)?;
         }
         tx.commit().map_err(sql_err)?;
+        blobs.keep();
         Ok(record)
     }
 
@@ -334,9 +515,12 @@ impl AttachmentStore {
 
     fn write_blob(&self, sha256: &str, bytes: &[u8]) -> Result<()> {
         let tmp = self.dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
-        std::fs::write(&tmp, bytes)?;
-        std::fs::rename(&tmp, self.blob_path(sha256))?;
-        Ok(())
+        let written = std::fs::write(&tmp, bytes)
+            .and_then(|()| std::fs::rename(&tmp, self.blob_path(sha256)));
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        Ok(written?)
     }
 
     pub fn get(&self, conn: &Connection, id: &str) -> Result<Option<AttachmentMeta>> {
@@ -375,28 +559,14 @@ impl AttachmentStore {
     /// The rendered pages of a PDF in page order (empty for anything else). Only the
     /// references: read the images with `read_page`, off the database thread.
     pub fn pages(&self, conn: &Connection, meta: &AttachmentMeta) -> Result<Vec<PageRef>> {
-        self.page_refs(conn, meta, -1)
-    }
-
-    /// Page 1 of a PDF, used as its thumbnail.
-    pub fn first_page(&self, conn: &Connection, meta: &AttachmentMeta) -> Result<Option<PageRef>> {
-        Ok(self.page_refs(conn, meta, 1)?.pop())
-    }
-
-    fn page_refs(
-        &self,
-        conn: &Connection,
-        meta: &AttachmentMeta,
-        limit: i64,
-    ) -> Result<Vec<PageRef>> {
         let mut stmt = conn
             .prepare_cached(
                 "SELECT sha256, mime FROM attachment_pages WHERE attachment_id = ?1
-                 ORDER BY page_index LIMIT ?2",
+                 ORDER BY page_index",
             )
             .map_err(sql_err)?;
         let rows = stmt
-            .query_map(params![meta.id, limit], |r| {
+            .query_map(params![meta.id], |r| {
                 Ok(PageRef {
                     sha256: r.get(0)?,
                     mime: r.get(1)?,
@@ -404,6 +574,22 @@ impl AttachmentStore {
             })
             .map_err(sql_err)?;
         rows.map(|r| r.map_err(sql_err)).collect()
+    }
+
+    /// The small page-1 image of a PDF, for chips in the UI.
+    pub fn thumbnail(&self, conn: &Connection, meta: &AttachmentMeta) -> Result<Option<PageRef>> {
+        let row: Option<(Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT thumbnail_sha256, thumbnail_mime FROM attachments WHERE id = ?1",
+                params![meta.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        Ok(match row {
+            Some((Some(sha256), Some(mime))) => Some(PageRef { sha256, mime }),
+            _ => None,
+        })
     }
 
     /// Looks up what `load_content` will need for `meta`, for a model that does
@@ -428,23 +614,42 @@ impl AttachmentStore {
 
     /// Reads and encodes an attachment's payload for the request compiler. File access
     /// only — page images run to megabytes, so call this off the database thread.
+    /// Recently encoded images and pages come from memory.
     pub fn load_content(&self, source: &AttachmentSource) -> Result<AttachmentContent> {
         let meta = &source.meta;
         Ok(match meta.kind() {
             AttachmentKind::Text => AttachmentContent::Text(self.read_text(meta)?),
             _ if !source.visible => AttachmentContent::Omitted,
-            AttachmentKind::Image => {
-                AttachmentContent::image(meta.mime.clone(), &self.read_bytes(meta)?)
-            }
+            AttachmentKind::Image => AttachmentContent::Image {
+                mime: meta.mime.clone(),
+                data_base64: self.encoded(&meta.sha256, || self.read_bytes(meta))?,
+            },
             AttachmentKind::Pdf => AttachmentContent::Pages {
                 total: meta.page_count.unwrap_or(source.pages.len() as u32),
                 pages: source
                     .pages
                     .iter()
-                    .map(|p| Ok(PageData::new(p.mime.clone(), &self.read_page(p)?)))
+                    .map(|p| {
+                        Ok(PageData {
+                            mime: p.mime.clone(),
+                            data_base64: self.encoded(&p.sha256, || self.read_page(p))?,
+                        })
+                    })
                     .collect::<Result<_>>()?,
             },
         })
+    }
+
+    /// Base64 of the blob `sha256`, from the cache or else `read` and cached.
+    fn encoded(&self, sha256: &str, read: impl FnOnce() -> Result<Vec<u8>>) -> Result<Arc<str>> {
+        if let Some(hit) = self.cache.lock().ok().and_then(|c| c.get(sha256)) {
+            return Ok(hit);
+        }
+        let data = encode_base64(&read()?);
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.insert(sha256, data.clone());
+        }
+        Ok(data)
     }
 
     /// Loads the stored text. The blob is immutable, so the hash is the integrity check.
@@ -453,13 +658,19 @@ impl AttachmentStore {
             .map_err(|_| Error::Io("attachment is not valid UTF-8".into()))
     }
 
-    /// Loads raw blob bytes (images and other non-text payloads) with the same integrity check.
+    /// Loads the original file's bytes, with the same integrity check, naming the
+    /// attachment in the error.
     pub fn read_bytes(&self, meta: &AttachmentMeta) -> Result<Vec<u8>> {
-        self.read_blob(&meta.sha256)
-            .map_err(|_| Error::Io(format!("attachment {} failed integrity check", meta.name)))
+        self.read_blob(&meta.sha256).map_err(|e| {
+            let why = match e {
+                Error::Io(why) => why,
+                other => other.to_string(),
+            };
+            Error::Io(format!("attachment {}: {why}", meta.name))
+        })
     }
 
-    /// Loads one rendered page image.
+    /// Loads one rendered page or thumbnail image.
     pub fn read_page(&self, page: &PageRef) -> Result<Vec<u8>> {
         self.read_blob(&page.sha256)
     }
@@ -467,11 +678,20 @@ impl AttachmentStore {
     fn read_blob(&self, sha256: &str) -> Result<Vec<u8>> {
         // Hashes come from the database, but a blob name must never become a path.
         if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(Error::Io("attachment has an invalid content hash".into()));
+            return Err(Error::Io(
+                "the stored copy has an invalid content hash".into(),
+            ));
         }
-        let bytes = std::fs::read(self.blob_path(sha256))?;
+        let bytes = std::fs::read(self.blob_path(sha256)).map_err(|e| {
+            Error::Io(match e.kind() {
+                std::io::ErrorKind::NotFound => "the stored copy is missing".into(),
+                _ => format!("the stored copy could not be read ({e})"),
+            })
+        })?;
         if hex(&Sha256::digest(&bytes)) != sha256 {
-            return Err(Error::Io("attachment failed integrity check".into()));
+            return Err(Error::Io(
+                "the stored copy failed its integrity check".into(),
+            ));
         }
         Ok(bytes)
     }
@@ -504,13 +724,15 @@ mod tests {
     use super::*;
 
     use crate::pdf::{fixtures, PageImage};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// Stands in for the OS renderer: one distinct fake image per page, capped like the
-    /// real one, and a count of how often it ran.
+    /// real one, and a count of how often it ran. `slow` makes it stop after one page, as
+    /// if the time budget ran out.
     #[derive(Default)]
     struct FakeRasterizer {
         renders: AtomicUsize,
+        slow: AtomicBool,
     }
 
     impl PdfRasterizer for FakeRasterizer {
@@ -524,14 +746,23 @@ mod tests {
             if page_count == 0 {
                 return Err(Error::InvalidInput("the PDF is damaged".into()));
             }
+            let rendered = if self.slow.load(Ordering::SeqCst) {
+                1
+            } else {
+                opts.expected_pages(page_count)
+            };
             Ok(RenderedPdf {
                 page_count,
-                pages: (0..page_count.min(opts.max_pages))
+                pages: (0..rendered)
                     .map(|i| PageImage {
                         mime: "image/png",
                         bytes: format!("page {i} of {}", bytes.len()).into_bytes(),
                     })
                     .collect(),
+                thumbnail: PageImage {
+                    mime: "image/png",
+                    bytes: format!("thumbnail of {}", bytes.len()).into_bytes(),
+                },
             })
         }
     }
@@ -583,7 +814,9 @@ mod tests {
 
         let refs = store.pages(&c, &a).unwrap();
         assert_eq!(refs.len(), 3);
-        assert_eq!(store.first_page(&c, &a).unwrap().as_ref(), refs.first());
+        let thumb = store.thumbnail(&c, &a).unwrap().unwrap();
+        let expected = format!("thumbnail of {}", bytes.len());
+        assert_eq!(store.read_page(&thumb).unwrap(), expected.as_bytes());
         for (i, page) in refs.iter().enumerate() {
             assert_eq!(page.mime, "image/png");
             let expected = format!("page {i} of {}", bytes.len());
@@ -689,15 +922,140 @@ mod tests {
             assert_eq!(meta.unusable_reason(&vision(true)), None);
         }
         assert_eq!(text.unusable_reason(&vision(false)), None);
-        assert!(image
-            .unusable_reason(&vision(false))
-            .unwrap()
-            .contains("image attachments"));
-        assert!(pdf
-            .unusable_reason(&vision(false))
-            .unwrap()
-            .contains("PDFs are sent as page images"));
+        assert_eq!(
+            image.unusable_reason(&vision(false)),
+            Some(IMAGE_NEEDS_VISION)
+        );
+        assert_eq!(pdf.unusable_reason(&vision(false)), Some(PDF_NEEDS_VISION));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The UI shows the same reasons (`src/lib/attachments.ts`); both sides are pinned to
+    /// one file so they cannot drift apart.
+    #[test]
+    fn reasons_match_the_ui() {
+        let pinned: HashMap<String, String> =
+            serde_json::from_str(include_str!("../../../../src/lib/attachment-reasons.json"))
+                .unwrap();
+        assert_eq!(pinned["image"], IMAGE_NEEDS_VISION);
+        assert_eq!(pinned["pdf"], PDF_NEEDS_VISION);
+        assert_eq!(pinned.len(), 2);
+    }
+
+    #[test]
+    fn a_cut_short_render_is_redone_on_the_next_attach() {
+        let fake = Arc::new(FakeRasterizer::default());
+        let (c, store, dir) = setup_with(fake.clone());
+        let file = dir.join("a.pdf");
+        std::fs::write(&file, fixtures::pdf(&pages(3))).unwrap();
+        fake.slow.store(true, Ordering::SeqCst);
+        let partial = store.import_file(&c, &file).unwrap();
+        assert_eq!(partial.pages_rendered, 1);
+
+        fake.slow.store(false, Ordering::SeqCst);
+        let full = store.import_file(&c, &file).unwrap();
+        assert_eq!(fake.renders.load(Ordering::SeqCst), 2);
+        assert_eq!(full.id, partial.id, "messages keep pointing at it");
+        assert_eq!(full.pages_rendered, 3);
+        assert_eq!(store.pages(&c, &full).unwrap().len(), 3);
+        assert_eq!(store.get(&c, &full.id).unwrap().unwrap(), full);
+
+        // Complete now, so the next attach reuses it.
+        store.import_file(&c, &file).unwrap();
+        assert_eq!(fake.renders.load(Ordering::SeqCst), 2);
+
+        // Pages from an older renderer are redone too.
+        c.execute("UPDATE attachments SET render_version = 0", [])
+            .unwrap();
+        store.import_file(&c, &file).unwrap();
+        assert_eq!(fake.renders.load(Ordering::SeqCst), 3);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_commit_removes_the_blobs_it_wrote() {
+        let (c, store, dir) = setup();
+        let shared = dir.join("shared.txt");
+        std::fs::write(&shared, "kept").unwrap();
+        let kept = store.import_file(&c, &shared).unwrap();
+
+        let file = dir.join("a.pdf");
+        std::fs::write(&file, fixtures::pdf(&pages(2))).unwrap();
+        let prepared = store.prepare(store.load(&file).unwrap()).unwrap();
+        c.execute_batch("DROP TABLE attachment_pages").unwrap();
+        assert!(store.commit(&c, prepared).is_err());
+
+        let rows: i64 = c
+            .query_row("SELECT COUNT(*) FROM attachments", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "the insert was rolled back");
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        let mut expected = vec![kept.sha256.clone(), "a.pdf".into(), "shared.txt".into()];
+        expected.sort();
+        assert_eq!(left, expected, "only blobs that existed before remain");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn read_errors_say_what_went_wrong() {
+        let (c, store, dir) = setup();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let a = store.import_file(&c, &file).unwrap();
+        let blob = dir.join(&a.sha256);
+
+        std::fs::write(&blob, "tampered").unwrap();
+        let err = store.read_bytes(&a).unwrap_err().to_string();
+        assert!(
+            err.contains("a.txt: the stored copy failed its integrity check"),
+            "{err}"
+        );
+
+        std::fs::remove_file(&blob).unwrap();
+        let err = store.read_bytes(&a).unwrap_err().to_string();
+        assert!(err.contains("a.txt: the stored copy is missing"), "{err}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn sent_images_are_encoded_once() {
+        let (c, store, dir) = setup();
+        let file = dir.join("a.pdf");
+        std::fs::write(&file, fixtures::pdf(&pages(2))).unwrap();
+        let pdf = store.import_file(&c, &file).unwrap();
+        let source = store.source(&c, pdf.clone(), true).unwrap();
+        let AttachmentContent::Pages { pages: first, .. } = store.load_content(&source).unwrap()
+        else {
+            panic!("expected pages")
+        };
+        // Served from memory: the blobs are no longer read, and the payload is shared.
+        for page in store.pages(&c, &pdf).unwrap() {
+            std::fs::remove_file(dir.join(&page.sha256)).unwrap();
+        }
+        let AttachmentContent::Pages { pages: again, .. } = store.load_content(&source).unwrap()
+        else {
+            panic!("expected pages")
+        };
+        assert!(Arc::ptr_eq(&first[0].data_base64, &again[0].data_base64));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_cache_evicts_the_oldest_entries() {
+        let mut cache = EncodedCache::default();
+        let big: Arc<str> = "x".repeat(ENCODED_CACHE_BYTES / 2).into();
+        cache.insert("a", big.clone());
+        cache.insert("b", big.clone());
+        cache.insert("c", big.clone());
+        assert!(cache.get("a").is_none());
+        assert!(cache.get("b").is_some() && cache.get("c").is_some());
+        assert_eq!(cache.bytes, ENCODED_CACHE_BYTES);
+        cache.insert("huge", "x".repeat(ENCODED_CACHE_BYTES + 1).into());
+        assert!(cache.get("huge").is_none());
     }
 
     #[test]
@@ -726,7 +1084,7 @@ mod tests {
         };
         assert_eq!((total, pages.len()), (25, 20));
         let first = base64::engine::general_purpose::STANDARD
-            .decode(&pages[0].data_base64)
+            .decode(&*pages[0].data_base64)
             .unwrap();
         assert!(first.starts_with(b"page 0 of "));
 

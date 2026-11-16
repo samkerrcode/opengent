@@ -174,6 +174,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how proposals are approved.
   Anthropic built-in tools or prompt caching yet). The remaining native adapters — xAI
   first — arrive during [Phase 5](#native-providers).
 - Scheduled runs only fire while the app is open.
+- PDFs are rendered inside the app's process by the OS renderer, not in a sandboxed helper,
+  and its time budget is only checked between pages (see [SECURITY.md](SECURITY.md)).
+- Attachments are never deleted from disk, even when their chat is.
 - Installers are unsigned, so macOS and Windows warn on first launch (see [Install](#install)).
 
 ## Security

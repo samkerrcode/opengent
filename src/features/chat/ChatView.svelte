@@ -4,7 +4,7 @@
   import { chatStore, type Chat, type TurnItem } from "./chat-store.svelte";
   import Composer from "./Composer.svelte";
   import AssistantTurnView from "./AssistantTurn.svelte";
-  import { attachmentDataUrl, attachmentKind, pdfLabel } from "$lib/attachments";
+  import { attachmentDataUrl, attachmentKind, importLabel, pdfLabel } from "$lib/attachments";
   import { product } from "$lib/generated/product";
   import BrandMark from "$lib/components/BrandMark.svelte";
   import { providerStore } from "$features/providers/provider-store.svelte";
@@ -247,7 +247,7 @@
                       {#if url}<img src={url} alt="" />{:else}<span aria-hidden="true">▤</span>{/if}
                     {/await}
                     <span class="user-pdf-name">{a.name}</span>
-                    <span class="user-pdf-meta">{pdfLabel(a.page_count)}</span>
+                    <span class="user-pdf-meta">{pdfLabel(a.page_count, a.pages_rendered)}</span>
                   </li>
                 {:else}
                   <li title="{a.char_count} characters">▤ {a.name}</li>
@@ -275,6 +275,7 @@
   chatId={chat.summary.id}
   {agent}
   supportsImages={chatStore.supportsImages(chat)}
+  importing={chatStore.importing && importLabel(chatStore.importing)}
   onopenagent={() => agent && nav.editAgent(agent.id)}
   onsend={(text) => chatStore.send(chat, text)}
   onstop={() => chatStore.stop(chat)}

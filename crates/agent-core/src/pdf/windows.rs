@@ -2,21 +2,21 @@
 //! thread may already belong to one of the wrong kind (or to none), so each document is
 //! rendered on a short-lived thread that joins the multithreaded apartment itself.
 
-use windows::core::{Error as WinError, Result as WinResult, GUID, HRESULT};
+use windows::core::{Error as WinError, Result as WinResult, HRESULT};
 use windows::Data::Pdf::{PdfDocument, PdfPage, PdfPageRenderOptions};
-use windows::Graphics::Imaging::BitmapEncoder;
+use windows::Graphics::Imaging::{BitmapDecoder, BitmapEncoder};
 use windows::Storage::Streams::{DataReader, DataWriter, InMemoryRandomAccessStream};
 use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
 use windows::UI::Color;
 
-use super::{
-    corrupt, encrypted, failed, pixel_size, Budget, PageImage, PdfRasterizer, RenderOptions,
-    RenderedPdf,
-};
+use super::support::{corrupt, encrypted, failed, Budget, Target};
+use super::{PageImage, PdfRasterizer, RenderOptions, RenderedPdf};
 use crate::Result;
 
 /// `HRESULT_FROM_WIN32(ERROR_WRONG_PASSWORD)`: the document needs a password to open.
 const WRONG_PASSWORD: HRESULT = HRESULT(0x8007_052B_u32 as i32);
+/// `E_OUTOFMEMORY`: an encoded page that does not fit a WinRT buffer.
+const E_OUTOFMEMORY: HRESULT = HRESULT(0x8007_000E_u32 as i32);
 
 pub(super) struct WinRtRasterizer;
 
@@ -71,11 +71,12 @@ fn render(bytes: &[u8], opts: &RenderOptions) -> Result<RenderedPdf> {
         if index > 0 && budget.spent() {
             break;
         }
-        pages.push(render_page(&doc, index, opts)?);
+        pages.push(render_page(&doc, index, Target::page(opts), opts)?);
     }
     Ok(RenderedPdf {
         page_count: total,
         pages,
+        thumbnail: render_page(&doc, 0, Target::thumbnail(opts), opts)?,
     })
 }
 
@@ -90,36 +91,40 @@ fn load(bytes: &[u8]) -> WinResult<PdfDocument> {
     PdfDocument::LoadFromStreamAsync(&stream)?.join()
 }
 
-fn render_page(doc: &PdfDocument, index: u32, opts: &RenderOptions) -> Result<PageImage> {
+fn render_page(
+    doc: &PdfDocument,
+    index: u32,
+    target: Target,
+    opts: &RenderOptions,
+) -> Result<PageImage> {
     let page = doc.GetPage(index).map_err(|_| corrupt())?;
     let result = (|| {
         // `Size` is the page as displayed. Both destination edges are set so the bitmap
-        // can never exceed `long_edge_px` on either axis.
+        // can never exceed the target on either axis.
         let size = page.Size().map_err(|_| corrupt())?;
-        let (width, height) = pixel_size(size.Width.into(), size.Height.into(), opts.long_edge_px)
+        let (width, height, _) = target
+            .fit(size.Width.into(), size.Height.into())
             .ok_or_else(corrupt)?;
-        let encoded = |encoder: WinResult<GUID>| {
-            encoder
-                .and_then(|id| encode(&page, width, height, id))
-                .map_err(|e: WinError| failed(e.code()))
-        };
-        let png = encoded(BitmapEncoder::PngEncoderId())?;
-        if png.len() <= opts.jpeg_over_bytes {
+        let win = |e: WinError| failed(e.code());
+        let png = render_png(&page, width, height).map_err(win)?;
+        let bytes = read_all(&png).map_err(win)?;
+        if bytes.len() <= opts.jpeg_over_bytes {
             return Ok(PageImage {
                 mime: "image/png",
-                bytes: png,
+                bytes,
             });
         }
+        // Re-encode the rendered bitmap rather than rasterizing the page a second time.
         Ok(PageImage {
             mime: "image/jpeg",
-            bytes: encoded(BitmapEncoder::JpegEncoderId())?,
+            bytes: to_jpeg(&png).map_err(win)?,
         })
     })();
     let _ = page.Close();
     result
 }
 
-fn encode(page: &PdfPage, width: u32, height: u32, encoder: GUID) -> WinResult<Vec<u8>> {
+fn render_png(page: &PdfPage, width: u32, height: u32) -> WinResult<InMemoryRandomAccessStream> {
     let options = PdfPageRenderOptions::new()?;
     options.SetDestinationWidth(width)?;
     options.SetDestinationHeight(height)?;
@@ -129,18 +134,31 @@ fn encode(page: &PdfPage, width: u32, height: u32, encoder: GUID) -> WinResult<V
         G: 255,
         B: 255,
     })?;
-    options.SetBitmapEncoderId(encoder)?;
+    options.SetBitmapEncoderId(BitmapEncoder::PngEncoderId()?)?;
     let out = InMemoryRandomAccessStream::new()?;
     page.RenderWithOptionsToStreamAsync(&out, &options)?
         .join()?;
+    Ok(out)
+}
 
-    let len = u32::try_from(out.Size()?).map_err(|_| WinError::from(WRONG_SIZE))?;
-    let reader = DataReader::CreateDataReader(&out.GetInputStreamAt(0)?)?;
+fn to_jpeg(png: &InMemoryRandomAccessStream) -> WinResult<Vec<u8>> {
+    png.Seek(0)?;
+    let bitmap = BitmapDecoder::CreateAsync(png)?
+        .join()?
+        .GetSoftwareBitmapAsync()?
+        .join()?;
+    let out = InMemoryRandomAccessStream::new()?;
+    let encoder = BitmapEncoder::CreateAsync(BitmapEncoder::JpegEncoderId()?, &out)?.join()?;
+    encoder.SetSoftwareBitmap(&bitmap)?;
+    encoder.FlushAsync()?.join()?;
+    read_all(&out)
+}
+
+fn read_all(stream: &InMemoryRandomAccessStream) -> WinResult<Vec<u8>> {
+    let len = u32::try_from(stream.Size()?).map_err(|_| WinError::from(E_OUTOFMEMORY))?;
+    let reader = DataReader::CreateDataReader(&stream.GetInputStreamAt(0)?)?;
     reader.LoadAsync(len)?.join()?;
     let mut bytes = vec![0; len as usize];
     reader.ReadBytes(&mut bytes)?;
     Ok(bytes)
 }
-
-/// `E_OUTOFMEMORY`: an encoded page that does not fit a WinRT buffer.
-const WRONG_SIZE: HRESULT = HRESULT(0x8007_000E_u32 as i32);

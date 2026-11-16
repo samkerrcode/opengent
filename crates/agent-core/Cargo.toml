@@ -21,7 +21,8 @@ native-pdf = [
 ]
 
 [dependencies]
-serde.workspace = true
+# `rc`: request-path image payloads are shared `Arc<str>`s (`ContentBlock::Image`).
+serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "rt", "macros", "process", "fs", "net", "io-util"] }

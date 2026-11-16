@@ -1,5 +1,12 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { attachmentKind, blockedReason, pdfLabel } from "./attachments";
+import { attachmentKind, blockedReason, importLabel, pdfLabel } from "./attachments";
+
+// Shared with the Rust test `reasons_match_the_ui`, so the two gates can't drift apart.
+const reasons = JSON.parse(readFileSync(new URL("./attachment-reasons.json", import.meta.url), "utf8")) as Record<
+  string,
+  string
+>;
 
 const png = { mime: "image/png" };
 const pdf = { mime: "application/pdf" };
@@ -24,10 +31,9 @@ describe("blockedReason", () => {
   it("blocks images and PDFs, but not text, on a text-only model", () => {
     expect(blockedReason(source, { images: false })).toBeNull();
     expect(blockedReason(json, { images: false })).toBeNull();
-    expect(blockedReason(png, { images: false })).toBe("the selected model does not accept image attachments");
-    expect(blockedReason(pdf, { images: false })).toBe(
-      "the selected model does not accept images, and PDFs are sent as page images",
-    );
+    expect(blockedReason(png, { images: false })).toBe(reasons.image);
+    expect(blockedReason(pdf, { images: false })).toBe(reasons.pdf);
+    expect(Object.keys(reasons).sort()).toEqual(["image", "pdf"]);
   });
 });
 
@@ -45,5 +51,14 @@ describe("pdfLabel", () => {
     expect(pdfLabel(57)).toBe("PDF · 57 pages");
     expect(pdfLabel(null)).toBe("PDF");
     expect(pdfLabel(undefined, 3)).toBe("PDF");
+    expect(pdfLabel(57, null)).toBe("PDF · 57 pages");
+  });
+});
+
+describe("importLabel", () => {
+  it("names the file being rendered and clears when done", () => {
+    expect(importLabel({ name: "a.pdf", done: 0, total: 1 })).toBe("Rendering a.pdf…");
+    expect(importLabel({ name: "b.pdf", done: 1, total: 3 })).toBe("Rendering b.pdf (2 of 3)…");
+    expect(importLabel({ name: null, done: 3, total: 3 })).toBeNull();
   });
 });

@@ -99,8 +99,9 @@ their pages, so the model sees layout, tables, charts and scans as well as the w
 **How to use.** Click **⌁ Attach** and pick up to 20 files, or drag files from your file
 manager and drop them anywhere on the chat — an overlay confirms the drop while you hover.
 Dropped files follow the same rules as picked ones. Attached files appear as chips (images
-as thumbnails, PDFs with a thumbnail of page 1 and their page count) in the composer and
-in the sent message. Files that can't be used are skipped individually, each with a
+as thumbnails, PDFs with a small picture of page 1 and their page count) in the composer and
+in the sent message. While a PDF is being turned into page images the composer says so
+(*Rendering report.pdf…*). Files that can't be used are skipped individually, each with a
 reason. Drops are ignored while the Agents view or a settings dialog is open.
 
 | Kind | Accepted | Notes |
@@ -123,30 +124,43 @@ images. Decided per provider and model, in this order:
    server says nothing.
 
 **How it works.** Files are copied into `~/.opengent/attachments` when attached, so later
-edits to the original don't change the chat. Identical files are stored once. Images are
-and PDFs are identified by their content, not their extension. If you switch to a
-text-only model with images or PDFs pending, they are flagged and Send is blocked until you
-remove them; reopening an old chat with images or PDFs on a text-only model replaces each
-one with a labeled placeholder rather than dropping it silently.
+edits to the original don't change the chat. Identical files are stored once. Images and
+PDFs are identified by their content, not their extension. Images and PDFs picked while a
+text-only model is selected are skipped straight away. If you switch to a text-only model
+with images or PDFs pending, they are flagged and Send is blocked until you remove them;
+reopening an old chat with images or PDFs on a text-only model replaces each one with a
+labeled placeholder rather than dropping it silently.
 
 A PDF is turned into page images once, when you attach it, by the PDF renderer built into
-macOS or Windows — the same one Preview and Edge use. Each page is drawn on a white
-background at up to 1,568 pixels on its longer side and stored next to the original, so
-every later message in the chat reuses the same images. The chip shows what will be sent:
-*PDF · 12 pages*, or *PDF · pages 1–20 of 57* when the document is longer than the page
-limit; the model is told about the cut too. Attaching the same PDF again reuses the stored
-pages.
+the operating system (CoreGraphics on macOS, Windows.Data.Pdf on Windows), running inside
+the app itself. Each page is drawn on a white background at up to 1,568 pixels on its longer
+side and about 1.15 megapixels in total — roughly what vision models look at anyway — and
+stored next to the original, so every later message in the chat reuses the same images.
+Each page reaches the model labeled with its document and page number, so pages from
+several PDFs in one message stay apart. The chip shows what will be sent: *PDF · 12 pages*,
+or *PDF · pages 1–20 of 57* when the document is longer than the page limit; the model is
+told about the cut too. Attaching the same PDF again reuses the stored pages, unless the
+earlier import was cut short (see below) — then it is rendered again.
+
+One request carries at most 100 images and about 16 MiB of image data, counting attached
+images and PDF pages together, so a chat full of PDFs stays within what providers accept.
+The newest messages keep theirs; once the allowance is spent, pages from older messages are
+left out and the model is told which attachments were omitted. Attach a file again to bring
+it back into view.
 
 **Limits.** 20 files per message. Text files and images: 2 MiB each. PDFs: 32 MiB each.
 Each image counts as roughly 1,500 tokens of context, and so does each PDF page — a 20-page
 PDF is about 30,000 tokens, re-sent with every message while it is in the chat's history,
 so long PDFs need a model with a large context window. Only the first 20 pages of a PDF are
-sent; split a longer document to cover the rest. Password-protected and damaged PDFs are
-skipped with a reason, as are files that do not begin with the PDF marker `%PDF-`. Text in
-a PDF is read by the model from the page images, not extracted, so text-only models cannot
-use PDFs yet and very small print may be misread. Each PDF keeps its original plus its page
-images on disk (typically 5–15 MiB for 20 pages). On Linux and other platforms without a
-built-in renderer, PDFs are skipped.
+sent; split a longer document to cover the rest. Rendering stops early if a PDF takes more
+than 30 seconds, keeping the pages finished by then; the time is checked between pages, so
+a single very complex page can take longer. Password-protected and damaged PDFs are skipped
+with a reason, as are files that do not begin with the PDF marker `%PDF-`. Text in a PDF is
+read by the model from the page images, not extracted, so text-only models cannot use PDFs
+yet and very small print may be misread. Each PDF keeps its original plus its page images
+on disk (typically 2–8 MiB for 20 pages); attachments are not deleted from disk yet, even
+when their chat is. A dropped PDF is rendered before the app checks whether the chat's model
+can use it. On Linux and other platforms without a built-in renderer, PDFs are skipped.
 
 ### History & search
 

@@ -3,6 +3,7 @@
 //! references are expanded into clearly labeled, bounded excerpts.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::config::product;
 use crate::domain::{ContentBlock, Message, Role};
@@ -17,6 +18,12 @@ pub const DEFAULT_CONTEXT_TOKENS: u32 = 8192;
 const OUTPUT_RESERVE: f32 = 0.25;
 /// Per-attachment cap on expanded characters; the remainder is elided with a note.
 pub const MAX_ATTACHMENT_CHARS: usize = 60_000;
+/// Images (attached images and PDF pages) one request may carry. Providers cap this
+/// (Anthropic: 100), and history replays every image on every turn.
+pub const MAX_REQUEST_IMAGES: u32 = 100;
+/// Base64 bytes of images one request may carry, below the smallest provider request
+/// limit (Gemini: 20 MB; Anthropic: 32 MB) with room for the text.
+pub const MAX_REQUEST_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 
 pub fn system_prompt() -> String {
     format!(
@@ -196,19 +203,27 @@ pub fn estimate_tokens(text: &str) -> u32 {
     (text.chars().count() as u32).div_ceil(3)
 }
 
+/// Base64 for an image payload. Shared, because the same page is referenced by the
+/// content map, the compiled request and the attachment store's cache.
+pub fn encode_base64(bytes: &[u8]) -> Arc<str> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .encode(bytes)
+        .into()
+}
+
 /// One rendered PDF page, ready to send as an image.
 #[derive(Debug, Clone)]
 pub struct PageData {
     pub mime: String,
-    pub data_base64: String,
+    pub data_base64: Arc<str>,
 }
 
 impl PageData {
     pub fn new(mime: String, bytes: &[u8]) -> Self {
-        use base64::Engine;
         Self {
             mime,
-            data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            data_base64: encode_base64(bytes),
         }
     }
 }
@@ -220,7 +235,7 @@ pub enum AttachmentContent {
     Text(String),
     Image {
         mime: String,
-        data_base64: String,
+        data_base64: Arc<str>,
     },
     /// A PDF as page images: the leading `pages` of a document with `total` pages.
     Pages {
@@ -240,6 +255,46 @@ impl AttachmentContent {
 }
 
 pub type AttachmentContents = HashMap<String, AttachmentContent>;
+
+/// What is left of one request's image allowance (`MAX_REQUEST_IMAGES`,
+/// `MAX_REQUEST_IMAGE_BYTES`). `compile` renders history newest first, so the current
+/// turn is served first and older turns' images degrade to placeholders once it runs out.
+#[derive(Debug, Clone)]
+pub struct ImageBudget {
+    images: u32,
+    bytes: usize,
+}
+
+impl Default for ImageBudget {
+    fn default() -> Self {
+        Self::new(MAX_REQUEST_IMAGES, MAX_REQUEST_IMAGE_BYTES)
+    }
+}
+
+impl ImageBudget {
+    pub fn new(images: u32, bytes: usize) -> Self {
+        Self { images, bytes }
+    }
+
+    /// No limit, for rendering outside a request.
+    pub fn unlimited() -> Self {
+        Self::new(u32::MAX, usize::MAX)
+    }
+
+    /// Spends room for one image of `len` base64 bytes, if there is any.
+    fn take(&mut self, len: usize) -> bool {
+        if self.images == 0 || len > self.bytes {
+            return false;
+        }
+        self.images -= 1;
+        self.bytes -= len;
+        true
+    }
+}
+
+const NO_VISION: &str = "the selected model cannot process images";
+const OVER_IMAGE_LIMIT: &str =
+    "this request already carries as many images as it can; attach the file again to include it";
 
 fn expand_attachment(id: &str, name: &str, mime: &str, contents: &AttachmentContents) -> String {
     let Some(AttachmentContent::Text(text)) = contents.get(id) else {
@@ -272,18 +327,38 @@ fn expand_attachment(id: &str, name: &str, mime: &str, contents: &AttachmentCont
 }
 
 /// Announces a PDF whose pages follow as images, and says so when only the leading pages
-/// are included.
-fn pdf_manifest(name: &str, mime: &str, total: u32, shown: usize) -> String {
+/// are included: `limited` when the request's image allowance cut it short.
+fn pdf_manifest(name: &str, mime: &str, total: u32, shown: usize, limited: bool) -> String {
     let mut out = format!(
         "<attachment name=\"{}\" type=\"{}\" pages=\"{total}\" shown=\"{shown}\"",
         escape(name),
         escape(mime)
     );
     if (shown as u64) < u64::from(total) {
-        out.push_str(&format!(" note=\"showing pages 1–{shown} of {total}\""));
+        out.push_str(&format!(" note=\"showing pages 1–{shown} of {total}"));
+        if limited {
+            out.push_str(" (request image limit reached)");
+        }
+        out.push('"');
     }
     out.push_str(" />");
     out
+}
+
+/// Precedes each PDF page image, so pages from several documents stay attributable.
+fn page_label(name: &str, number: usize, total: u32) -> String {
+    format!(
+        "<page attachment=\"{}\" number=\"{number}\" of=\"{total}\" />",
+        escape(name)
+    )
+}
+
+fn omitted(name: &str, mime: &str, reason: &str) -> String {
+    format!(
+        "<attachment name=\"{}\" type=\"{}\" status=\"omitted\" reason=\"{reason}\" />",
+        escape(name),
+        escape(mime)
+    )
 }
 
 fn escape(s: &str) -> String {
@@ -296,11 +371,23 @@ fn escape(s: &str) -> String {
 /// Flattens a message for the request path: text attachments expand to labeled excerpts,
 /// image attachments become `Image` blocks when the model accepts them and a labeled
 /// placeholder otherwise (so old image turns degrade gracefully on text-only models).
-/// PDFs become a manifest line plus one `Image` block per rendered page, in page order.
+/// PDFs become a manifest line plus one labeled `Image` block per rendered page, in page
+/// order. No image limit applies; `compile` uses `render_message_within`.
 pub fn render_message(
     m: &Message,
     contents: &AttachmentContents,
     images_supported: bool,
+) -> Message {
+    render_message_within(m, contents, images_supported, &mut ImageBudget::unlimited())
+}
+
+/// `render_message`, spending `budget` on images: an image that does not fit becomes a
+/// placeholder, and a PDF keeps the leading pages that fit.
+pub fn render_message_within(
+    m: &Message,
+    contents: &AttachmentContents,
+    images_supported: bool,
+    budget: &mut ImageBudget,
 ) -> Message {
     if m.role == Role::Assistant {
         return render_assistant(m);
@@ -314,30 +401,49 @@ pub fn render_message(
             ContentBlock::Text { text } => text_parts.push(text.clone()),
             ContentBlock::Attachment { id, name, mime, .. } => match contents.get(id) {
                 Some(AttachmentContent::Image { mime, data_base64 }) if images_supported => {
-                    images.push(ContentBlock::Image {
-                        mime: mime.clone(),
-                        data: data_base64.clone(),
-                    });
+                    if budget.take(data_base64.len()) {
+                        images.push(ContentBlock::Image {
+                            mime: mime.clone(),
+                            data: data_base64.clone(),
+                        });
+                    } else {
+                        attachments.push(omitted(name, mime, OVER_IMAGE_LIMIT));
+                    }
                 }
-                Some(AttachmentContent::Pages { total, pages })
-                    if images_supported && !pages.is_empty() =>
+                Some(AttachmentContent::Pages { pages, .. })
+                    if images_supported && pages.is_empty() =>
                 {
-                    attachments.push(pdf_manifest(name, mime, *total, pages.len()));
-                    images.extend(pages.iter().map(|p| ContentBlock::Image {
-                        mime: p.mime.clone(),
-                        data: p.data_base64.clone(),
-                    }));
+                    attachments.push(format!(
+                        "<attachment name=\"{}\" type=\"{}\" status=\"unavailable\" />",
+                        escape(name),
+                        escape(mime)
+                    ));
+                }
+                Some(AttachmentContent::Pages { total, pages }) if images_supported => {
+                    let fit = pages
+                        .iter()
+                        .take_while(|p| budget.take(p.data_base64.len()))
+                        .count();
+                    if fit == 0 {
+                        attachments.push(omitted(name, mime, OVER_IMAGE_LIMIT));
+                        continue;
+                    }
+                    attachments.push(pdf_manifest(name, mime, *total, fit, fit < pages.len()));
+                    for (i, p) in pages[..fit].iter().enumerate() {
+                        images.push(ContentBlock::Text {
+                            text: page_label(name, i + 1, *total),
+                        });
+                        images.push(ContentBlock::Image {
+                            mime: p.mime.clone(),
+                            data: p.data_base64.clone(),
+                        });
+                    }
                 }
                 Some(
                     AttachmentContent::Image { .. }
                     | AttachmentContent::Pages { .. }
                     | AttachmentContent::Omitted,
-                ) => attachments.push(format!(
-                    "<attachment name=\"{}\" type=\"{}\" status=\"omitted\" \
-                     reason=\"the selected model cannot process images\" />",
-                    escape(name),
-                    escape(mime)
-                )),
+                ) => attachments.push(omitted(name, mime, NO_VISION)),
                 _ => attachments.push(expand_attachment(id, name, mime, contents)),
             },
             // Reasoning is displayed in the UI but must never be replayed to the model:
@@ -400,6 +506,16 @@ pub fn render_turn(
     contents: &AttachmentContents,
     images_supported: bool,
 ) -> Vec<Message> {
+    render_turn_within(m, contents, images_supported, &mut ImageBudget::unlimited())
+}
+
+/// `render_turn`, spending `budget` on the images it includes (`render_message_within`).
+pub fn render_turn_within(
+    m: &Message,
+    contents: &AttachmentContents,
+    images_supported: bool,
+    budget: &mut ImageBudget,
+) -> Vec<Message> {
     let has_tools = m.blocks.iter().any(|b| {
         matches!(
             b,
@@ -407,7 +523,7 @@ pub fn render_turn(
         )
     });
     if m.role != Role::Assistant || !has_tools {
-        let r = render_message(m, contents, images_supported);
+        let r = render_message_within(m, contents, images_supported, budget);
         return if r.blocks.is_empty() {
             Vec::new()
         } else {
@@ -538,7 +654,8 @@ pub struct CompiledContext {
 
 /// Keeps the most recent messages that fit, never splitting the final user turn or a tool
 /// turn's call/result steps. Dropping the oldest turns is a disclosed, lossy fallback;
-/// summarization checkpoints arrive later.
+/// summarization checkpoints arrive later. Images are capped per request too
+/// (`ImageBudget`): the newest turns keep theirs, older ones get placeholders.
 #[allow(clippy::too_many_arguments)]
 pub fn compile(
     model: &str,
@@ -559,8 +676,9 @@ pub fn compile(
     // an assistant's tool calls never survive without their results.
     let mut kept_groups: Vec<Vec<Message>> = Vec::new();
     let mut processed = 0usize;
+    let mut images = ImageBudget::default();
     for m in history.iter().rev() {
-        let rendered = render_turn(m, contents, images_supported);
+        let rendered = render_turn_within(m, contents, images_supported, &mut images);
         // Drop messages that render to nothing (e.g. an assistant turn that contains only
         // reasoning after Thinking blocks are excluded) — empty content confuses providers.
         if rendered.is_empty() {
@@ -746,6 +864,7 @@ mod tests {
                     mime: "text/x-source".into(),
                     char_count: 12,
                     page_count: None,
+                    pages_rendered: None,
                 },
                 ContentBlock::Attachment {
                     id: "missing".into(),
@@ -753,6 +872,7 @@ mod tests {
                     mime: "text/plain".into(),
                     char_count: 0,
                     page_count: None,
+                    pages_rendered: None,
                 },
             ],
         };
@@ -780,6 +900,7 @@ mod tests {
                 mime: "text/plain".into(),
                 char_count: 0,
                 page_count: None,
+                pages_rendered: None,
             }],
         };
         let ContentBlock::Text { text } = &render_message(&msg, &texts, false).blocks[0] else {
@@ -1074,6 +1195,7 @@ mod tests {
                     mime: "image/png".into(),
                     char_count: 0,
                     page_count: None,
+                    pages_rendered: None,
                 },
             ],
         };
@@ -1081,7 +1203,7 @@ mod tests {
         let r = render_message(&msg, &contents, true);
         assert!(r.blocks.iter().any(|b| matches!(
             b,
-            ContentBlock::Image { mime, data } if mime == "image/png" && data == "aGk="
+            ContentBlock::Image { mime, data } if mime == "image/png" && &**data == "aGk="
         )));
 
         // Text-only model: the image degrades to a labeled placeholder instead of vanishing.
@@ -1097,10 +1219,9 @@ mod tests {
         assert!(text.contains("cannot process images"));
     }
 
-    fn pdf_message(pages: usize, total: u32) -> (Message, AttachmentContents) {
-        let mut contents = HashMap::new();
+    fn pdf_contents(contents: &mut AttachmentContents, id: &str, pages: usize, total: u32) {
         contents.insert(
-            "p1".to_string(),
+            id.to_string(),
             AttachmentContent::Pages {
                 total,
                 pages: (0..pages)
@@ -1108,16 +1229,26 @@ mod tests {
                     .collect(),
             },
         );
+    }
+
+    fn pdf_block(id: &str, name: &str, pages: usize, total: u32) -> ContentBlock {
+        ContentBlock::Attachment {
+            id: id.into(),
+            name: name.into(),
+            mime: "application/pdf".into(),
+            char_count: 0,
+            page_count: Some(total),
+            pages_rendered: Some(pages as u32),
+        }
+    }
+
+    fn pdf_message(pages: usize, total: u32) -> (Message, AttachmentContents) {
+        let mut contents = HashMap::new();
+        pdf_contents(&mut contents, "p1", pages, total);
         let msg = Message {
             role: Role::User,
             blocks: vec![
-                ContentBlock::Attachment {
-                    id: "p1".into(),
-                    name: "re\"port.pdf".into(),
-                    mime: "application/pdf".into(),
-                    char_count: 0,
-                    page_count: Some(total),
-                },
+                pdf_block("p1", "re\"port.pdf", pages, total),
                 ContentBlock::Text {
                     text: "summarize".into(),
                 },
@@ -1126,8 +1257,15 @@ mod tests {
         (msg, contents)
     }
 
+    fn image_count(m: &Message) -> usize {
+        m.blocks
+            .iter()
+            .filter(|b| matches!(b, ContentBlock::Image { .. }))
+            .count()
+    }
+
     #[test]
-    fn pdf_becomes_a_manifest_and_one_image_per_page_in_order() {
+    fn pdf_becomes_a_manifest_and_one_labeled_image_per_page_in_order() {
         let (msg, contents) = pdf_message(3, 3);
         let r = render_message(&msg, &contents, true);
         let ContentBlock::Text { text } = &r.blocks[0] else {
@@ -1138,17 +1276,23 @@ mod tests {
             "<attachment name=\"re&quot;port.pdf\" type=\"application/pdf\" pages=\"3\" \
              shown=\"3\" />\n\nsummarize"
         );
-        let images: Vec<&str> = r.blocks[1..]
-            .iter()
-            .map(|b| match b {
-                ContentBlock::Image { mime, data } if mime == "image/png" => data.as_str(),
-                other => panic!("unexpected block {other:?}"),
-            })
-            .collect();
-        let expected: Vec<String> = (0..3)
-            .map(|i| PageData::new(String::new(), format!("page {i}").as_bytes()).data_base64)
-            .collect();
-        assert_eq!(images, expected);
+        assert_eq!(r.blocks.len(), 1 + 2 * 3);
+        for (i, pair) in r.blocks[1..].chunks(2).enumerate() {
+            let [ContentBlock::Text { text: label }, ContentBlock::Image { mime, data }] = pair
+            else {
+                panic!("unexpected blocks {pair:?}")
+            };
+            assert_eq!(
+                label,
+                &format!(
+                    "<page attachment=\"re&quot;port.pdf\" number=\"{}\" of=\"3\" />",
+                    i + 1
+                )
+            );
+            assert_eq!(mime, "image/png");
+            let expected = PageData::new(String::new(), format!("page {i}").as_bytes());
+            assert_eq!(data, &expected.data_base64);
+        }
         // Each page is budgeted like an image.
         assert!(message_tokens(&r) >= 3 * 1_500);
     }
@@ -1161,7 +1305,7 @@ mod tests {
             panic!()
         };
         assert!(text.contains("pages=\"57\" shown=\"20\" note=\"showing pages 1–20 of 57\" />"));
-        assert_eq!(r.blocks.len(), 21);
+        assert_eq!(image_count(&r), 20);
     }
 
     #[test]
@@ -1178,5 +1322,82 @@ mod tests {
             assert!(text.contains("cannot process images"));
             contents.insert("p1".into(), AttachmentContent::Omitted);
         }
+    }
+
+    #[test]
+    fn a_pdf_without_pages_is_unavailable_not_unsupported() {
+        let (msg, contents) = pdf_message(0, 3);
+        let r = render_message(&msg, &contents, true);
+        let ContentBlock::Text { text } = &r.blocks[0] else {
+            panic!()
+        };
+        assert!(text.contains("status=\"unavailable\""), "{text}");
+        assert!(!text.contains("cannot process images"));
+    }
+
+    #[test]
+    fn the_image_budget_keeps_leading_pages_and_then_omits() {
+        let mut contents = HashMap::new();
+        pdf_contents(&mut contents, "a", 3, 3);
+        pdf_contents(&mut contents, "b", 3, 3);
+        let msg = Message {
+            role: Role::User,
+            blocks: vec![pdf_block("a", "a.pdf", 3, 3), pdf_block("b", "b.pdf", 3, 3)],
+        };
+        let mut budget = ImageBudget::new(2, usize::MAX);
+        let r = render_message_within(&msg, &contents, true, &mut budget);
+        assert_eq!(image_count(&r), 2);
+        let ContentBlock::Text { text } = &r.blocks[0] else {
+            panic!()
+        };
+        assert!(text.contains(
+            "name=\"a.pdf\" type=\"application/pdf\" pages=\"3\" shown=\"2\" \
+             note=\"showing pages 1–2 of 3 (request image limit reached)\""
+        ));
+        assert!(text.contains("name=\"b.pdf\" type=\"application/pdf\" status=\"omitted\""));
+        assert!(text.contains("as many images as it can"));
+
+        // Bytes count too: an image larger than what is left does not fit.
+        let one_page = PageData::new(String::new(), b"page 0").data_base64.len();
+        let mut budget = ImageBudget::new(100, one_page * 2 - 1);
+        let r = render_message_within(&msg, &contents, true, &mut budget);
+        assert_eq!(image_count(&r), 1);
+    }
+
+    /// Heavy PDFs across turns must not push a chat past provider request limits for
+    /// good: the newest turn keeps its pages, older turns degrade to placeholders.
+    #[test]
+    fn compile_spends_the_image_budget_on_the_newest_turns_first() {
+        let mut contents = HashMap::new();
+        let mut history = Vec::new();
+        for turn in 0..6 {
+            let id = format!("p{turn}");
+            pdf_contents(&mut contents, &id, 20, 20);
+            history.push(Message {
+                role: Role::User,
+                blocks: vec![pdf_block(&id, &format!("{id}.pdf"), 20, 20)],
+            });
+            history.push(Message::text(Role::Assistant, "ok"));
+        }
+        history.pop();
+        let c = compile(
+            "m",
+            &history,
+            Some(10_000_000),
+            None,
+            &contents,
+            true,
+            &no_tools(),
+            &PromptProfile::Default,
+        );
+        let per_turn: Vec<usize> = c
+            .request
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::User)
+            .map(image_count)
+            .collect();
+        assert_eq!(per_turn, [0, 20, 20, 20, 20, 20]);
+        assert_eq!(per_turn.iter().sum::<usize>(), MAX_REQUEST_IMAGES as usize);
     }
 }

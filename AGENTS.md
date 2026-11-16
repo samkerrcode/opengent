@@ -95,7 +95,12 @@ Contributor guidelines: see CONTRIBUTING.md. Security scope: SECURITY.md.
 - Attachments: PDFs are rendered only by the OS engine behind `pdf::PdfRasterizer` (feature `native-pdf`; tests use
   a fake or the generated `pdf::fixtures`). Rendering and blob reads stay off the SQLite worker: `AttachmentStore`
   `load`/`prepare`/`load_content` are file-only, `find`/`commit`/`source` are DB-only. One gate decides what a model
-  can be sent: `AttachmentMeta::unusable_reason`, mirrored by `blockedReason` in `src/lib/attachments.ts`.
+  can be sent: `AttachmentMeta::unusable_reason`, mirrored by `blockedReason` in `src/lib/attachments.ts` (both
+  pinned to `src/lib/attachment-reasons.json`). Bump `pdf::RENDER_VERSION` when renderer output changes, so stored
+  pages are re-rendered. `context::compile` caps images per request (`ImageBudget`).
+- Windows-only code can be type-checked on macOS: `rustup target add x86_64-pc-windows-msvc --toolchain <pinned>`,
+  then compile `crates/agent-core/src/pdf` in a scratch crate (`#[path]` module + `windows` dep) with
+  `--target x86_64-pc-windows-msvc`; the full workspace needs MSVC C headers (ring, SQLite) and won't cross-check.
 - Streaming to the UI goes through `tauri::ipc::Channel` (ordered); text deltas are coalesced in `RunEmitter`.
 - Product branding only via `product.json`; `slug`, `dataDirName`, `identifier` are stable – renaming needs a migration.
 - Prefer first-party code; add external dependencies only for key capabilities.

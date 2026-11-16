@@ -18,6 +18,7 @@
     chatId,
     agent = null,
     supportsImages,
+    importing = null,
     onopenagent,
   }: {
     busy: boolean;
@@ -25,6 +26,8 @@
     pending: AttachmentMeta[];
     agent?: Agent | null;
     supportsImages: boolean;
+    /** What is being imported right now (a PDF being rendered), or null. */
+    importing?: string | null;
     onopenagent?: () => void;
     onsend: (text: string) => void;
     onstop: () => void;
@@ -109,7 +112,7 @@
         {#each pending as a (a.id)}
           <li class="file" class:unsupported={unsupported.has(a.id)}>
             {#if attachmentKind(a) !== "text"}
-              <!-- Images show themselves; PDFs show page 1. -->
+              <!-- Images show themselves; PDFs a small image of page 1. -->
               {#await attachmentDataUrl(a.id) then url}
                 {#if url}<img class="file-thumb" src={url} alt="" />{/if}
               {/await}
@@ -125,6 +128,9 @@
           </li>
         {/each}
       </ul>
+    {/if}
+    {#if importing}
+      <p class="importing" role="status">{importing}</p>
     {/if}
     <label class="visually-hidden" for="composer-input">Message</label>
     <textarea
@@ -156,7 +162,7 @@
           type="button"
           class="chip"
           onclick={onattach}
-          disabled={busy}
+          disabled={busy || importing !== null}
           title={supportsImages
             ? "Attach text files or images (up to 2 MiB each) or PDFs (up to 32 MiB each)"
             : "Attach text files (up to 2 MiB each) — the selected model does not accept images or PDFs"}
@@ -263,6 +269,12 @@
   .file.unsupported .file-name {
     color: var(--danger);
     text-decoration: line-through;
+  }
+  .importing {
+    margin: 0;
+    padding: 0 var(--space-2);
+    font-size: 12.5px;
+    color: var(--fg-faint);
   }
   .file-remove {
     padding: 0 4px;

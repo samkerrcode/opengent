@@ -14,10 +14,8 @@ use objc2_core_graphics::{
 };
 use objc2_image_io::{kCGImageDestinationLossyCompressionQuality, CGImageDestination};
 
-use super::{
-    corrupt, encrypted, failed, pixel_size, Budget, PageImage, PdfRasterizer, RenderOptions,
-    RenderedPdf,
-};
+use super::support::{corrupt, encrypted, failed, Budget, Target};
+use super::{PageImage, PdfRasterizer, RenderOptions, RenderedPdf};
 use crate::Result;
 
 pub(super) struct CoreGraphicsRasterizer;
@@ -55,22 +53,32 @@ fn render(bytes: &[u8], opts: &RenderOptions) -> Result<RenderedPdf> {
         .ok_or_else(|| failed("no sRGB colour space"))?;
     let budget = Budget::start(opts);
     let mut pages = Vec::new();
+    let mut thumbnail = None;
     for number in 1..=total.min(opts.max_pages as usize) {
         if number > 1 && budget.spent() {
             break;
         }
         pages.push(autoreleasepool(|_| {
             let page = CGPDFDocument::page(doc, number).ok_or_else(corrupt)?;
-            render_page(&page, &space, opts)
+            if number == 1 {
+                thumbnail = Some(render_page(&page, &space, Target::thumbnail(opts), opts)?);
+            }
+            render_page(&page, &space, Target::page(opts), opts)
         })?);
     }
     Ok(RenderedPdf {
         page_count: u32::try_from(total).unwrap_or(u32::MAX),
         pages,
+        thumbnail: thumbnail.ok_or_else(corrupt)?,
     })
 }
 
-fn render_page(page: &CGPDFPage, space: &CGColorSpace, opts: &RenderOptions) -> Result<PageImage> {
+fn render_page(
+    page: &CGPDFPage,
+    space: &CGColorSpace,
+    target: Target,
+    opts: &RenderOptions,
+) -> Result<PageImage> {
     let page = Some(page);
     // The crop box is what a viewer shows (CoreGraphics clamps it to the media box).
     let crop = CGPDFPage::box_rect(page, CGPDFBox::CropBox);
@@ -80,7 +88,7 @@ fn render_page(page: &CGPDFPage, space: &CGColorSpace, opts: &RenderOptions) -> 
     } else {
         (crop.size.width, crop.size.height)
     };
-    let (width, height) = pixel_size(shown_w, shown_h, opts.long_edge_px).ok_or_else(corrupt)?;
+    let (width, height, scale) = target.fit(shown_w, shown_h).ok_or_else(corrupt)?;
 
     // Opaque RGBX: transparent PDF backgrounds come out white, and the PNG has no alpha.
     // SAFETY: a null `data` asks CoreGraphics to allocate and own the pixel buffer.
@@ -106,7 +114,6 @@ fn render_page(page: &CGPDFPage, space: &CGColorSpace, opts: &RenderOptions) -> 
     // and scale. (`CGPDFPageGetDrawingTransform` would do this but never scales up.)
     CGContext::translate_ctm(ctx, w / 2.0, h / 2.0);
     CGContext::rotate_ctm(ctx, -f64::from(rotation).to_radians());
-    let scale = f64::from(opts.long_edge_px) / shown_w.max(shown_h);
     CGContext::scale_ctm(ctx, scale, scale);
     CGContext::translate_ctm(
         ctx,

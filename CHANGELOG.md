@@ -20,9 +20,12 @@ under *Unreleased*.
   code + PKCE, with automatic client registration or your own client ID), or use OAuth
   client credentials. Tokens stay in the OS credential store and refresh on their own.
 - **Chat**: Attach PDFs (up to 32 MiB) by picker or drag-and-drop. The first 20 pages are
-  sent to vision-capable models as page images, so layout, tables and scans come through;
-  chips show a thumbnail of page 1 and the page count. Password-protected and damaged PDFs
-  are skipped with a reason.
+  sent to vision-capable models as labeled page images, so layout, tables and scans come
+  through; chips show a thumbnail of page 1 and the page count, and the composer shows
+  while a PDF is being rendered. Password-protected and damaged PDFs are skipped with a reason.
+- **Chat**: Each request carries at most 100 images and about 16 MiB of image data; once a
+  chat's history exceeds that, older messages' images and PDF pages are replaced with a
+  labeled placeholder instead of the request failing.
 
 ### Changed
 
@@ -41,8 +44,9 @@ under *Unreleased*.
 ### Security
 
 - **Chat**: PDFs are parsed and drawn only by the operating system's own renderer
-  (CoreGraphics on macOS, Windows.Data.Pdf on Windows), with caps on file size, pages,
-  pixels per page and rendering time. No PDF parser is bundled with the app.
+  (CoreGraphics on macOS, Windows.Data.Pdf on Windows), with caps on file size, pages and
+  pixels per page; no PDF parser is bundled with the app. The renderer runs in the app's
+  process, not a sandbox — see SECURITY.md for what that means.
 
 ## 0.1.2 — 2026-11-15
 

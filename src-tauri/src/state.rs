@@ -26,6 +26,9 @@ pub const BACKGROUND_RUN_EVENT: &str = "background-run-event";
 /// Files dropped on the window were imported (payload: `PickedAttachments`); the chat
 /// store merges them into the visible chat's pending list.
 pub const ATTACHMENTS_DROPPED_EVENT: &str = "attachments-dropped";
+/// A picked or dropped PDF is being rendered (payload: `ImportProgress`), so the composer
+/// can show what it is waiting for.
+pub const ATTACHMENTS_IMPORTING_EVENT: &str = "attachments-importing";
 
 /// Persists approval-card "Always allow" grants to the chat or agent they were made in.
 /// The run already uses the grant in memory; if the write fails it is logged and the UI is

@@ -46,7 +46,7 @@ matter:
 | **Webview** | Escaping the CSP or capability set to get shell, filesystem, or network access from the UI. |
 | **Network** | Plain HTTP accepted for a non-loopback host, redirects followed on provider or remote MCP connections, or TLS verification bypassed without the user choosing it. |
 | **Dependencies** | A known vulnerability in a pinned dependency that is reachable from OpenGent. |
-| **Attachments** | A file the user attaches that leads to code execution, a read or write outside the attachments directory, or unbounded memory, disk or CPU use while it is imported. |
+| **Attachments** | A file the user attaches that leads to code execution through OpenGent's own handling, a read or write outside the attachments directory, or memory or disk use beyond the documented limits while it is imported. |
 
 **Out of scope (by design):**
 
@@ -56,15 +56,23 @@ matter:
   per-chat encryption is a planned feature.
 - Attacks that need an already-compromised user account or a malicious local administrator.
 
-**Untrusted PDFs.** An attached PDF is parsed and rasterized in the app's own process by
-the operating system's renderer — CoreGraphics on macOS, Windows.Data.Pdf on Windows — and
-by nothing else: OpenGent bundles no PDF parser, runs no script or action a PDF contains,
-never asks for or stores a PDF password, and gives the webview only finished page images.
-The import is bounded (32 MiB per file, 20 pages, 1,568 px per page side, a time budget
-checked between pages). A memory-safety bug in the OS renderer is therefore the remaining
-exposure, the same one as opening the file in Preview or Edge, and is fixed by OS updates;
-report it to the OS vendor, and to us if OpenGent's handling makes it worse. Pages reach a
-model provider as images, like any other image attachment.
+**Untrusted PDFs.** An attached PDF is parsed and rasterized by the operating system's
+renderer — CoreGraphics on macOS, Windows.Data.Pdf on Windows — and by nothing else:
+OpenGent bundles no PDF parser, runs no script or action a PDF contains, never asks for or
+stores a PDF password, and gives the webview only finished page images. The renderer runs
+**inside the app's own process**, without an OS sandbox around it. That process holds the
+credential-store access and can start MCP servers, so a memory-safety bug in the OS renderer
+would run with the app's full privileges — more exposure than opening the same file in a
+sandboxed viewer such as Preview. Such bugs are fixed by OS updates; report them to the OS
+vendor, and to us if OpenGent's handling makes them reachable or worse.
+
+What is bounded: 32 MiB per file, 20 pages, 1,568 px per page side and about 1.15
+megapixels per page. The 30-second time budget is checked only between pages, so it cannot
+interrupt the renderer while it opens the document or draws one page: a hostile PDF can keep
+one background thread busy indefinitely (the rest of the app stays responsive). Until
+rendering moves to a separate, sandboxed helper process with a hard timeout, that is a known
+limitation, not an in-scope vulnerability. Pages reach a model provider as images, like any
+other image attachment.
 
 ## Data handling by provider
 
