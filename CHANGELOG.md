@@ -20,6 +20,11 @@ under *Unreleased*.
   code + PKCE, with automatic client registration or your own client ID), or use OAuth
   client credentials. Tokens stay in the OS credential store and refresh on their own.
 
+### Changed
+
+- **Chat**: Finished reasoning blocks are now labeled **Thoughts** when collapsed instead
+  of **Thinking**.
+
 ### Fixed
 
 - **Tools**: A remote server that needs authentication now shows a short message saying what

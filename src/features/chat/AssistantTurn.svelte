@@ -118,7 +118,7 @@
           {#if seg.text.trim()}
             {@const active = thinkingLive(i)}
             <details class="thinking-block" open={active}>
-              <summary>{active ? "Thinking…" : "Thinking"}</summary>
+              <summary>{active ? "Thinking…" : "Thoughts"}</summary>
               <div class="markdown thinking-body" {@attach followTail(active)}>{@html renderMarkdown(seg.text)}</div>
             </details>
           {/if}

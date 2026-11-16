@@ -19,7 +19,7 @@ Each feature is described the same way:
 | Area | Feature | In short |
 |---|---|---|
 | [Chat](#chat) | [Conversations](#conversations) | Streaming replies with Stop, Regenerate, copy and live token usage |
-| | [Rich rendering](#rich-rendering) | Sanitized Markdown, code highlighting, KaTeX math, Thinking blocks |
+| | [Rich rendering](#rich-rendering) | Sanitized Markdown, code highlighting, KaTeX math, reasoning blocks |
 | | [Attachments](#attachments) | Text files and images (PNG, JPEG, GIF, WebP) in a prompt — picker or drag-and-drop |
 | | [History & search](#history--search) | Chats saved locally, searchable, recovered after a crash |
 | [Models & providers](#models--providers) | [Provider types](#provider-types) | OpenAI, Google Gemini, Anthropic, any OpenAI-compatible server, Simulated |
@@ -75,19 +75,20 @@ summarization of older history yet.
 
 **What.** Replies render as Markdown: headings, lists, tables, links, syntax-highlighted code
 blocks, and math via KaTeX (`$…$`, `$$…$$`, `\(…\)`, `\[…\]` and math fences). Models that
-expose reasoning get collapsible **Thinking** blocks inline with the reply, one for each
+expose reasoning get collapsible reasoning blocks inline with the reply, one for each
 reasoning step, in the order they happened (for example: thinking, tool call, thinking, answer).
+Each block is labeled **Thinking…** while the model reasons and **Thoughts** once it collapses.
 
 **How it works.** Rendering is sanitized: raw HTML in model output is disabled and the result
 is filtered again before display. Links open in your default browser — the app window never
-navigates. A Thinking block is open while the model reasons and collapses once it moves on to a
+navigates. A reasoning block is open while the model reasons and collapses once it moves on to a
 tool call or the answer. Long reasoning scrolls inside the block and follows the newest text;
 scroll up inside it to read earlier reasoning, and scroll back to its bottom to resume
 following. Wide code and tables scroll sideways inside the block. Saved chats reopen with the
 same layout.
 
-**Limits.** No raw HTML, embedded media or diagrams. What appears in Thinking depends on the
-provider: some send full reasoning, most hosted models send a summary.
+**Limits.** No raw HTML, embedded media or diagrams. What appears in a reasoning block depends
+on the provider: some send full reasoning, most hosted models send a summary.
 
 ### Attachments
 
