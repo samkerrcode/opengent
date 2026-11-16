@@ -118,7 +118,8 @@ In a `chore/release-x.y.z` PR:
    It bumps `product.json`, `[workspace.package]` in `Cargo.toml` and
    `package.json`/`package-lock.json`, refreshes `Cargo.lock`, renames the *Unreleased*
    heading in `CHANGELOG.md` to `## X.Y.Z — <today>` with a fresh empty *Unreleased* above
-   it, and runs the version gate.
+   it, and runs the version gate. It refuses a version that isn't newer than the current
+   one or an empty *Unreleased* section, and a failed run leaves the files unchanged.
 2. Merge once CI is green.
 
 ### 2. Dry run (optional, recommended after workflow or bundler changes)
