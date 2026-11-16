@@ -66,6 +66,7 @@ pub fn run() {
             commands::set_mcp_tool_policy,
             commands::set_mcp_default_policy,
             commands::reset_mcp_tool_policies,
+            commands::set_mcp_instructions,
             commands::list_tool_permissions,
             commands::set_chat_server_enabled,
             commands::set_chat_tool_policy,

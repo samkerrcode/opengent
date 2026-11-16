@@ -10,6 +10,7 @@
   import { product } from "$lib/generated/product";
   import ToolAccessBadge from "$features/mcp/ToolAccessBadge.svelte";
   import ToolPolicySelect from "$features/mcp/ToolPolicySelect.svelte";
+  import Switch from "$lib/components/Switch.svelte";
   import { allowedSummary, ownAccess, snapshotAccess, toolOn, toolPolicy, withTool } from "$features/mcp/permissions";
   import { statusText } from "$features/mcp/connection";
   import {
@@ -224,10 +225,9 @@
             {@const sum = cur ? allowedSummary(cur.access, s) : null}
             <li class="server" class:on={cur?.on}>
               <div class="srow">
-                <label class="check">
-                  <input type="checkbox" checked={cur?.on ?? false} onchange={(e) => toggleServer(s, e.currentTarget.checked)} />
+                <Switch checked={cur?.on ?? false} onchange={(v) => toggleServer(s, v)}>
                   <span class="sname">{s.name}</span>
-                </label>
+                </Switch>
                 <span class="sstatus">
                   {#if !s.enabled}
                     disabled in Connections
@@ -267,7 +267,7 @@
                           <ToolAccessBadge access={t.access} />
                           <span class="tag" title="Disabled in Connections — it stays disabled for every chat and agent">disabled in Connections</span>
                         {:else}
-                          <input type="checkbox" checked={on} aria-label="Use {t.name}" onchange={(e) => editTool(s, t, e.currentTarget.checked ? "on" : "block")} />
+                          <Switch small checked={on} label="Use {t.name}" onchange={(v) => editTool(s, t, v ? "on" : "block")} />
                           <span class="tname">{t.title ?? t.name}</span>
                           <ToolAccessBadge access={t.access} />
                           {#if on}
@@ -339,8 +339,6 @@
   .server { border: 1px solid var(--border); border-radius: var(--radius-md); padding: 6px 10px; }
   .server.on { border-color: var(--accent); background: var(--accent-soft); }
   .srow { display: flex; align-items: center; gap: var(--space-2); min-height: 30px; }
-  .check { display: inline-flex; align-items: center; gap: 8px; color: var(--fg); min-width: 0; }
-  .check input, .tool input { accent-color: var(--accent); margin: 0; }
   .sname { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sstatus { font-size: 11.5px; color: var(--fg-faint); }
   .scount { margin-left: auto; font-size: 11.5px; color: var(--fg-muted); }

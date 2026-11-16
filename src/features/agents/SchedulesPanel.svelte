@@ -1,5 +1,6 @@
 <script lang="ts">
   import { agentStore } from "./agent-store.svelte";
+  import Switch from "$lib/components/Switch.svelte";
   import {
     WEEKDAYS,
     describeOutcome,
@@ -156,9 +157,9 @@
             {/if}
           </div>
           <div class="ops">
-            <label class="toggle" title={s.enabled ? "Pause" : "Resume"}>
-              <input type="checkbox" checked={s.enabled} onchange={(e) => act(agentStore.setScheduleEnabled(s.id, e.currentTarget.checked))} />
-            </label>
+            <span class="toggle">
+              <Switch small checked={s.enabled} label="Schedule enabled" title={s.enabled ? "Pause" : "Resume"} onchange={(v) => act(agentStore.setScheduleEnabled(s.id, v))} />
+            </span>
             <button type="button" class="btn-ghost btn-sm" onclick={() => runNow(s)}>Run now</button>
             <button type="button" class="btn-ghost btn-sm" onclick={() => edit(s)}>Edit</button>
             <button type="button" class="btn-danger btn-sm" aria-label="Delete schedule" onclick={() => confirm("Delete this schedule?") && act(agentStore.removeSchedule(s.id))}>✕</button>
@@ -251,8 +252,8 @@
   .sub.bad { color: var(--danger); }
   .link { padding: 0; color: var(--accent); font-size: inherit; display: inline; }
   .ops { display: flex; align-items: center; gap: 2px; flex: none; }
-  .toggle input, .radio input { accent-color: var(--accent); margin: 0; }
-  .toggle { padding: 0 6px; }
+  .radio input { accent-color: var(--accent); margin: 0; }
+  .toggle { display: inline-flex; padding: 0 6px; }
   .form { display: grid; gap: var(--space-3); border-top: 1px solid var(--border); padding-top: var(--space-3); }
   label { display: grid; gap: 6px; font-size: 13px; color: var(--fg-muted); }
   .lbl { font-size: 13px; color: var(--fg-muted); }

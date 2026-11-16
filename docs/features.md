@@ -373,9 +373,16 @@ proposes a call; your permissions decide whether it runs.
 
 - Paste a standard `{"mcpServers": {…}}` JSON config to prefill the form.
 - Mark an environment variable or header as *secret* to keep its value in the OS keychain.
-- **Save & test** saves, connects and reports "connected · N tools discovered" or the error.
-  **Save** alone reconnects only if the command, directory, environment, URL, authentication
-  or headers changed.
+- **Save & test** saves, connects and reports "connected · N tools discovered" or the error,
+  keeping the connection open so you can set its tool permissions. **Save** alone saves and
+  returns to the Connections start screen; it reconnects only if the command, directory,
+  environment, URL, authentication or headers changed.
+- A server that provides an icon shows it next to the connection's name in Connections and
+  in the ⚒ Tools menu, in its light or dark variant to match the system theme; otherwise the
+  name's first letter is shown. The name you gave the connection is always the label.
+- **Server instructions** — some servers send tips on using their tools (for example
+  GitHub's on pagination and pull request reviews). A connected server's instructions are
+  shown in its connection with an **Add to the system prompt** switch.
 - **Authentication** (remote servers) — pick one:
   - *None*: no sign-in, or credentials you add as headers (for example an
     `Authorization: Bearer …` personal access token).
@@ -410,11 +417,24 @@ secret or scopes are saved.
 Errors are reported in one line, such as "This server requires authentication" with what to
 do next.
 
+Server icons are used only when the server sends them inline as PNG, JPEG or WebP images;
+the app never downloads an icon from a URL. Server instructions are written by the server,
+so they are treated as untrusted: invisible and control characters are removed, and they are
+sent to the model in a clearly marked block that tells it they are hints about that server's
+own tools and can't override its rules, your permissions or your requests. They're included
+only in chats and agents that can call at least one of the server's tools. The first version
+a server sends is accepted automatically; if the server later changes them, they are left out
+and marked "changed" until you review them and turn the switch back on.
+
 **Limits.** OAuth endpoints that redirect aren't followed, and an authorization server on a
 private or loopback address is only accepted for a server on this machine. Client
 credentials support a client secret only (no signed-JWT client authentication) and need
 tokens that live longer than about a minute. When a server asks for more scopes, the message
-names them; add them and sign in again. A local server runs with your user account's privileges —
+names them; add them and sign in again. Icons over 16 KiB, SVG icons and icons at a URL
+aren't shown. Server instructions are kept up to 8,000 characters; the system prompt carries
+up to 2,000 per server and 6,000 in total, cut at a line break and marked as truncated. Filtering
+can't make instructions safe on its own — tool permissions remain the safeguard, so turn off
+instructions from servers you don't fully trust. A local server runs with your user account's privileges —
 permissions are a consent layer, not a sandbox, so only add servers you trust.
 
 ### Tool permissions

@@ -19,6 +19,10 @@ under *Unreleased*.
 - **Tools**: Remote MCP connections can sign in with OAuth in your browser (authorization
   code + PKCE, with automatic client registration or your own client ID), or use OAuth
   client credentials. Tokens stay in the OS credential store and refresh on their own.
+- **Tools**: Connections and the ⚒ Tools menu show each server's own icon (inline PNG, JPEG
+  or WebP only; nothing is downloaded), matched to the light or dark theme.
+- **Tools**: A connection shows the instructions its server sends, with a switch to keep them
+  out of the system prompt.
 - **Chat**: Attach PDFs (up to 32 MiB) by picker or drag-and-drop. The first 20 pages are
   sent to vision-capable models as labeled page images, so layout, tables and scans come
   through; chips show a thumbnail of page 1 and the page count, and the composer shows
@@ -31,6 +35,12 @@ under *Unreleased*.
 
 - **Chat**: Finished reasoning blocks are now labeled **Thoughts** instead of **Thinking**,
   so they read differently from a block that is still streaming (**Thinking…**).
+- **Tools**: **Save** in Connections now returns to the start screen; **Save & test** still
+  stays on the connection to show the result.
+- **Tools**: On/off controls in the ⚒ Tools menu, the agent editor and schedules are now
+  toggle switches instead of checkboxes.
+- **Tools**: Server instructions are no longer cut off at 600 characters on one line: the
+  system prompt keeps their line breaks, up to 2,000 characters per server, cut at a line break.
 
 ### Fixed
 
@@ -47,6 +57,9 @@ under *Unreleased*.
   (CoreGraphics on macOS, Windows.Data.Pdf on Windows), with caps on file size, pages and
   pixels per page; no PDF parser is bundled with the app. The renderer runs in the app's
   process, not a sandbox — see SECURITY.md for what that means.
+- **Tools**: Server instructions are now sent to the model as a marked, untrusted block, with
+  invisible characters removed, and only for chats and agents that can use that server's tools.
+  If a server changes its instructions they are left out until you accept the new version.
 
 ## 0.1.2 — 2026-11-15
 

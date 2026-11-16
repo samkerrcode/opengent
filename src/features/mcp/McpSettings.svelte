@@ -2,6 +2,8 @@
   import { mcpStore } from "./mcp-store.svelte";
   import ToolAccessBadge from "./ToolAccessBadge.svelte";
   import ToolPolicySelect from "./ToolPolicySelect.svelte";
+  import Switch from "$lib/components/Switch.svelte";
+  import ServerIconView from "./ServerIconView.svelte";
   import { authForm, authInput, blankAuth, redirectUri, statusText, type AuthForm } from "./connection";
   import {
     describeError,
@@ -134,13 +136,18 @@
     notice = null;
     try {
       const id = await mcpStore.save(toInput(editing), test);
+      const s = mcpStore.servers.find((x) => x.id === id);
+      if (!test) {
+        // A plain save is done with the form: return to the start screen.
+        editing = null;
+        const name = s?.name ?? "Connection";
+        notice = { ok: true, text: s && !s.enabled ? `Saved "${name}". It is disabled — turn it on to connect.` : `Saved "${name}".` };
+        return;
+      }
       // A new server now has an id: keep editing it so status and tools appear.
       if (editing && !editing.id) editing.id = id;
-      const s = mcpStore.servers.find((x) => x.id === id);
       if (s && !s.enabled) {
         notice = { ok: true, text: "Saved. This connection is disabled — turn it on to connect." };
-      } else if (!test) {
-        notice = { ok: true, text: "Saved." };
       } else if (s?.status.kind === "connected") {
         const n = s.tools.length;
         notice = { ok: true, text: `Saved and connected · ${n} tool${n === 1 ? "" : "s"} discovered${n ? " — set their permissions below." : "."}` };
@@ -233,7 +240,7 @@
       <aside class="list">
         {#each mcpStore.servers as s (s.id)}
           <button class="item" class:active={editing?.id === s.id} onclick={() => startEdit(s)}>
-            <span class="item-name">{s.name}</span>
+            <span class="item-name"><ServerIconView icon={s.icon} name={s.name} /> <span class="item-label">{s.name}</span></span>
             <span class="item-sub">{s.transport === "stdio" ? "local" : "remote"} · {statusText(s)}</span>
           </button>
         {/each}
@@ -253,10 +260,9 @@
         {#if editing}
           {#if current}
             <div class="enabled-bar" class:off={!current.enabled}>
-              <label class="switch">
-                <input type="checkbox" role="switch" checked={current.enabled} disabled={busy} onchange={(e) => setEnabled(current, e.currentTarget.checked)} />
-                <span>{current.enabled ? "Enabled" : "Disabled"}</span>
-              </label>
+              <Switch checked={current.enabled} disabled={busy} onchange={(v) => setEnabled(current, v)}>
+                <span class="swlabel">{current.enabled ? "Enabled" : "Disabled"}</span>
+              </Switch>
               <span class="estatus">
                 {#if current.enabled}
                   {statusText(current)}{current.server_info ? ` · ${current.server_info}` : ""}
@@ -448,6 +454,25 @@
                 </p>
               {/if}
             </fieldset>
+            {#if current.instructions}
+              {@const ins = current.instructions}
+              <fieldset class="instr">
+                <legend>Server instructions <small>(written by the server · untrusted)</small></legend>
+                <div class="instr-row">
+                  <Switch checked={ins.status === "included"} onchange={(v) => act(mcpStore.setInstructions(current.id, v ? ins.text : null))}>
+                    Add to the system prompt
+                  </Switch>
+                  {#if ins.status === "changed"}
+                    <span class="warn" title="The server changed its instructions since you accepted them — they are left out until you review and turn them on again">changed</span>
+                  {/if}
+                </div>
+                <pre class="instr-text selectable">{ins.text}</pre>
+                <p class="phint">
+                  Tips from the server on using its tools, sent to the model as untrusted guidance only for chats that can call this
+                  server's tools. They are left out again if the server changes them, until you turn them back on.
+                </p>
+              </fieldset>
+            {/if}
           {/if}
 
           {#if showImport}
@@ -478,6 +503,9 @@
           </footer>
         {:else}
           <div class="placeholder">
+            {#if notice}
+              <p class="result" class:ok={notice.ok} class:bad={!notice.ok} role="status">{notice.text}</p>
+            {/if}
             <p>Connect MCP servers to give the model tools. Local servers run as commands (stdio); remote servers use Streamable HTTP.</p>
             <p class="muted">Each tool can be set to Allow, Ask, or Disable — per tool here once the server is connected, or from the ⚒ Tools menu.</p>
             <button class="btn-primary" onclick={startNew}>Add connection</button>
@@ -498,7 +526,13 @@
   .item { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 8px 10px; text-align: left; width: 100%; }
   .item:hover { background: var(--bg-hover); }
   .item.active { background: var(--accent-soft); }
-  .item-name { font-weight: 500; }
+  .item-name { font-weight: 500; display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
+  .item-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .instr { border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-2) var(--space-3) var(--space-3); display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; margin: 0; min-width: 0; }
+  .instr legend { font-size: 12px; color: var(--fg-muted); padding: 0 4px; }
+  .instr legend small { color: var(--fg-faint); }
+  .instr-row { display: flex; align-items: center; gap: var(--space-2); font-size: 12.5px; color: var(--fg-muted); }
+  .instr-text { margin: 0; max-height: 160px; overflow-y: auto; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); font-family: var(--font-mono); font-size: 11.5px; color: var(--fg-muted); white-space: pre-wrap; overflow-wrap: anywhere; }
   .item-sub { font-size: 11.5px; color: var(--fg-faint); }
   .add { margin-top: auto; justify-content: center; }
   .global { margin-top: var(--space-3); border-top: 1px solid var(--border); padding-top: var(--space-3); display: grid; gap: 6px; }
@@ -517,12 +551,7 @@
   .enabled-bar { display: flex; align-items: center; gap: var(--space-3); padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg); font-size: 12.5px; color: var(--fg-muted); }
   .enabled-bar.off { border-style: dashed; }
   .estatus { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .switch { display: inline-flex; flex-direction: row; align-items: center; gap: 8px; color: var(--fg); font-weight: 500; flex: none; cursor: pointer; }
-  .switch input { -webkit-appearance: none; appearance: none; margin: 0; width: 30px; height: 17px; border-radius: 999px; background: var(--border-strong); position: relative; cursor: pointer; transition: background var(--motion-fast) var(--ease); flex: none; }
-  .switch input::after { content: ""; position: absolute; top: 2px; left: 2px; width: 13px; height: 13px; border-radius: 50%; background: #fff; transition: transform var(--motion-fast) var(--ease); }
-  .switch input:checked { background: var(--accent); }
-  .switch input:checked::after { transform: translateX(13px); }
-  .switch input:disabled { opacity: 0.5; cursor: default; }
+  .swlabel { font-weight: 500; }
   .perms { border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-2) var(--space-3) var(--space-3); display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; margin: 0; min-width: 0; }
   .perms legend { font-size: 12px; color: var(--fg-muted); padding: 0 4px; }
   .perms legend small { color: var(--fg-faint); }

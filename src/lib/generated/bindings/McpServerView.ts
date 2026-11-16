@@ -3,10 +3,20 @@ import type { KeyValueEntry } from "./KeyValueEntry";
 import type { McpAuth } from "./McpAuth";
 import type { McpServerStatus } from "./McpServerStatus";
 import type { McpTransport } from "./McpTransport";
+import type { ServerIcon } from "./ServerIcon";
+import type { ServerInstructions } from "./ServerInstructions";
 import type { ToolInfo } from "./ToolInfo";
 import type { ToolPolicy } from "./ToolPolicy";
 
-export type McpServerView = { status: McpServerStatus, server_info: string | null, tools: Array<ToolInfo>, 
+export type McpServerView = { status: McpServerStatus, server_info: string | null, 
+/**
+ * The server's own display title (handshake; last seen when offline). Untrusted.
+ */
+server_title: string | null, icon: ServerIcon | null, 
+/**
+ * The server's handshake instructions and whether they go into the system prompt.
+ */
+instructions: ServerInstructions | null, tools: Array<ToolInfo>, 
 /**
  * `tools` is the last list seen (server disabled, offline or failed), not live.
  */

@@ -93,7 +93,17 @@ const byName = new Map(tools.map((t) => [t.name, t]));
 const INFO = {
   protocolVersion: "2025-06-18",
   capabilities: { tools: { listChanged: false } },
-  serverInfo: { name: "mock-mcp", version: "0.1.0" },
+  serverInfo: {
+    name: "mock-mcp",
+    title: "Mock MCP Server",
+    version: "0.1.0",
+    // 1×1 PNGs (light: blue, dark: orange) to exercise server icons; the https one is ignored.
+    icons: [
+      { src: "https://example.com/icon.png", mimeType: "image/png" },
+      { src: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNQTX4NAAIkAXSaGkHUAAAAAElFTkSuQmCC", mimeType: "image/png", theme: "light" },
+      { src: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4WSwGAAPrAYPijIcLAAAAAElFTkSuQmCC", mimeType: "image/png", theme: "dark" },
+    ],
+  },
   instructions: "Mock tools for OpenGent development: echo, add, get_time, fail, slow.",
 };
 

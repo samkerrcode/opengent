@@ -78,7 +78,8 @@ Contributor guidelines: see CONTRIBUTING.md. Security scope: SECURITY.md.
   OPENGENT_TEST_ANTHROPIC_MODEL=mock-claude-thinking
   cargo test -p agent-core --test provider_store_live -- --ignored anthropic`
   (drop the base URL/model for real Anthropic).
-- `node scripts/dev/mock-mcp-server.mjs` – fake MCP server (tools: echo, add, get_time, fail, slow).
+- `node scripts/dev/mock-mcp-server.mjs` – fake MCP server (tools: echo, add, get_time, fail, slow; handshake sends a
+  title, light/dark inline icons plus an ignored URL icon, and instructions).
   Stdio by default (use `node <abs path>` as a stdio command); `--http 8788` serves Streamable HTTP at `/mcp`; `--many 50` adds filler tools for on-demand loading tests.
   `--http 8788 --oauth` requires a bearer token and serves the OAuth flow on the same origin (metadata, DCR,
   auto-approving `/authorize`, `/token`); add `--no-dcr` (any Client ID works), `--expires-in N`, `--reject-refresh`.

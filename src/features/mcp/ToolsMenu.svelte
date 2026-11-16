@@ -3,6 +3,8 @@
   import { mcpStore } from "./mcp-store.svelte";
   import ToolAccessBadge from "./ToolAccessBadge.svelte";
   import ToolPolicySelect from "./ToolPolicySelect.svelte";
+  import Switch from "$lib/components/Switch.svelte";
+  import ServerIconView from "./ServerIconView.svelte";
   import { ownAccess, snapshotAccess, toolOn, toolPolicy, withTool } from "./permissions";
   import { agentStore } from "$features/agents/agent-store.svelte";
   import {
@@ -168,12 +170,17 @@
             aria-label="Tool permissions for {s.name}"
           >›</button>
           <span class="dot {dotClass(s)}" aria-hidden="true"></span>
-          <span class="sname" title={s.name}>{s.name}</span>
+          <ServerIconView icon={s.icon} name={s.name} />
+          <span class="sname" title={s.server_title && s.server_title !== s.name ? `${s.name} · ${s.server_title}` : s.name}>{s.name}</span>
           <span class="scount">{statusText(s)}</span>
           {#if s.enabled}
-            <label class="toggle" title={on ? (isAgent ? "Stop using in this agent" : "Turn off for this chat") : (isAgent ? "Use in this agent" : "Turn on for this chat")}>
-              <input type="checkbox" checked={on} onchange={(e) => toggleServer(s, e.currentTarget.checked)} />
-            </label>
+            <Switch
+              small
+              checked={on}
+              label="Use {s.name}"
+              title={on ? (isAgent ? "Stop using in this agent" : "Turn off for this chat") : (isAgent ? "Use in this agent" : "Turn on for this chat")}
+              onchange={(v) => toggleServer(s, v)}
+            />
           {:else}
             <button class="enable" onclick={openConnections} title="Connections are enabled in Connections">Enable…</button>
           {/if}
@@ -197,7 +204,7 @@
               {@const agentOn = own ? toolOn(own, t.name) : false}
               <div class="tool" class:off={t.policy === "block" || (isAgent ? !agentOn : st?.policy === "block")} title={t.description ?? t.name}>
                 {#if isAgent && t.policy !== "block"}
-                  <input class="tcheck" type="checkbox" checked={agentOn} aria-label="Use {t.name}" onchange={(e) => setAgentTool(s, t, e.currentTarget.checked ? "on" : "block")} />
+                  <Switch small checked={agentOn} label="Use {t.name}" onchange={(v) => setAgentTool(s, t, v ? "on" : "block")} />
                 {/if}
                 <span class="tname">{t.title ?? t.name}</span>
                 <ToolAccessBadge access={t.access} />
@@ -331,11 +338,6 @@
     font-size: 11px;
     color: var(--fg-faint);
     flex: none;
-  }
-  .toggle input,
-  .tcheck {
-    accent-color: var(--accent);
-    margin: 0;
   }
   .enable {
     font-size: 11px;

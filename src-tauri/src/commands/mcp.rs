@@ -184,6 +184,20 @@ pub fn reset_mcp_tool_policies(state: State<'_, AppState>, server_id: String) ->
     state.mcp.store().reset_tool_policies(&server_id)
 }
 
+/// Turns a server's instructions off (`accept: None`), or includes them in the system
+/// prompt by accepting the text the user reviewed. Fails if they changed meanwhile.
+#[tauri::command]
+pub fn set_mcp_instructions(
+    state: State<'_, AppState>,
+    server_id: String,
+    accept: Option<String>,
+) -> Result<(), Error> {
+    state
+        .mcp
+        .store()
+        .set_instructions_included(&server_id, accept.as_deref())
+}
+
 #[tauri::command]
 pub fn get_tool_settings(state: State<'_, AppState>) -> ToolSettings {
     state.mcp.store().settings()

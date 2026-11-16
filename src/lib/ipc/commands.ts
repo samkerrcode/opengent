@@ -178,6 +178,9 @@ export const commands = {
   setMcpDefaultPolicy: (serverId: string, policy: ToolPolicy) =>
     invoke<void>("set_mcp_default_policy", { serverId, policy }),
   resetMcpToolPolicies: (serverId: string) => invoke<void>("reset_mcp_tool_policies", { serverId }),
+  /** `accept` is the instructions text the user reviewed; `null` turns them off. */
+  setMcpInstructions: (serverId: string, accept: string | null) =>
+    invoke<void>("set_mcp_instructions", { serverId, accept }),
   // Scoped permissions: per-chat overrides and agent-owned access.
   listToolPermissions: (scope: PermissionScope) =>
     invoke<ScopedServerView[]>("list_tool_permissions", { scope }),

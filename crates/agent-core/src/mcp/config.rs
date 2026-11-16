@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use super::server_meta::{instructions_signature, InstructionsStatus, ServerMeta};
 use crate::agent::tools::ToolSettings;
 use crate::config::DataRoot;
 use crate::domain::{ToolAccess, ToolPolicy};
@@ -411,6 +412,18 @@ struct StoreFile {
     /// stale grant in another.
     #[serde(default)]
     scoped_signatures: HashMap<String, HashMap<String, HashMap<String, String>>>,
+    /// Handshake metadata (title, icon, instructions) last seen per server, for display
+    /// while it is offline. Untrusted; bounded on load and on write.
+    #[serde(default)]
+    server_meta: HashMap<String, ServerMeta>,
+    /// Signature of the instructions version accepted per server (pinned on first connect
+    /// or when the user turns them back on). Changed instructions are left out of the
+    /// system prompt until accepted again.
+    #[serde(default)]
+    instruction_pins: HashMap<String, String>,
+    /// Servers whose instructions the user excluded from the system prompt.
+    #[serde(default)]
+    instructions_off: HashSet<String>,
 }
 
 /// Bounds on cached server-provided metadata (untrusted, persisted to disk).
@@ -530,7 +543,7 @@ fn entries_changed(inputs: &[KeyValueInput], old: &[KeyValueEntry]) -> bool {
 impl McpStore {
     pub fn load(data_root: &DataRoot, secrets: Arc<dyn SecretStore>) -> Result<Self> {
         let path = data_root.path().join("mcp.json");
-        let state = match std::fs::read(&path) {
+        let mut state = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice::<StoreFile>(&bytes)
                 .map_err(|e| Error::Io(format!("mcp.json is corrupt: {e}")))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => StoreFile {
@@ -539,6 +552,10 @@ impl McpStore {
             },
             Err(e) => return Err(e.into()),
         };
+        state.server_meta = std::mem::take(&mut state.server_meta)
+            .into_iter()
+            .map(|(id, m)| (id, m.bounded()))
+            .collect();
         Ok(Self {
             path,
             state: Mutex::new(state),
@@ -567,6 +584,9 @@ impl McpStore {
             signatures: state.signatures.clone(),
             catalog: state.catalog.clone(),
             scoped_signatures: state.scoped_signatures.clone(),
+            server_meta: state.server_meta.clone(),
+            instruction_pins: state.instruction_pins.clone(),
+            instructions_off: state.instructions_off.clone(),
         };
         let tmp = self.path.with_extension("json.tmp");
         let bytes =
@@ -928,6 +948,84 @@ impl McpStore {
             .map(|t| t.signature.clone())
     }
 
+    /// Records a server's handshake metadata. Instructions seen for the first time are
+    /// accepted (pinned) unless the user turned them off; a changed version keeps the old
+    /// pin and is excluded until the user accepts it. Writes only when something changed.
+    pub fn set_server_meta(&self, server_id: &str, meta: ServerMeta) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        if !state.servers.iter().any(|s| s.id == server_id) {
+            return Ok(());
+        }
+        let mut changed = state.server_meta.get(server_id) != Some(&meta);
+        if let Some(text) = &meta.instructions {
+            if !state.instructions_off.contains(server_id)
+                && !state.instruction_pins.contains_key(server_id)
+            {
+                state
+                    .instruction_pins
+                    .insert(server_id.to_owned(), instructions_signature(text));
+                changed = true;
+            }
+        }
+        if changed {
+            state.server_meta.insert(server_id.to_owned(), meta);
+            self.persist(&state)?;
+        }
+        Ok(())
+    }
+
+    /// Handshake metadata last seen for a server.
+    pub fn server_meta(&self, server_id: &str) -> Option<ServerMeta> {
+        self.state
+            .lock()
+            .unwrap()
+            .server_meta
+            .get(server_id)
+            .cloned()
+    }
+
+    /// Whether `text` (the server's current instructions) goes into the system prompt.
+    pub fn instructions_status(&self, server_id: &str, text: &str) -> InstructionsStatus {
+        let state = self.state.lock().unwrap();
+        if state.instructions_off.contains(server_id) {
+            return InstructionsStatus::Off;
+        }
+        match state.instruction_pins.get(server_id) {
+            Some(pin) if *pin == instructions_signature(text) => InstructionsStatus::Included,
+            _ => InstructionsStatus::Changed,
+        }
+    }
+
+    /// Turns a server's instructions off, or on by accepting `shown` — the text the user
+    /// reviewed. Accepting fails if the server's instructions changed since (a reconnect
+    /// can't slip a different version past the review).
+    pub fn set_instructions_included(&self, server_id: &str, shown: Option<&str>) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        if !state.servers.iter().any(|s| s.id == server_id) {
+            return Err(Error::NotFound(format!("MCP server `{server_id}`")));
+        }
+        match shown {
+            Some(shown) => {
+                let current = state
+                    .server_meta
+                    .get(server_id)
+                    .and_then(|m| m.instructions.as_deref());
+                if current != Some(shown) {
+                    return Err(Error::InvalidInput(
+                        "the server's instructions changed — review them again".into(),
+                    ));
+                }
+                let sig = instructions_signature(shown);
+                state.instructions_off.remove(server_id);
+                state.instruction_pins.insert(server_id.to_owned(), sig);
+            }
+            None => {
+                state.instructions_off.insert(server_id.to_owned());
+            }
+        }
+        self.persist(&state)
+    }
+
     /// Validated upsert. `env`/`headers` inputs with `secret` + empty value keep the stored
     /// secret (mirrors provider API key semantics); a missing row deletes it.
     pub fn save(&self, input: McpServerInput) -> Result<McpServerConfig> {
@@ -1238,6 +1336,9 @@ impl McpStore {
         state.servers.retain(|s| s.id != id);
         state.signatures.remove(id);
         state.catalog.remove(id);
+        state.server_meta.remove(id);
+        state.instruction_pins.remove(id);
+        state.instructions_off.remove(id);
         for pins in state.scoped_signatures.values_mut() {
             pins.remove(id);
         }
@@ -1381,6 +1482,43 @@ mod tests {
             default_policy: ToolPolicy::Ask,
             call_timeout_secs: 60,
         }
+    }
+
+    #[test]
+    fn instructions_are_pinned_on_first_sight_and_changes_need_acceptance() {
+        use InstructionsStatus::*;
+        let (s, tmp) = store();
+        let id = s.save(input("gh")).unwrap().id;
+        let meta = |t: &str| ServerMeta {
+            instructions: Some(t.into()),
+            ..Default::default()
+        };
+        s.set_server_meta(&id, meta("v1")).unwrap();
+        assert_eq!(s.instructions_status(&id, "v1"), Included);
+        // A new version is left out until accepted.
+        s.set_server_meta(&id, meta("v2")).unwrap();
+        assert_eq!(s.instructions_status(&id, "v2"), Changed);
+        assert!(s.set_instructions_included(&id, Some("v1")).is_err());
+        s.set_instructions_included(&id, Some("v2")).unwrap();
+        assert_eq!(s.instructions_status(&id, "v2"), Included);
+        // Off survives reloads and blocks first-sight pinning.
+        s.set_instructions_included(&id, None).unwrap();
+        let reloaded = McpStore::load(
+            &resolve_data_root(Some(&tmp)).unwrap(),
+            Arc::new(MemorySecretStore::default()),
+        )
+        .unwrap();
+        assert_eq!(reloaded.instructions_status(&id, "v2"), Off);
+        assert_eq!(
+            reloaded
+                .server_meta(&id)
+                .and_then(|m| m.instructions)
+                .as_deref(),
+            Some("v2")
+        );
+        reloaded.delete(&id).unwrap();
+        assert!(reloaded.server_meta(&id).is_none());
+        std::fs::remove_dir_all(tmp).unwrap();
     }
 
     #[test]

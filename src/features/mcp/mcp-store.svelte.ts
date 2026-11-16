@@ -195,6 +195,10 @@ class McpStore {
     return this.run(commands.resetMcpToolPolicies(serverId));
   }
 
+  setInstructions(serverId: string, accept: string | null) {
+    return this.run(commands.setMcpInstructions(serverId, accept));
+  }
+
   setLoading(loading: ToolLoading) {
     return this.run(commands.setToolSettings({ ...this.settings, loading }));
   }

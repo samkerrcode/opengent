@@ -154,3 +154,11 @@ In every case:
 - MCP servers are separate from model providers: a tool call sends its arguments to that
   server, and tool results are sent to the model like any other message. A remote MCP server
   is a third party in its own right.
+- MCP handshake metadata is untrusted. Server icons are accepted only as inline `data:` PNG,
+  JPEG or WebP images up to 16 KiB, checked by their bytes and re-encoded; icon URLs are never
+  fetched and SVG is not rendered. Server instructions are stripped of control and invisible
+  characters, bounded, and sent to the model in a delimited block marked as untrusted, only
+  for runs that can call that server's tools. They are pinned by hash on first connect; a
+  changed version is left out of the prompt until the user accepts it, and users can turn
+  them off per connection. This limits, but can't eliminate, prompt injection by a server —
+  tool permissions remain the enforcement layer.
