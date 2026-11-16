@@ -22,8 +22,8 @@ under *Unreleased*.
 
 ### Changed
 
-- **Chat**: Finished reasoning blocks are now labeled **Thoughts** when collapsed instead
-  of **Thinking**.
+- **Chat**: Finished reasoning blocks are now labeled **Thoughts** instead of **Thinking**,
+  so they read differently from a block that is still streaming (**Thinking…**).
 
 ### Fixed
 

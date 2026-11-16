@@ -77,7 +77,7 @@ summarization of older history yet.
 blocks, and math via KaTeX (`$…$`, `$$…$$`, `\(…\)`, `\[…\]` and math fences). Models that
 expose reasoning get collapsible reasoning blocks inline with the reply, one for each
 reasoning step, in the order they happened (for example: thinking, tool call, thinking, answer).
-Each block is labeled **Thinking…** while the model reasons and **Thoughts** once it collapses.
+Each block is labeled **Thinking…** while the model reasons and **Thoughts** once it's done.
 
 **How it works.** Rendering is sanitized: raw HTML in model output is disabled and the result
 is filtered again before display. Links open in your default browser — the app window never
@@ -313,7 +313,7 @@ stores and replays it for you.
 **How it works.** The data is saved locally with the message it belongs to and replayed only
 to the same provider family. It is never displayed, never searched, and never sent to a
 different vendor. Switching a chat to another provider simply leaves it out — the readable
-Thinking text stays in the chat either way.
+reasoning text stays in the chat either way.
 
 **Limits.** Continuity applies only while you stay with the same provider family. Unusually
 large reasoning blocks (over 64 KiB) aren't stored; the model then reasons afresh on the next
