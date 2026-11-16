@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use super::server_meta::{instructions_signature, InstructionsStatus, ServerMeta};
+use super::server_meta::{InstructionsStatus, ServerMeta};
 use crate::agent::tools::ToolSettings;
 use crate::config::DataRoot;
 use crate::domain::{ToolAccess, ToolPolicy};
@@ -392,8 +392,9 @@ pub struct McpServerInput {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct StoreFile {
+    #[serde(serialize_with = "current_version")]
     version: u16,
-    #[serde(default)]
+    #[serde(default, serialize_with = "servers_without_secrets")]
     servers: Vec<McpServerConfig>,
     #[serde(default)]
     settings: ToolSettings,
@@ -413,7 +414,8 @@ struct StoreFile {
     #[serde(default)]
     scoped_signatures: HashMap<String, HashMap<String, HashMap<String, String>>>,
     /// Handshake metadata (title, icon, instructions) last seen per server, for display
-    /// while it is offline. Untrusted; bounded on load and on write.
+    /// while it is offline. Untrusted; bounded by `ServerMeta::from_handshake` and again
+    /// on load.
     #[serde(default)]
     server_meta: HashMap<String, ServerMeta>,
     /// Signature of the instructions version accepted per server (pinned on first connect
@@ -424,6 +426,26 @@ struct StoreFile {
     /// Servers whose instructions the user excluded from the system prompt.
     #[serde(default)]
     instructions_off: HashSet<String>,
+}
+
+fn current_version<S: serde::Serializer>(_: &u16, s: S) -> std::result::Result<S::Ok, S::Error> {
+    s.serialize_u16(1)
+}
+
+fn servers_without_secrets<S: serde::Serializer>(
+    servers: &[McpServerConfig],
+    s: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    s.collect_seq(servers.iter().map(|srv| {
+        let mut srv = srv.clone();
+        // Never write secret values to disk.
+        for e in srv.env.iter_mut().chain(srv.headers.iter_mut()) {
+            if e.secret {
+                e.value.clear();
+            }
+        }
+        srv
+    }))
 }
 
 /// Bounds on cached server-provided metadata (untrusted, persisted to disk).
@@ -564,33 +586,8 @@ impl McpStore {
     }
 
     fn persist(&self, state: &StoreFile) -> Result<()> {
-        let persisted = StoreFile {
-            version: 1,
-            servers: state
-                .servers
-                .iter()
-                .cloned()
-                .map(|mut s| {
-                    // Never write secret values to disk.
-                    for e in s.env.iter_mut().chain(s.headers.iter_mut()) {
-                        if e.secret {
-                            e.value.clear();
-                        }
-                    }
-                    s
-                })
-                .collect(),
-            settings: state.settings.clone(),
-            signatures: state.signatures.clone(),
-            catalog: state.catalog.clone(),
-            scoped_signatures: state.scoped_signatures.clone(),
-            server_meta: state.server_meta.clone(),
-            instruction_pins: state.instruction_pins.clone(),
-            instructions_off: state.instructions_off.clone(),
-        };
         let tmp = self.path.with_extension("json.tmp");
-        let bytes =
-            serde_json::to_vec_pretty(&persisted).map_err(|e| Error::Internal(e.to_string()))?;
+        let bytes = serde_json::to_vec_pretty(state).map_err(|e| Error::Internal(e.to_string()))?;
         write_private(&tmp, &bytes)?;
         std::fs::rename(&tmp, &self.path)?;
         Ok(())
@@ -948,24 +945,24 @@ impl McpStore {
             .map(|t| t.signature.clone())
     }
 
-    /// Records a server's handshake metadata. Instructions seen for the first time are
-    /// accepted (pinned) unless the user turned them off; a changed version keeps the old
-    /// pin and is excluded until the user accepts it. Writes only when something changed.
+    /// Records a server's handshake metadata. The instructions sent on first connect are
+    /// accepted (pinned) unless the user turned them off — no instructions pin too, so a
+    /// server that adds them later is treated like one that changed them. A changed
+    /// version keeps the old pin and is excluded until the user accepts it. Writes only
+    /// when something changed.
     pub fn set_server_meta(&self, server_id: &str, meta: ServerMeta) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         if !state.servers.iter().any(|s| s.id == server_id) {
             return Ok(());
         }
         let mut changed = state.server_meta.get(server_id) != Some(&meta);
-        if let Some(text) = &meta.instructions {
-            if !state.instructions_off.contains(server_id)
-                && !state.instruction_pins.contains_key(server_id)
-            {
-                state
-                    .instruction_pins
-                    .insert(server_id.to_owned(), instructions_signature(text));
-                changed = true;
-            }
+        if !state.instructions_off.contains(server_id)
+            && !state.instruction_pins.contains_key(server_id)
+        {
+            state
+                .instruction_pins
+                .insert(server_id.to_owned(), meta.signature().to_owned());
+            changed = true;
         }
         if changed {
             state.server_meta.insert(server_id.to_owned(), meta);
@@ -984,14 +981,15 @@ impl McpStore {
             .cloned()
     }
 
-    /// Whether `text` (the server's current instructions) goes into the system prompt.
-    pub fn instructions_status(&self, server_id: &str, text: &str) -> InstructionsStatus {
+    /// Whether the server's current instructions, by `ServerMeta::signature`, go into the
+    /// system prompt.
+    pub fn instructions_status(&self, server_id: &str, signature: &str) -> InstructionsStatus {
         let state = self.state.lock().unwrap();
         if state.instructions_off.contains(server_id) {
             return InstructionsStatus::Off;
         }
         match state.instruction_pins.get(server_id) {
-            Some(pin) if *pin == instructions_signature(text) => InstructionsStatus::Included,
+            Some(pin) if pin == signature => InstructionsStatus::Included,
             _ => InstructionsStatus::Changed,
         }
     }
@@ -1006,16 +1004,14 @@ impl McpStore {
         }
         match shown {
             Some(shown) => {
-                let current = state
-                    .server_meta
-                    .get(server_id)
-                    .and_then(|m| m.instructions.as_deref());
-                if current != Some(shown) {
-                    return Err(Error::InvalidInput(
-                        "the server's instructions changed — review them again".into(),
-                    ));
-                }
-                let sig = instructions_signature(shown);
+                let sig = match state.server_meta.get(server_id) {
+                    Some(m) if m.instructions.as_deref() == Some(shown) => m.signature().to_owned(),
+                    _ => {
+                        return Err(Error::InvalidInput(
+                            "the server's instructions changed — review them again".into(),
+                        ))
+                    }
+                };
                 state.instructions_off.remove(server_id);
                 state.instruction_pins.insert(server_id.to_owned(), sig);
             }
@@ -1263,9 +1259,26 @@ impl McpStore {
             tool_policies: existing.map(|s| s.tool_policies).unwrap_or_default(),
             call_timeout_secs: input.call_timeout_secs,
         };
-        match state.servers.iter_mut().find(|s| s.id == id) {
-            Some(slot) => *slot = config.clone(),
-            None => state.servers.push(config.clone()),
+        let repointed = match state.servers.iter_mut().find(|s| s.id == id) {
+            Some(slot) => {
+                let old = std::mem::replace(slot, config.clone());
+                old.transport != config.transport
+                    || old.command != config.command
+                    || old.args != config.args
+                    || old.cwd != config.cwd
+                    || old.url != config.url
+            }
+            None => {
+                state.servers.push(config.clone());
+                false
+            }
+        };
+        // Re-pointed at another program or URL: the cached handshake metadata and the
+        // accepted instructions belong to the old server, so the next connect starts over
+        // as a first connect. Turning instructions off is the user's choice and is kept.
+        if repointed {
+            state.server_meta.remove(&id);
+            state.instruction_pins.remove(&id);
         }
         Self::pin_unpinned_allowed(&mut state, &id);
         self.persist(&state)?;
@@ -1489,18 +1502,16 @@ mod tests {
         use InstructionsStatus::*;
         let (s, tmp) = store();
         let id = s.save(input("gh")).unwrap().id;
-        let meta = |t: &str| ServerMeta {
-            instructions: Some(t.into()),
-            ..Default::default()
-        };
+        let meta = |t: &str| ServerMeta::from_handshake(None, Some(t));
+        let sig = |t: &str| meta(t).signature().to_owned();
         s.set_server_meta(&id, meta("v1")).unwrap();
-        assert_eq!(s.instructions_status(&id, "v1"), Included);
+        assert_eq!(s.instructions_status(&id, &sig("v1")), Included);
         // A new version is left out until accepted.
         s.set_server_meta(&id, meta("v2")).unwrap();
-        assert_eq!(s.instructions_status(&id, "v2"), Changed);
+        assert_eq!(s.instructions_status(&id, &sig("v2")), Changed);
         assert!(s.set_instructions_included(&id, Some("v1")).is_err());
         s.set_instructions_included(&id, Some("v2")).unwrap();
-        assert_eq!(s.instructions_status(&id, "v2"), Included);
+        assert_eq!(s.instructions_status(&id, &sig("v2")), Included);
         // Off survives reloads and blocks first-sight pinning.
         s.set_instructions_included(&id, None).unwrap();
         let reloaded = McpStore::load(
@@ -1508,7 +1519,7 @@ mod tests {
             Arc::new(MemorySecretStore::default()),
         )
         .unwrap();
-        assert_eq!(reloaded.instructions_status(&id, "v2"), Off);
+        assert_eq!(reloaded.instructions_status(&id, &sig("v2")), Off);
         assert_eq!(
             reloaded
                 .server_meta(&id)
@@ -1518,6 +1529,53 @@ mod tests {
         );
         reloaded.delete(&id).unwrap();
         assert!(reloaded.server_meta(&id).is_none());
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn instructions_added_after_first_connect_need_acceptance() {
+        use InstructionsStatus::*;
+        let (s, tmp) = store();
+        let id = s.save(input("gh")).unwrap().id;
+        s.set_server_meta(&id, ServerMeta::from_handshake(None, None))
+            .unwrap();
+        let v1 = ServerMeta::from_handshake(None, Some("v1"));
+        s.set_server_meta(&id, v1.clone()).unwrap();
+        assert_eq!(s.instructions_status(&id, v1.signature()), Changed);
+        s.set_instructions_included(&id, Some("v1")).unwrap();
+        assert_eq!(s.instructions_status(&id, v1.signature()), Included);
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn repointing_a_connection_resets_instruction_trust() {
+        use InstructionsStatus::*;
+        let (s, tmp) = store();
+        let mut i = input("gh");
+        i.id = Some(s.save(i.clone()).unwrap().id);
+        let id = i.id.clone().unwrap();
+        let (v1, v2) = (
+            ServerMeta::from_handshake(None, Some("v1")),
+            ServerMeta::from_handshake(None, Some("v2")),
+        );
+        s.set_server_meta(&id, v1.clone()).unwrap();
+        // Renaming keeps the pin, so a new version still needs review.
+        i.name = "github".into();
+        s.save(i.clone()).unwrap();
+        s.set_server_meta(&id, v2.clone()).unwrap();
+        assert_eq!(s.instructions_status(&id, v2.signature()), Changed);
+        // A different command is a different server: its first instructions are accepted.
+        i.command = "other-server --stdio".into();
+        s.save(i.clone()).unwrap();
+        assert!(s.server_meta(&id).is_none());
+        s.set_server_meta(&id, v2.clone()).unwrap();
+        assert_eq!(s.instructions_status(&id, v2.signature()), Included);
+        // Off is the user's choice and survives re-pointing.
+        s.set_instructions_included(&id, None).unwrap();
+        i.command = "third-server".into();
+        s.save(i).unwrap();
+        s.set_server_meta(&id, v1.clone()).unwrap();
+        assert_eq!(s.instructions_status(&id, v1.signature()), Off);
         std::fs::remove_dir_all(tmp).unwrap();
     }
 

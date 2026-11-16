@@ -701,13 +701,14 @@ impl McpManager {
                     .map(|l| l.meta.clone())
                     .or_else(|| self.store.server_meta(&config.id))
                     .unwrap_or_default();
+                let instructions = meta.instructions.as_ref().map(|text| ServerInstructions {
+                    status: self.store.instructions_status(&config.id, meta.signature()),
+                    text: text.clone(),
+                });
                 McpServerView {
                     server_title: meta.title,
                     icon: meta.icon,
-                    instructions: meta.instructions.map(|text| ServerInstructions {
-                        status: self.store.instructions_status(&config.id, &text),
-                        text,
-                    }),
+                    instructions,
                     tools_cached: live.is_none(),
                     status: if config.enabled {
                         inner
@@ -1644,9 +1645,11 @@ impl McpManager {
                 }
                 // Untrusted guidance: only the accepted version, and only for a server
                 // whose tools this run can actually call.
-                let instructions = live.meta.instructions.clone().filter(|t| {
+                let instructions = live.meta.instructions.clone().filter(|_| {
                     count > 0
-                        && self.store.instructions_status(&config.id, t)
+                        && self
+                            .store
+                            .instructions_status(&config.id, live.meta.signature())
                             == InstructionsStatus::Included
                 });
                 briefs.push(ServerBrief {

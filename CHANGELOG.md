@@ -38,7 +38,7 @@ under *Unreleased*.
 - **Tools**: **Save** in Connections now returns to the start screen; **Save & test** still
   stays on the connection to show the result.
 - **Tools**: On/off controls in the ⚒ Tools menu, the agent editor and schedules are now
-  toggle switches instead of checkboxes.
+  toggle switches instead of checkboxes; a switch whose change fails flips back.
 - **Tools**: Server instructions are no longer cut off at 600 characters on one line: the
   system prompt keeps their line breaks, up to 2,000 characters per server, cut at a line break.
 
@@ -59,7 +59,10 @@ under *Unreleased*.
   process, not a sandbox — see SECURITY.md for what that means.
 - **Tools**: Server instructions are now sent to the model as a marked, untrusted block, with
   invisible characters removed, and only for chats and agents that can use that server's tools.
-  If a server changes its instructions they are left out until you accept the new version.
+  If a server changes its instructions, or adds them after first connecting without any, they
+  are left out until you accept the new version.
+- **Tools**: Server icons larger than 512×512 pixels are ignored, so a tiny file can't make the
+  app decode a huge image.
 
 ## 0.1.2 — 2026-11-15
 

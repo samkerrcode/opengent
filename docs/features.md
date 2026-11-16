@@ -422,16 +422,19 @@ the app never downloads an icon from a URL. Server instructions are written by t
 so they are treated as untrusted: invisible and control characters are removed, and they are
 sent to the model in a clearly marked block that tells it they are hints about that server's
 own tools and can't override its rules, your permissions or your requests. They're included
-only in chats and agents that can call at least one of the server's tools. The first version
-a server sends is accepted automatically; if the server later changes them, they are left out
-and marked "changed" until you review them and turn the switch back on.
+only in chats and agents that can call at least one of the server's tools. What a server
+sends on its first connect is accepted automatically; if it later changes its instructions,
+or starts sending them after first connecting without any, they are left out and marked
+"changed" until you review them and turn the switch on. Pointing a connection at a different
+command, directory or URL counts as a new server, so its first instructions are accepted
+again (unless you turned them off).
 
 **Limits.** OAuth endpoints that redirect aren't followed, and an authorization server on a
 private or loopback address is only accepted for a server on this machine. Client
 credentials support a client secret only (no signed-JWT client authentication) and need
 tokens that live longer than about a minute. When a server asks for more scopes, the message
-names them; add them and sign in again. Icons over 16 KiB, SVG icons and icons at a URL
-aren't shown. Server instructions are kept up to 8,000 characters; the system prompt carries
+names them; add them and sign in again. Icons over 16 KiB or 512×512 pixels, SVG icons and
+icons at a URL aren't shown. Server instructions are kept up to 8,000 characters; the system prompt carries
 up to 2,000 per server and 6,000 in total, cut at a line break and marked as truncated. Filtering
 can't make instructions safe on its own — tool permissions remain the safeguard, so turn off
 instructions from servers you don't fully trust. A local server runs with your user account's privileges —

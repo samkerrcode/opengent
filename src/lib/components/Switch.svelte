@@ -3,6 +3,14 @@
 
   // On/off toggle: a native checkbox with `role="switch"`, so keyboard and screen-reader
   // behaviour stay native. `children` is an optional visible label next to the track.
+  // Controlled: a click only reports the new value, and the switch shows `checked`. Svelte
+  // only writes `checked` when the prop changes, so a failed action would otherwise leave
+  // the box flipped.
+  function toggle(e: Event & { currentTarget: HTMLInputElement }) {
+    const input = e.currentTarget;
+    onchange(input.checked);
+    input.checked = checked;
+  }
   let {
     checked,
     onchange,
@@ -24,7 +32,7 @@
 </script>
 
 <label class="switch" class:small {title}>
-  <input type="checkbox" role="switch" {checked} {disabled} aria-label={label} onchange={(e) => onchange(e.currentTarget.checked)} />
+  <input type="checkbox" role="switch" {checked} {disabled} aria-label={label} onchange={toggle} />
   {#if children}<span class="text">{@render children()}</span>{/if}
 </label>
 
