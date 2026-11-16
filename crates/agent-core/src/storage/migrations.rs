@@ -80,19 +80,31 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX chats_agent ON chats(agent_id);",
     // v3: per-chat tool permission overrides (JSON `ChatToolOverrides`; NULL = none).
     "ALTER TABLE chats ADD COLUMN tool_overrides TEXT;",
-    // v4: PDF attachments — pages in the document, the renderer output version
-    // (`pdf::RENDER_VERSION`), a page-1 thumbnail blob, and one image blob per rendered page.
+    // v4: PDF attachments — pages in the document, and one image blob per rendered page.
     "ALTER TABLE attachments ADD COLUMN page_count INTEGER;
-    ALTER TABLE attachments ADD COLUMN render_version INTEGER;
-    ALTER TABLE attachments ADD COLUMN thumbnail_sha256 TEXT;
-    ALTER TABLE attachments ADD COLUMN thumbnail_mime TEXT;
     CREATE TABLE attachment_pages (
-        attachment_id TEXT NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,
+        attachment_id TEXT NOT NULL REFERENCES attachments(id),
         page_index    INTEGER NOT NULL,
         sha256        TEXT NOT NULL,
         mime          TEXT NOT NULL,
         PRIMARY KEY (attachment_id, page_index)
     );",
+    // v5: renderer output version (`pdf::RENDER_VERSION`), a page-1 thumbnail blob, and
+    // page rows that cascade with their attachment (SQLite can't ALTER in a foreign key,
+    // so the table is rebuilt).
+    "ALTER TABLE attachments ADD COLUMN render_version INTEGER;
+    ALTER TABLE attachments ADD COLUMN thumbnail_sha256 TEXT;
+    ALTER TABLE attachments ADD COLUMN thumbnail_mime TEXT;
+    CREATE TABLE attachment_pages_cascade (
+        attachment_id TEXT NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,
+        page_index    INTEGER NOT NULL,
+        sha256        TEXT NOT NULL,
+        mime          TEXT NOT NULL,
+        PRIMARY KEY (attachment_id, page_index)
+    );
+    INSERT INTO attachment_pages_cascade SELECT * FROM attachment_pages;
+    DROP TABLE attachment_pages;
+    ALTER TABLE attachment_pages_cascade RENAME TO attachment_pages;",
 ];
 
 pub fn apply(conn: &mut Connection) -> Result<()> {
@@ -123,5 +135,54 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v as usize, MIGRATIONS.len());
+    }
+
+    /// A database that stopped at v4 (built by a pre-v5 dev build) upgrades cleanly:
+    /// the new columns appear, page rows survive the table rebuild, and they cascade.
+    #[test]
+    fn v5_upgrades_a_database_stopped_at_v4() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for (i, sql) in MIGRATIONS.iter().take(4).enumerate() {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i as i64 + 1).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO attachments
+                 (id, sha256, name, mime, size_bytes, char_count, page_count, created_at)
+             VALUES ('a', 'h', 'n.pdf', 'application/pdf', 1, 0, 2, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO attachment_pages (attachment_id, page_index, sha256, mime)
+             VALUES ('a', 0, 'p', 'image/png')",
+            [],
+        )
+        .unwrap();
+
+        apply(&mut conn).unwrap();
+        let row: (Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT render_version, thumbnail_sha256 FROM attachments WHERE id = 'a'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (None, None));
+        let pages: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM attachment_pages WHERE attachment_id = 'a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pages, 1, "page rows survive the rebuild");
+
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        conn.execute("DELETE FROM attachments WHERE id = 'a'", []).unwrap();
+        let pages: i64 = conn
+            .query_row("SELECT COUNT(*) FROM attachment_pages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(pages, 0, "pages cascade");
     }
 }
