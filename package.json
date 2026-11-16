@@ -1,7 +1,7 @@
 {
   "name": "opengent",
   "private": true,
-  "version": "0.1.2",
+  "version": "0.2.0",
   "license": "MIT OR Apache-2.0",
   "type": "module",
   "scripts": {
@@ -16,6 +16,7 @@
     "tauri:dev": "npm run gen:product && tauri dev --config src-tauri/tauri.product.conf.json",
     "tauri:build": "npm run gen:product && tauri build --config src-tauri/tauri.product.conf.json",
     "gen:types": "cargo test --workspace --lib export_bindings_ && node scripts/check-bindings.mjs",
+    "release:prep": "node scripts/release-prep.mjs",
     "verify": "npm run check && npm test && cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"
   },
   "dependencies": {

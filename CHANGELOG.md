@@ -14,6 +14,8 @@ under *Unreleased*.
 
 ## Unreleased
 
+## 0.2.0 — 2026-11-16
+
 ### Added
 
 - **Tools**: Remote MCP connections can sign in with OAuth in your browser (authorization

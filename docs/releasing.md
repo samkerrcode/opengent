@@ -111,16 +111,15 @@ agree, and the tag is `v<that version>` with an optional `-alpha.N` / `-beta.N` 
 
 In a `chore/release-x.y.z` PR:
 
-1. Bump the version in all places:
+1. Run the prep script:
    ```sh
-   # edit "version" in product.json and [workspace.package] in Cargo.toml, then:
-   npm version X.Y.Z --no-git-tag-version   # package.json + package-lock.json
-   cargo check                              # refreshes Cargo.lock
-   node scripts/check-release-version.mjs vX.Y.Z
+   npm run release:prep -- X.Y.Z
    ```
-2. In `CHANGELOG.md`, rename the *Unreleased* heading to `## X.Y.Z — YYYY-MM-DD` and start a
-   new empty *Unreleased* section above it.
-3. Merge once CI is green.
+   It bumps `product.json`, `[workspace.package]` in `Cargo.toml` and
+   `package.json`/`package-lock.json`, refreshes `Cargo.lock`, renames the *Unreleased*
+   heading in `CHANGELOG.md` to `## X.Y.Z — <today>` with a fresh empty *Unreleased* above
+   it, and runs the version gate.
+2. Merge once CI is green.
 
 ### 2. Dry run (optional, recommended after workflow or bundler changes)
 

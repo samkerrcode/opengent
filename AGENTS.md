@@ -39,6 +39,8 @@ Contributor guidelines: see CONTRIBUTING.md. Security scope: SECURITY.md.
   `.exe`/`.msi`; a manual run is a dry run (artifacts only), a `vX.Y.Z[-alpha|-beta|-rc.N]` tag creates a draft
   release. `node scripts/check-release-version.mjs [tag]` is the gate: `product.json`, `package.json`,
   `package-lock.json` and workspace `Cargo.toml` versions must agree. App versions stay plain `X.Y.Z` (MSI).
+  `npm run release:prep -- X.Y.Z` bumps all version fields, refreshes `Cargo.lock`, rotates the
+  changelog's *Unreleased* section, and runs the gate — use it in a `chore/release-x.y.z` PR.
 - `npm run gen:types` – regenerate TS bindings after changing any `#[derive(TS)]` type, then commit them.
 - Adding a provider: new `ProviderKind` + `KindMeta` row + one `ProviderStore::instantiate` arm + an
   adapter in `providers/` built on `providers/common.rs` (`send_checked`, `pump_sse`, `read_json`,
