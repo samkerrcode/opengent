@@ -26,13 +26,19 @@
   const thinkingLive = (i: number) => live && i === turn.segments.length - 1;
 
   // The thinking body is height-capped and scrolls internally. While it streams, follow the
-  // tail unless the user scrolled up inside it (returning to its bottom resumes); once it
-  // collapses, reset to the top so a reopened trace reads from the start.
+  // tail unless the user scrolled up inside it (returning to its bottom resumes). A closed
+  // body has no layout box (see the CSS), so a scrollTop write then is a no-op and the
+  // browser restores the old offset on reopen — reset to the top on toggle instead, so a
+  // reopened trace reads from the start.
   function followTail(active: boolean) {
     return (node: HTMLElement) => {
       if (!active) {
-        node.scrollTop = 0;
-        return;
+        const details = node.parentElement as HTMLDetailsElement | null;
+        const onToggle = () => {
+          if (details?.open) node.scrollTop = 0;
+        };
+        details?.addEventListener("toggle", onToggle);
+        return () => details?.removeEventListener("toggle", onToggle);
       }
       let following = true;
       const toEnd = () => {
@@ -325,6 +331,18 @@
     border-top: 1px solid var(--border);
     max-height: min(320px, 40vh);
     overflow-y: auto;
+  }
+  /* Chromium hides a closed <details> body with content-visibility: hidden. In WebView2 a
+     Thinking block collapsing that way can freeze the chat scroller's wheel range at its
+     pre-collapse size: later growth is reachable only programmatically, and wheel input
+     snaps back to the stale maximum (issue #31). Hide the closed body with display: none
+     instead. ::details-content is Chromium 131+ / Safari 18.4+; older engines drop this
+     rule and keep their native hiding, so it is a no-op there. */
+  .thinking-block::details-content {
+    content-visibility: visible;
+  }
+  .thinking-block:not([open]) > .thinking-body {
+    display: none;
   }
   @keyframes spin {
     to {

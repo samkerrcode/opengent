@@ -14,6 +14,11 @@ under *Unreleased*.
 
 ## Unreleased
 
+### Fixed
+
+- **Chat**: On Windows, after a Thinking block collapsed, wheel scrolling could stop short of
+  the rest of the reply and snap back to a stuck position until the chat was revisited.
+
 ## 0.2.0 — 2026-11-16
 
 ### Added
