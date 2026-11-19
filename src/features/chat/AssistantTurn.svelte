@@ -331,6 +331,21 @@
     border-top: 1px solid var(--border);
     max-height: min(320px, 40vh);
     overflow-y: auto;
+    /* overflow-y: auto alone computes overflow-x to auto, and the body is re-rendered on every
+       delta while mid-stream markdown changes shape — a horizontal scrollbar would flicker in and
+       out. Clip it; wide children (tables, display math) keep their own scrollers. The stable
+       gutter (ignored before Safari 18.2) stops a classic Windows scrollbar from reflowing the
+       text when the body first hits its max-height. */
+    overflow-x: hidden;
+    scrollbar-gutter: stable;
+  }
+  /* Reasoning often indents bullets 4+ spaces, which markdown renders as code blocks. Wrap code
+     here instead of scrolling it: a per-line scroller that is rebuilt on each delta flickers and
+     loses its scroll offset. */
+  .markdown.thinking-body :global(pre) {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    overflow-x: hidden;
   }
   /* Chromium hides a closed <details> body with content-visibility: hidden. In WebView2 a
      Thinking block collapsing that way can freeze the chat scroller's wheel range at its
@@ -492,6 +507,10 @@
     border: 1px solid var(--border);
     padding: 5px 10px;
     text-align: left;
+  }
+  .markdown :global(img) {
+    max-width: 100%;
+    height: auto;
   }
   .markdown :global(hr) {
     border: none;

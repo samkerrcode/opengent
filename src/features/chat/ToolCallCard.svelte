@@ -191,6 +191,7 @@
     gap: var(--space-2);
     max-height: 320px;
     overflow-y: auto;
+    overflow-x: hidden;
   }
   .kv {
     display: grid;
