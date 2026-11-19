@@ -336,13 +336,15 @@
      Thinking block collapsing that way can freeze the chat scroller's wheel range at its
      pre-collapse size: later growth is reachable only programmatically, and wheel input
      snaps back to the stale maximum (issue #31). Hide the closed body with display: none
-     instead. ::details-content is Chromium 131+ / Safari 18.4+; older engines drop this
-     rule and keep their native hiding, so it is a no-op there. */
-  .thinking-block::details-content {
-    content-visibility: visible;
-  }
-  .thinking-block:not([open]) > .thinking-body {
-    display: none;
+     instead. ::details-content is Chromium 131+ / Safari 18.4+; the @supports gate keeps
+     older engines (the macOS 12 WebKit) on their native hiding, byte-for-byte unchanged. */
+  @supports selector(::details-content) {
+    .thinking-block::details-content {
+      content-visibility: visible;
+    }
+    .thinking-block:not([open]) > .thinking-body {
+      display: none;
+    }
   }
   @keyframes spin {
     to {
