@@ -4,6 +4,6 @@
   "slug": "opengent",
   "dataDirName": ".opengent",
   "identifier": "dev.opengent.desktop",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Model-agnostic desktop agent workbench"
 }

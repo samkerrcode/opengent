@@ -14,6 +14,8 @@ under *Unreleased*.
 
 ## Unreleased
 
+## 0.2.1 — 2026-11-19
+
 ### Fixed
 
 - **Chat**: On Windows, after a Thinking block collapsed, wheel scrolling could stop short of
