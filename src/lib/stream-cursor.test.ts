@@ -5,7 +5,7 @@ import { markdownHtml } from "./stream-cursor";
 
 function render(source: string, streaming = true) {
   const root = document.createElement("div");
-  markdownHtml(renderMarkdown(source), streaming)(root);
+  markdownHtml(renderMarkdown(source, { partial: streaming }), streaming)(root);
   const cursor = root.querySelector(".stream-cursor");
   return { root, cursor, host: cursor?.parentElement, prev: cursor?.previousSibling?.textContent };
 }
@@ -55,6 +55,12 @@ describe("placeStreamCursor", () => {
     const { cursor } = render("Inline $x^2$");
     expect(cursor?.closest(".katex")).toBeNull();
     expect(cursor?.previousElementSibling?.classList.contains("katex")).toBe(true);
+  });
+
+  it("follows the source text of pending math", () => {
+    const { host, prev } = render("$$\n\\sum_{i=1}^{N} C_{");
+    expect(host?.classList.contains("katex-pending")).toBe(true);
+    expect(prev).toBe("\\sum_{i=1}^{N} C_{");
   });
 
   it("renders no cursor when not streaming", () => {

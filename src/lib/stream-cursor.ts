@@ -8,10 +8,13 @@ const CURSOR_CLASS = "stream-cursor";
 
 // Elements whose content must not receive the caret: void elements and rendered math (KaTeX
 // boxes are absolutely laid out; a caret inside would float in the formula). The caret goes
-// right after them instead.
+// right after them instead. Pending math (.katex-pending) is plain source text, so the caret
+// follows its last character like any paragraph.
 const ATOMIC = new Set(["BR", "HR", "IMG", "BUTTON", "SVG", "MATH"]);
 const isAtomic = (el: Element) =>
-  ATOMIC.has(el.tagName.toUpperCase()) || el.classList.contains("katex") || el.classList.contains("katex-block");
+  ATOMIC.has(el.tagName.toUpperCase()) ||
+  el.classList.contains("katex") ||
+  (el.classList.contains("katex-block") && !el.classList.contains("katex-pending"));
 
 // Last child that renders something; markdown-it emits "\n" text nodes between blocks.
 function lastMeaningful(node: Node): ChildNode | null {

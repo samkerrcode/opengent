@@ -7,7 +7,7 @@
 // renderers). KaTeX output needs MathML + SVG + inline style attributes, so the sanitizer
 // profile allows them; raw HTML still can't reach the output because the parser escapes it.
 import "katex/dist/katex.min.css";
-import MarkdownIt, { type MarkdownIt as Md, type Token } from "markdown-it";
+import MarkdownIt, { type MarkdownIt as Md, type StateBlock, type Token } from "markdown-it";
 import markdownItKatexPkg from "@vscode/markdown-it-katex";
 import DOMPurify from "dompurify";
 import hljs from "./hljs";
@@ -75,10 +75,44 @@ md.inline.ruler.before("escape", "math_inline_paren", (state, silent) => {
   return true;
 });
 
-// \[...\] display math, single- or multi-line, as its own block. While streaming, an
-// unterminated \[ at the tail is emitted as pending math (rendered below) instead of
-// falling through to raw paragraph text; it ends at the first blank line like a
-// paragraph, so blocks that already arrived after it keep rendering normally.
+// --- Pending math in partial output ---------------------------------------------------
+// While a run streams (or after it was stopped or cut off), the document can end inside
+// display math whose closing delimiter never arrived. The plugin emits a math token
+// anyway (an unclosed $$ block or ```math fence runs to the end of input), so KaTeX
+// would render a red parse error for a *prefix* of the formula. With `env.partial` the
+// unfinished construct at the tail is marked pending and rendered as muted source
+// inside the same .katex-block container, swapping to the rendered formula once its
+// delimiter arrives. Closure is decided inside the block rules, where container
+// markers and indentation are already resolved.
+
+const isPartial = (state: StateBlock) => state.env?.["partial"] === true;
+
+// Nothing but whitespace follows `line` (exclusive end) in the whole document.
+const isTail = (state: StateBlock, line: number) => state.src.slice(state.eMarks[line - 1]!).trim() === "";
+
+// Lines [first, last] of a delimited block with container markers stripped: the first
+// line from `from`, the last one up to `to`.
+function blockLines(state: StateBlock, first: number, from: number, last: number, to: number): string {
+  if (first === last) return state.src.slice(from, to);
+  return (
+    state.src.slice(from, state.eMarks[first]!) +
+    "\n" +
+    state.getLines(first + 1, last, state.blkIndent, true) +
+    state.src.slice(state.bMarks[last]! + state.tShift[last]!, to)
+  );
+}
+
+// Replace a block rule with `wrap(original)`, keeping its position and alt chains.
+type RuleBlock = Parameters<typeof md.block.ruler.at>[1];
+function wrapBlockRule(name: string, wrap: (rule: RuleBlock) => RuleBlock) {
+  const rule = md.block.ruler.__rules__[md.block.ruler.__find__(name)]!;
+  md.block.ruler.at(name, wrap(rule.fn), { alt: rule.alt });
+}
+
+// \[...\] display math, single- or multi-line, as its own block. With `env.partial`, an
+// unterminated \[ at the tail is emitted as pending math instead of falling through to
+// raw paragraph text; it ends where a paragraph would (blank line or dedent), so once
+// more content arrives after it, it renders as the paragraph the final output shows.
 md.block.ruler.before("fence", "math_block_bracket", (state, startLine, endLine, silent) => {
   const start = state.bMarks[startLine]! + state.tShift[startLine]!;
   if (!state.src.startsWith("\\[", start)) return false;
@@ -96,18 +130,21 @@ md.block.ruler.before("fence", "math_block_bracket", (state, startLine, endLine,
     }
   }
   if (close === -1) {
-    if (!state.env?.["streaming"]) return false;
+    if (!isPartial(state)) return false;
+    let lastLine = startLine;
+    while (lastLine + 1 < endLine && !state.isEmpty(lastLine + 1) && state.sCount[lastLine + 1]! >= state.blkIndent) {
+      lastLine++;
+    }
+    if (!isTail(state, lastLine + 1)) return false;
     if (!silent) {
-      let lastLine = startLine;
-      while (lastLine + 1 < endLine && !state.isEmpty(lastLine + 1)) lastLine++;
       const token = state.push("math_block", "math", 0);
       token.block = true;
       token.markup = "\\[\\]";
-      token.content = state.src.slice(start + 2, state.eMarks[lastLine]!);
+      token.content = blockLines(state, startLine, start + 2, lastLine, state.eMarks[lastLine]!);
       token.map = [startLine, lastLine + 1];
       token.meta = { pending: true };
-      state.line = lastLine + 1;
     }
+    state.line = lastLine + 1;
     return true;
   }
 
@@ -115,82 +152,70 @@ md.block.ruler.before("fence", "math_block_bracket", (state, startLine, endLine,
     const token = state.push("math_block", "math", 0);
     token.block = true;
     token.markup = "\\[\\]";
-    token.content = state.src.slice(start + 2, close);
+    token.content = blockLines(state, startLine, start + 2, closeLine, close);
     token.map = [startLine, closeLine + 1];
   }
   state.line = closeLine + 1;
   return true;
 });
 
-// --- Pending math while streaming ---------------------------------------------------
-// While a run streams, the document tail can end inside display math whose closing
-// delimiter has not arrived yet. The plugin emits a math token anyway (an unclosed $$
-// block or ```math fence runs to the end of input), so KaTeX would render a red parse
-// error for a *prefix* of the formula — the issue behind the flicker. In streaming
-// mode the unfinished construct is marked pending here and rendered as muted source
-// inside the same .katex-block container, swapping to the rendered formula once its
-// delimiter arrives. Delimiter state comes from the parsed tokens, not ad-hoc counting.
-
-// Byte offset of a line's first character in the normalized source.
-function lineOffset(src: string, line: number): number {
-  let off = 0;
-  for (let i = 0; i < line; i++) off = src.indexOf("\n", off) + 1;
-  return off;
-}
-
-// Is `line` a closing fence for an opener of `markup`? The close is the same marker
-// char, at least as long as the opener, at most 3 spaces indented (after stripping
-// quote/list markers so a nested close still reads as a fence line).
-function isClosingFence(line: string, markup: string): boolean {
-  const stripped = line.replace(/^(?:\s*(?:>+|[-*+]|\d+[.)])\s*)+/, "");
-  const run = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(stripped)?.[1];
-  return run !== undefined && run[0] === markup[0] && run.length >= markup.length;
-}
-
-md.core.ruler.push("math_pending", (state) => {
-  if (!state.env?.["streaming"]) return;
-  // Unfinished math is always the last leaf token; still-open quotes/lists trail it
-  // with *_close markers, so scan back to the first substantive token.
-  let token: Token | undefined;
-  for (let i = state.tokens.length - 1; i >= 0; i--) {
-    const t = state.tokens[i]!;
-    if (t.nesting !== -1) {
-      token = t;
-      break;
-    }
+// The plugin's $$ block rule: when it finds no closing $$ it stops past the last line
+// (`state.line > endLine`); a found close or a dedent leaves `state.line <= endLine`.
+wrapBlockRule("math_block", (rule) => (state, startLine, endLine, silent) => {
+  if (!rule(state, startLine, endLine, silent)) return false;
+  if (!silent && isPartial(state) && state.line > endLine && isTail(state, endLine)) {
+    const token = state.tokens[state.tokens.length - 1]!;
+    if (token.type === "math_block") token.meta = { pending: true };
   }
-  const map = token?.map;
-  if (!token || !map) return;
-  if (token.type === "math_block" && token.markup === "$$") {
-    // The plugin's $$ rule consumes to end of input when unclosed — and it can only
-    // leave the block open when the source holds no second $$ after the opener.
-    const open = state.src.indexOf("$$", lineOffset(state.src, map[0]));
-    if (state.src.indexOf("$$", open + 2) === -1) token.meta = { pending: true };
-  } else if (token.type === "fence" && token.info.trim().toLowerCase() === "math") {
-    // An unclosed fence likewise runs to end of input: pending unless the last
-    // mapped line is itself the closing fence.
-    const off = lineOffset(state.src, map[1] - 1);
-    const nl = state.src.indexOf("\n", off);
-    const last = state.src.slice(off, nl === -1 ? undefined : nl);
-    if (!isClosingFence(last, token.markup)) token.meta = { pending: true };
-  }
+  return true;
 });
 
+// markdown-it's fence rule: an unclosed fence runs to `endLine`. A fence closed on the
+// container's last line also ends there, so check that line the way the rule does: the
+// opener's marker char, at least as long, under 4 columns of relative indent.
+wrapBlockRule("fence", (rule) => (state, startLine, endLine, silent) => {
+  if (!rule(state, startLine, endLine, silent)) return false;
+  if (silent || !isPartial(state) || state.line < endLine || !isTail(state, endLine)) return true;
+  const token = state.tokens[state.tokens.length - 1]!;
+  if (token.type !== "fence" || token.info.trim().toLowerCase() !== "math") return true;
+  const last = endLine - 1;
+  const text = state.src.slice(state.bMarks[last]! + state.tShift[last]!, state.eMarks[last]!).trimEnd();
+  const marker = token.markup[0]!;
+  const closed =
+    last > startLine &&
+    state.sCount[last]! - state.blkIndent < 4 &&
+    text.length >= token.markup.length &&
+    [...text].every((c) => c === marker);
+  if (!closed) token.meta = { pending: true };
+  return true;
+});
+
+// Drop a closing delimiter that has only partly arrived (a lone `$` of `$$`, the `\` of
+// `\]`, or a short run of fence markers on the last line), so it doesn't flash.
+function withoutPartialCloser(token: Token): string {
+  const s = token.content.replace(/\s+$/, "");
+  if (token.markup === "$$") return s.endsWith("$") && !s.endsWith("\\$") ? s.slice(0, -1) : s;
+  if (token.markup === "\\[\\]") return (/\\+$/.exec(s)?.[0].length ?? 0) % 2 === 1 ? s.slice(0, -1) : s;
+  const nl = s.lastIndexOf("\n");
+  const lastLine = s.slice(nl + 1).trim();
+  return lastLine && [...lastLine].every((c) => c === token.markup[0]) ? s.slice(0, Math.max(nl, 0)) : s;
+}
+
 // Escaped source in the same .katex-block wrapper as a rendered formula, so the swap
-// keeps identical margins. Renderers key off token.meta.pending (streaming only).
-const pendingMathHtml = (content: string) =>
-  `<p class="katex-block katex-pending">${md.utils.escapeHtml(content.replace(/\n+$/, ""))}</p>\n`;
+// keeps identical margins. Renderers key off token.meta.pending (partial output only).
+const pendingMathHtml = (token: Token) =>
+  `<p class="katex-block katex-pending">${md.utils.escapeHtml(withoutPartialCloser(token).trim())}</p>\n`;
 
 const pluginMathBlock = md.renderer.rules.math_block!;
 md.renderer.rules.math_block = (tokens, idx, options, env, self) => {
   const token = tokens[idx]!;
-  return token.meta?.["pending"] ? pendingMathHtml(token.content) : pluginMathBlock(tokens, idx, options, env, self);
+  return token.meta?.["pending"] ? pendingMathHtml(token) : pluginMathBlock(tokens, idx, options, env, self);
 };
 
 const pluginFence = md.renderer.rules.fence!;
 md.renderer.rules.fence = (tokens, idx, options, env, self) => {
   const token = tokens[idx]!;
-  return token.meta?.["pending"] ? pendingMathHtml(token.content) : pluginFence(tokens, idx, options, env, self);
+  return token.meta?.["pending"] ? pendingMathHtml(token) : pluginFence(tokens, idx, options, env, self);
 };
 
 DOMPurify.setConfig({
@@ -210,6 +235,10 @@ DOMPurify.addHook("afterSanitizeAttributes", (node) => {
   }
 });
 
-export function renderMarkdown(source: string, options?: { streaming?: boolean }): string {
-  return DOMPurify.sanitize(md.render(source, { streaming: options?.streaming === true }));
+/**
+ * `partial`: the source may end mid-construct (still streaming, or the run was stopped or
+ * cut off), so unclosed display math at the tail renders as pending source, not an error.
+ */
+export function renderMarkdown(source: string, options?: { partial?: boolean }): string {
+  return DOMPurify.sanitize(md.render(source, { partial: options?.partial === true }));
 }

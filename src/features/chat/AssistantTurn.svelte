@@ -58,6 +58,10 @@
     };
   }
   const truncated = $derived(turn.stopReason === "max_tokens");
+  // The last segment may end mid-formula while streaming, or when the run was stopped,
+  // failed or hit the token limit; render unclosed math there as pending source.
+  const cutShort = $derived(live || turn.phase === "cancelled" || turn.phase === "failed" || truncated);
+  const partialAt = (i: number) => cutShort && i === turn.segments.length - 1;
   const usageText = $derived.by(() => {
     const u = turn.usage;
     if (!u) return null;
@@ -125,12 +129,12 @@
             {@const active = thinkingLive(i)}
             <details class="thinking-block" open={active}>
               <summary>{active ? "Thinking…" : "Thoughts"}</summary>
-              <div class="markdown thinking-body" {@attach followTail(active)}>{@html renderMarkdown(seg.text, { streaming: active })}</div>
+              <div class="markdown thinking-body" {@attach followTail(active)}>{@html renderMarkdown(seg.text, { partial: partialAt(i) })}</div>
             </details>
           {/if}
         {:else if seg.kind === "text"}
           {@const last = live && i === turn.segments.length - 1}
-          <div class="markdown" {@attach markdownHtml(renderMarkdown(seg.text, { streaming: last }), last)}></div>
+          <div class="markdown" {@attach markdownHtml(renderMarkdown(seg.text, { partial: partialAt(i) }), last)}></div>
         {:else if seg.kind === "tool"}
           <ToolCallCard segment={seg} runId={turn.runId} />
         {/if}
@@ -528,7 +532,7 @@
     margin: 0.6em 0 1em;
     padding: 4px 0;
   }
-  /* Unfinished math while streaming: the source so far, muted monospace inside the
+  /* Unfinished math (streaming, stopped or cut off): the source so far, muted monospace inside the
      same .katex-block, so swapping in the rendered formula keeps identical margins. */
   .markdown :global(.katex-pending) {
     font-family: var(--font-mono);

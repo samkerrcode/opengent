@@ -102,7 +102,7 @@ describe("renderMarkdown", () => {
   });
 });
 
-describe("renderMarkdown streaming mode", () => {
+describe("renderMarkdown partial mode", () => {
   const fixture = [
     "Working in $\\mathbb{Z}_n$ and prices $5 and $10.",
     "",
@@ -123,71 +123,121 @@ describe("renderMarkdown streaming mode", () => {
 
   it("never emits a KaTeX error for any prefix of a math-heavy stream", () => {
     for (let i = 0; i <= fixture.length; i++) {
-      const html = renderMarkdown(fixture.slice(0, i), { streaming: true });
+      const html = renderMarkdown(fixture.slice(0, i), { partial: true });
       expect(html, `prefix of length ${i}`).not.toContain("katex-error");
     }
   });
 
   it("is identical to the final render once all delimiters are closed", () => {
-    expect(renderMarkdown(fixture, { streaming: true })).toBe(renderMarkdown(fixture));
+    expect(renderMarkdown(fixture, { partial: true })).toBe(renderMarkdown(fixture));
   });
 
   it("renders a closed math fence at the tail as math, even with a trailing newline", () => {
-    const html = renderMarkdown("```math\nx_i\n```\n", { streaming: true });
+    const html = renderMarkdown("```math\nx_i\n```\n", { partial: true });
     expect(html).toContain('class="katex-block"');
     expect(html).not.toContain("katex-pending");
   });
 
   it("renders unfinished $$ math as a pending block, not an error", () => {
-    const html = renderMarkdown("$$\n\\sum_{i=1}^{N} C_{", { streaming: true });
+    const html = renderMarkdown("$$\n\\sum_{i=1}^{N} C_{", { partial: true });
     expect(html).toContain('class="katex-block katex-pending"');
     expect(html).toContain("\\sum_{i=1}^{N} C_{");
     expect(html).not.toContain("katex-error");
   });
 
   it("renders an unfinished ```math fence as a pending block", () => {
-    const html = renderMarkdown("```math\nx_{i} + y_", { streaming: true });
+    const html = renderMarkdown("```math\nx_{i} + y_", { partial: true });
     expect(html).toContain('class="katex-block katex-pending"');
     expect(html).not.toContain("katex-error");
     expect(html).not.toContain("language-math");
   });
 
   it("renders an unfinished \\[ block as pending instead of raw text", () => {
-    const html = renderMarkdown("\\[\ne^{i\\pi} +", { streaming: true });
+    const html = renderMarkdown("\\[\ne^{i\\pi} +", { partial: true });
     expect(html).toContain('class="katex-block katex-pending"');
     expect(html).not.toContain("katex-error");
   });
 
   it("marks pending math nested in a still-open blockquote", () => {
-    expect(renderMarkdown("> $$\n> x_{", { streaming: true })).toContain("katex-pending");
-    expect(renderMarkdown("> ```math\n> x_{", { streaming: true })).toContain("katex-pending");
+    expect(renderMarkdown("> $$\n> x_{", { partial: true })).toContain("katex-pending");
+    expect(renderMarkdown("> ```math\n> x_{", { partial: true })).toContain("katex-pending");
   });
 
-  it("keeps completed-but-invalid math an error even while streaming", () => {
+  it("keeps completed-but-invalid math an error even in partial output", () => {
     // Delimiter closure decides, not KaTeX success: a closed block is final.
-    const html = renderMarkdown("$$\\badcommand{$$\n\n$$\nx_{", { streaming: true });
+    const html = renderMarkdown("$$\\badcommand{$$\n\n$$\nx_{", { partial: true });
     expect(html).toContain("katex-error");
     expect(html).toContain("katex-pending");
   });
 
-  it("leaves currency, code spans and code fences alone while streaming", () => {
-    const dollars = renderMarkdown("The price is $5 and $10 total.", { streaming: true });
+  it("leaves currency, code spans and code fences alone in partial output", () => {
+    const dollars = renderMarkdown("The price is $5 and $10 total.", { partial: true });
     expect(dollars).toContain("$5");
     expect(dollars).not.toContain("katex");
 
-    const span = renderMarkdown("`$$x` in a code span", { streaming: true });
+    const span = renderMarkdown("`$$x` in a code span", { partial: true });
     expect(span).toContain("<code>$$x</code>");
     expect(span).not.toContain("katex");
 
-    const code = renderMarkdown("```js\n$$x", { streaming: true });
+    const code = renderMarkdown("```js\n$$x", { partial: true });
     expect(code).toContain("$$x");
     expect(code).not.toContain("katex-pending");
   });
 
-  it("pins plugin 1.1.2 behaviour: unclosed $$ and ```math reach KaTeX without streaming mode", () => {
+  it("handles ~~~math fences, open and closed", () => {
+    expect(renderMarkdown("~~~math\nx_{", { partial: true })).toContain("katex-pending");
+    const closed = renderMarkdown("~~~math\nx_i\n~~~", { partial: true });
+    expect(closed).toContain('class="katex-block"');
+    expect(closed).not.toContain("katex-pending");
+  });
+
+  it("recognises closing fences and $$ inside (nested) list items", () => {
+    for (const src of ["- ```math\n  x_i\n  ```", "- a\n  - ```math\n    x_i\n    ```", "- $$\n  x_i\n  $$"]) {
+      const html = renderMarkdown(src, { partial: true });
+      expect(html, src).toContain('class="katex-block"');
+      expect(html, src).not.toContain("katex-pending");
+    }
+    expect(renderMarkdown("- a\n  - ```math\n    x_{", { partial: true })).toContain("katex-pending");
+    expect(renderMarkdown("- $$\n  x_{", { partial: true })).toContain("katex-pending");
+  });
+
+  it("treats CRLF input like LF", () => {
+    const crlf = fixture.replace(/\n/g, "\r\n");
+    expect(renderMarkdown(crlf, { partial: true })).toBe(renderMarkdown(fixture));
+    expect(renderMarkdown("```math\r\nx_{\r\n", { partial: true })).toContain("katex-pending");
+    expect(renderMarkdown("$$\r\nx_{", { partial: true })).toContain("katex-pending");
+  });
+
+  it("hides a closing delimiter that has only partly arrived", () => {
+    const text = (src: string) =>
+      new DOMParser().parseFromString(renderMarkdown(src, { partial: true }), "text/html").querySelector(".katex-pending")
+        ?.textContent;
+    expect(text("$$\nx_i\n$")).toBe("x_i");
+    expect(text("\\[\nx_i \\")).toBe("x_i");
+    expect(text("```math\nx_i\n``")).toBe("x_i");
+    expect(text("\\[\nx \\\\")).toBe("x \\\\");
+  });
+
+  it("strips quote markers from pending and closed \\[ blocks and stops at the container", () => {
+    const pending = renderMarkdown("> \\[\n> e^{i\\pi} +", { partial: true });
+    expect(pending).toContain("katex-pending");
+    expect(pending).not.toContain("&gt;");
+    expect(renderMarkdown("> \\[\n> x_i\n> \\]", { partial: true })).not.toContain("katex-error");
+    // More content after an unclosed \[ means it was a paragraph after all.
+    const later = renderMarkdown("\\[\nx +\n\nNext paragraph", { partial: true });
+    expect(later).toBe(renderMarkdown("\\[\nx +\n\nNext paragraph"));
+  });
+
+  it("only marks the document tail pending", () => {
+    // An unclosed fence ended by its blockquote, with content after it, is final output.
+    const html = renderMarkdown("> ```math\n> x_{\n\nafter", { partial: true });
+    expect(html).toBe(renderMarkdown("> ```math\n> x_{\n\nafter"));
+  });
+
+  it("pins plugin 1.1.2 behaviour: unclosed $$ and ```math reach KaTeX without partial mode", () => {
     expect(renderMarkdown("$$\n\\sum_{i=1}^{N} C_{")).toContain("katex-error");
     expect(renderMarkdown("```math\nx_{")).toContain("katex-error");
-    // An unclosed \[ falls back to paragraph text today; non-streaming keeps that.
+    // An unclosed \[ falls back to paragraph text today; non-partial keeps that.
     const brackets = renderMarkdown("\\[\ne^{i\\pi} +");
     expect(brackets).toContain("e^{i\\pi}");
     expect(brackets).not.toContain("katex");

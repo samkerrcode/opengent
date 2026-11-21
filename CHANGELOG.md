@@ -18,7 +18,8 @@ under *Unreleased*.
 
 - **Chat**: Display math no longer flashes a red KaTeX parse error while a reply or Thinking
   block is still streaming; an unfinished formula shows as dimmed source and renders as soon
-  as its closing delimiter arrives.
+  as its closing delimiter arrives. A reply that was stopped or cut off keeps its unfinished
+  formula as dimmed source instead of ending in an error.
 
 ## 0.2.1 — 2026-11-19
 

@@ -88,8 +88,9 @@ following. Code in a reasoning block wraps to the block's width; in replies, wid
 sideways inside its block, and wide tables and display math scroll sideways in both. While a
 reply or reasoning block is still streaming, a formula whose closing delimiter has not arrived
 yet shows as dimmed source text instead of an error, and renders as math as soon as the
-delimiter completes; a parse error appears only for math that is still invalid when the reply
-ends. Saved chats reopen with the same layout.
+delimiter completes. A reply that was stopped, failed or hit the output token limit keeps an
+unfinished final formula as dimmed source. A parse error appears only for math whose
+delimiters are complete but whose contents are invalid. Saved chats reopen with the same layout.
 
 **Limits.** No raw HTML, embedded media or diagrams. What appears in a reasoning block depends
 on the provider: some send full reasoning, most hosted models send a summary.
