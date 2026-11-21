@@ -310,7 +310,7 @@
     min-height: 0;
   }
   .column {
-    max-width: var(--measure);
+    max-width: clamp(var(--measure), calc(var(--measure) + (100% - 1016px) / 4), var(--measure-wide));
     margin: 0 auto;
     padding: var(--space-8) var(--space-6) var(--space-6);
     display: flex;

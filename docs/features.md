@@ -37,7 +37,7 @@ Each feature is described the same way:
 | [Privacy & data](#privacy--data) | [Local data](#local-data) | Everything under `~/.opengent`; no account, no telemetry |
 | | [Secrets](#secrets) | API keys and tokens only in the OS credential store |
 | [Appearance](#appearance) | [Activity indicator & theme](#activity-indicator--theme) | Live run phases, light/dark theme, reduced motion |
-| | [Window size](#window-size) | Opens at about 80% of the screen, centred, at any display scaling |
+| | [Window size](#window-size) | Opens at about 80% of the screen, centred, at any display scaling; replies widen in large windows |
 
 Keyboard shortcuts: **⌘N / Ctrl+N** new chat · **⌘, / Ctrl+,** provider settings · **Esc**
 stop the current reply or close a dialog · **Shift+Enter** new line in the composer.
@@ -675,5 +675,11 @@ area not taken by the taskbar or Dock.
 after display scaling, so a 4K screen at 300% gets the same proportion as a 1080p screen at
 100%. It is never smaller than 900 × 600 unless the screen itself is smaller, in which case it
 fills the usable area. Resize it freely once it is open.
+
+The conversation keeps a comfortable reading width at the default size. In a larger or
+maximized window it widens gradually, up to about 112 characters per line, so code, tables
+and lists get more room. The message box keeps the same width at every size. Like the window,
+this is measured after display scaling: a 4K screen at 300% looks the same as a 1080p screen,
+and at 100% it gets the widest conversation.
 
 **Limits.** The last size and position are not remembered; every launch starts at the default.

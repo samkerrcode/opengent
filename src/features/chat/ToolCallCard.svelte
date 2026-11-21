@@ -118,7 +118,6 @@
     background: var(--bg-sunken);
     font-size: 13px;
     overflow: hidden;
-    max-width: 640px;
   }
   .tool-card.error {
     border-color: var(--danger);

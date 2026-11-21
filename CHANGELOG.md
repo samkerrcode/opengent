@@ -14,6 +14,12 @@ under *Unreleased*.
 
 ## Unreleased
 
+### Changed
+
+- **Chat**: Replies use more of the width in large or maximized windows and on high-resolution
+  screens, so code and tables have more room. The default-size layout and the message box are
+  unchanged.
+
 ### Fixed
 
 - **Chat**: Display math no longer flashes a red KaTeX parse error while a reply or Thinking
