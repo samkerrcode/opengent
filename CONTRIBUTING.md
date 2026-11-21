@@ -22,8 +22,10 @@ Two principles shape every review:
 | Contribution | Process |
 |---|---|
 | Bug reports | Always welcome. Use the bug report template. |
-| Feature ideas | Open a feature request. The maintainer decides whether it fits the roadmap. |
-| Pull requests | **Only** for issues labeled `approved`. That covers both triaged bugs and accepted feature requests. |
+| Enhancements | Improvements to something that exists (UX, performance, reliability, accessibility, security hardening). Open an enhancement request. |
+| Feature ideas | New capabilities. Open a feature request. The maintainer decides whether it fits the roadmap. |
+| Questions | Ask in [Discussions](https://github.com/samkerrcode/opengent/discussions), not in an issue. |
+| Pull requests | **Only** for issues labeled `approved`. That covers triaged bugs and accepted enhancement and feature requests. |
 | Security issues | Never in public. Follow [SECURITY.md](SECURITY.md). |
 
 PRs that aren't linked to an `approved` issue, such as drive-by features, unrequested

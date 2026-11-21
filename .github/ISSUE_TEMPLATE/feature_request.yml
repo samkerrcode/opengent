@@ -1,0 +1,82 @@
+name: Feature request
+description: Propose a new capability that OpenGent doesn't have yet.
+labels: ["feature request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the [roadmap and proposed features](https://github.com/samkerrcode/opengent#roadmap) first — your idea may already be planned.
+        Improving something that already exists → **Enhancement request**. Open-ended ideas → [Discussions](https://github.com/samkerrcode/opengent/discussions).
+
+        Features are implemented only after a maintainer adds the `approved` label; see [CONTRIBUTING.md](https://github.com/samkerrcode/opengent/blob/main/CONTRIBUTING.md).
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before you file
+      options:
+        - label: I checked the roadmap and searched [existing issues](https://github.com/samkerrcode/opengent/issues?q=is%3Aissue); this isn't already planned or requested.
+          required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Chat & rendering
+        - Providers & models
+        - MCP servers / Connections
+        - Tools & permissions
+        - Agents & schedules
+        - Attachments
+        - History & search
+        - Security & privacy
+        - CLI / headless
+        - Not sure
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / use case
+      description: What are you trying to do that OpenGent can't do today? Personal or business context helps.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: What should the app do? UX, settings, edge cases, and what is out of scope.
+    validations:
+      required: true
+
+  - type: textarea
+    id: security
+    attributes:
+      label: Security & privacy considerations
+      description: Does this touch secrets, tool permissions, local processes, network access, or what is sent to model providers? Write "None" if not.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds, other tools, or why this belongs in core rather than an MCP server.
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria (optional)
+      description: Checkable conditions that mean this feature is done.
+      placeholder: |
+        - [ ] ...
+        - [ ] Documented in docs/features.md
+
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contributing
+      options:
+        - label: I'd like to implement this once it's approved.

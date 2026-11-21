@@ -1,6 +1,6 @@
 <!--
 PRs are accepted only for issues labeled `approved` (triaged bugs or accepted
-feature requests). See CONTRIBUTING.md. PRs without one will usually be closed.
+enhancement and feature requests). See CONTRIBUTING.md. PRs without one will usually be closed.
 Security fixes: do not open a PR — report privately per SECURITY.md.
 -->
 

@@ -159,7 +159,7 @@ numbered phases:
 | **Image generation** | Text-to-image, with automatic detection of provider models that support it. |
 | **CLI** | An `opengent` binary (name derived from `product.json`) built on `agent-core` for headless use: list configured models, run a prompt, run a prompt with an agent, and schedule a prompt. |
 
-Have an idea? Open a [feature request](https://github.com/samkerrcode/opengent/issues/new/choose).
+Have an idea? Open a [feature or enhancement request](https://github.com/samkerrcode/opengent/issues/new/choose).
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how proposals are approved.
 
 ### Known limitations

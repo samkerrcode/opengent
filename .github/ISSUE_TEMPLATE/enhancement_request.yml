@@ -1,0 +1,97 @@
+name: Enhancement request
+description: Improve something that already exists — UX, performance, reliability, accessibility, or security hardening.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for changes to **existing** behavior. Something new → **Feature request**. Something broken → **Bug report**. A vulnerability → report it [privately](https://github.com/samkerrcode/opengent/blob/main/SECURITY.md), never here.
+
+        Enhancements are implemented once a maintainer adds the `approved` label; see [CONTRIBUTING.md](https://github.com/samkerrcode/opengent/blob/main/CONTRIBUTING.md).
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before you file
+      options:
+        - label: I searched [existing issues](https://github.com/samkerrcode/opengent/issues?q=is%3Aissue) and this hasn't been requested.
+          required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind of improvement
+      multiple: true
+      options:
+        - UX / usability
+        - Performance
+        - Reliability
+        - Accessibility
+        - Security hardening
+        - Developer experience / tooling
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Chat & rendering (Markdown, math, streaming, scrolling)
+        - Providers & models
+        - MCP servers / Connections (incl. OAuth)
+        - Tool permissions & approvals
+        - Agents & schedules
+        - Attachments & PDFs
+        - History & search
+        - Secrets & keychain
+        - Install, update & packaging
+        - Build, CI & dev tooling
+        - Not sure
+
+  - type: textarea
+    id: current
+    attributes:
+      label: What exists today
+      description: Which feature or behavior should be improved, and how does it work now?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed improvement
+      description: What should change, and why isn't the current behavior good enough?
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact & evidence
+      description: Who benefits and how much? For performance, include measurements (timings, memory, sizes) and how you took them.
+
+  - type: textarea
+    id: security
+    attributes:
+      label: Security & privacy considerations
+      description: Does this touch secrets, tool permissions, local processes, network access, or what is sent to model providers? Write "None" if not.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds, existing settings, or why this belongs here rather than elsewhere.
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria (optional)
+      description: Checkable conditions that mean this is done.
+      placeholder: |
+        - [ ] ...
+        - [ ] Verified on macOS and Windows

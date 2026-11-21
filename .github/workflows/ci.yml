@@ -5,10 +5,12 @@ on:
     branches: [main]
     paths-ignore:
       - '**.md'
+      - '.github/ISSUE_TEMPLATE/**'
       - '.github/workflows/release.yml'
   pull_request:
     paths-ignore:
       - '**.md'
+      - '.github/ISSUE_TEMPLATE/**'
       - '.github/workflows/release.yml'
 
 concurrency:

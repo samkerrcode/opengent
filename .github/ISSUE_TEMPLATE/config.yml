@@ -3,3 +3,9 @@ contact_links:
   - name: Report a security vulnerability
     url: https://github.com/samkerrcode/opengent/security/advisories/new
     about: Please report vulnerabilities privately — never in a public issue.
+  - name: Questions & ideas
+    url: https://github.com/samkerrcode/opengent/discussions
+    about: Ask how to use OpenGent, get setup help, or discuss an idea before proposing it.
+  - name: Feature documentation
+    url: https://github.com/samkerrcode/opengent/blob/main/docs/features.md
+    about: What each feature does, how to use it, and its known limits.

@@ -9,6 +9,9 @@ Contributor guidelines: see CONTRIBUTING.md. Security scope: SECURITY.md.
 - Before creating a branch, read `CONTRIBUTING.md` and follow it: branch off an up-to-date `main`, name it
   `<type>/<slug>` (`feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `ci`, `chore`), one branch = one PR = one issue,
   never reuse a merged branch, and meet the PR checklist before opening the PR.
+- Filing issues (e.g. `gh issue create`, which bypasses the forms): mirror the sections of the matching form in
+  `.github/ISSUE_TEMPLATE/` as `### ` headings and apply its label (`bug`, `enhancement` = improves something that
+  exists, `feature request` = new capability). No `[type]` title prefixes; prefix the platform if only one is affected.
 - Do not run `npm run tauri:build` (or any other release/bundle build) during development unless explicitly asked —
   it is expensive, and release bundles are built by `.github/workflows/release.yml`. Use `npm run verify` to check
   changes and `npm run tauri:dev` to run the app.

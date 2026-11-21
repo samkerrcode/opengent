@@ -1,0 +1,150 @@
+name: Bug report
+description: Something in OpenGent is broken, crashes, or behaves unexpectedly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! **Security vulnerability? Stop** — report it privately instead (see [SECURITY.md](https://github.com/samkerrcode/opengent/blob/main/SECURITY.md)).
+
+        Write the title as the symptom, prefixed with the platform if it only happens on one, e.g. `Windows: chat scroll clamps after Thinking collapses`.
+        Bugs are fixed once a maintainer adds the `approved` label; see [CONTRIBUTING.md](https://github.com/samkerrcode/opengent/blob/main/CONTRIBUTING.md).
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before you file
+      options:
+        - label: I searched [existing issues](https://github.com/samkerrcode/opengent/issues?q=is%3Aissue) and this hasn't been reported.
+          required: true
+        - label: This is not a security vulnerability, and I have redacted API keys, tokens, and private data below.
+          required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened? Include the exact error message if there is one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps from a fresh launch. Mention whether it happens every time or intermittently.
+      placeholder: |
+        1. Add an OpenAI-compatible provider pointing at Ollama
+        2. Send a prompt that produces display math
+        3. Scroll up while the response streams
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: OpenGent version
+      description: Shown at the bottom of the sidebar (e.g. `v0.2.1`). If you built from source, add the commit (`git rev-parse --short HEAD`).
+      placeholder: v0.2.1 (or v0.2.1 @ b7ad64c)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install type
+      options:
+        - Release installer (.dmg / .exe / .msi)
+        - Built from source (npm run tauri:dev)
+        - Built from source (release build)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      description: Select every OS where you reproduced the bug.
+      multiple: true
+      options:
+        - macOS
+        - Windows
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version
+      placeholder: macOS 12.7 / Windows 11 24H2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Your best guess is fine.
+      multiple: true
+      options:
+        - Chat & rendering (Markdown, math, streaming, scrolling)
+        - Providers & models
+        - MCP servers / Connections (incl. OAuth)
+        - Tool permissions & approvals
+        - Agents & schedules
+        - Attachments & PDFs
+        - History & search
+        - Secrets & keychain
+        - Install, update & packaging
+        - Build, CI & dev tooling
+        - Not sure
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Provider, model & other context
+      description: |
+        Anything that may matter: provider type and model, MCP servers connected, display resolution and scaling (for layout, scrolling, or PDF issues), last version where it worked.
+      placeholder: |
+        Provider / model: Anthropic, claude-sonnet-4-5
+        MCP servers: none
+        Display: 4K at 300% scaling
+        Worked in: v0.2.0
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        A debug trace helps a lot. From source: `OPENGENT_LOG=debug npm run tauri:dev`. macOS release: `OPENGENT_LOG=debug /Applications/OpenGent.app/Contents/MacOS/opengent-desktop`.
+        Secrets should never appear in logs. If one does, report it privately per SECURITY.md instead of posting it here.
+      render: text
+
+  - type: textarea
+    id: media
+    attributes:
+      label: Screenshots or recordings
+      description: Drag files here. Screen recordings are especially useful for streaming and scrolling issues.
+
+  - type: textarea
+    id: diagnosis
+    attributes:
+      label: Diagnosis (optional)
+      description: |
+        If you've investigated: suspected root cause, `path/to/file.rs:line` references, hypotheses and how to verify them, possible fixes. Mark what is confirmed and what is a guess.
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria (optional)
+      description: Checkable conditions that mean this is fixed, including which platforms to verify on.
+      placeholder: |
+        - [ ] Scrolling up while streaming holds position
+        - [ ] Verified on macOS (12 baseline) and Windows
