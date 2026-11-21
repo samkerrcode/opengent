@@ -85,8 +85,11 @@ navigates. A reasoning block is open while the model reasons and collapses once 
 tool call or the answer. Long reasoning scrolls inside the block and follows the newest text;
 scroll up inside it to read earlier reasoning, and scroll back to its bottom to resume
 following. Code in a reasoning block wraps to the block's width; in replies, wide code scrolls
-sideways inside its block, and wide tables and display math scroll sideways in both. Saved chats
-reopen with the same layout.
+sideways inside its block, and wide tables and display math scroll sideways in both. While a
+reply or reasoning block is still streaming, a formula whose closing delimiter has not arrived
+yet shows as dimmed source text instead of an error, and renders as math as soon as the
+delimiter completes; a parse error appears only for math that is still invalid when the reply
+ends. Saved chats reopen with the same layout.
 
 **Limits.** No raw HTML, embedded media or diagrams. What appears in a reasoning block depends
 on the provider: some send full reasoning, most hosted models send a summary.

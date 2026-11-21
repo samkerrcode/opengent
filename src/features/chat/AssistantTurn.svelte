@@ -125,11 +125,12 @@
             {@const active = thinkingLive(i)}
             <details class="thinking-block" open={active}>
               <summary>{active ? "Thinking…" : "Thoughts"}</summary>
-              <div class="markdown thinking-body" {@attach followTail(active)}>{@html renderMarkdown(seg.text)}</div>
+              <div class="markdown thinking-body" {@attach followTail(active)}>{@html renderMarkdown(seg.text, { streaming: active })}</div>
             </details>
           {/if}
         {:else if seg.kind === "text"}
-          <div class="markdown" {@attach markdownHtml(renderMarkdown(seg.text), live && i === turn.segments.length - 1)}></div>
+          {@const last = live && i === turn.segments.length - 1}
+          <div class="markdown" {@attach markdownHtml(renderMarkdown(seg.text, { streaming: last }), last)}></div>
         {:else if seg.kind === "tool"}
           <ToolCallCard segment={seg} runId={turn.runId} />
         {/if}
@@ -526,6 +527,15 @@
     overflow-y: hidden;
     margin: 0.6em 0 1em;
     padding: 4px 0;
+  }
+  /* Unfinished math while streaming: the source so far, muted monospace inside the
+     same .katex-block, so swapping in the rendered formula keeps identical margins. */
+  .markdown :global(.katex-pending) {
+    font-family: var(--font-mono);
+    font-size: 0.85em;
+    color: var(--fg-faint);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
   .markdown :global(.katex-error) {
     font-family: var(--font-mono);
