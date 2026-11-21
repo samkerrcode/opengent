@@ -14,6 +14,14 @@ under *Unreleased*.
 
 ## Unreleased
 
+### Added
+
+- **Providers**: xAI (Grok) is a native provider type: add a connection with an xAI Console
+  API key and pick from the models your key can call, with vision and reasoning flags taken
+  from xAI's model listing. Runs use the Responses API statelessly (`store: false`), stream
+  replies and tool calls, and replay each turn's encrypted reasoning items from local
+  storage so Grok keeps its earlier thinking across turns and tool calls.
+
 ### Fixed
 
 - **Chat**: Display math no longer flashes a red KaTeX parse error while a reply or Thinking

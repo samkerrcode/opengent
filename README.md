@@ -41,9 +41,9 @@ https://github.com/user-attachments/assets/e552658e-231b-44a2-97c2-7181deb878e3
 ## Highlights
 
 - **Model-agnostic.** Any OpenAI-compatible endpoint — Ollama, LM Studio, vLLM, llama.cpp,
-  OpenRouter, or a self-hosted gateway — plus native OpenAI, Google Gemini and Anthropic,
-  with a built-in simulated provider for trying the app without an account. Native
-  xAI (next), Bedrock and Hugging Face adapters are on the [roadmap](#native-providers).
+  OpenRouter, or a self-hosted gateway — plus native OpenAI, Google Gemini, Anthropic and
+  xAI, with a built-in simulated provider for trying the app without an account. Native
+  Bedrock and Hugging Face adapters are on the [roadmap](#native-providers).
 - **Real tools, real permissions.** Connect [MCP](https://modelcontextprotocol.io) servers over
   stdio or Streamable HTTP. Each tool is *Allow*, *Ask*, or *Disable*; permissions are
   enforced in Rust at dispatch, and an *Always allow* grant reverts to *Ask* if the tool's
@@ -126,7 +126,7 @@ detailed in [CHANGELOG.md](CHANGELOG.md); shipped features are documented in
 | **2 – Custom/local providers** | OpenAI-compatible Chat Completions streaming, provider/model settings, capability flags, incremental sanitized Markdown, context limits. *First usable chat.* | ✅ Done |
 | **3 – MCP agent** | stdio + Streamable HTTP servers, tool discovery, Allow / Ask / Disable permissions, approval UI, full loop: model → approval → tool → result → model. *Agent alpha.* | ✅ Done |
 | **4 – OAuth** | Browser sign-in (authorization code + PKCE, U2M) and client credentials (M2M) for MCP servers; token lifecycle in the keychain | ✅ Done |
-| **5 – Native providers** | One adapter per vendor protocol, each shipped independently — see [Native providers](#native-providers) | In progress (Gemini, OpenAI, Anthropic done; xAI next) |
+| **5 – Native providers** | One adapter per vendor protocol, each shipped independently — see [Native providers](#native-providers) | In progress (Gemini, OpenAI, Anthropic, xAI done; Bedrock, Hugging Face next) |
 | **6 – Provider context & caching** | Provider-aware prompt caching (OpenAI `prompt_cache_key`, Anthropic `cache_control`), cross-provider context projection, summarization checkpoints | |
 | **7 – Release hardening** | Performance profiling, accessibility, export/import, signing & notarization, installers | |
 | **8 – Extensions** | Sub-agents, A2A, skills, hooks, model router — through the existing `ModelProvider` / tool / permission seams | |
@@ -142,7 +142,7 @@ form from Rust (`list_provider_kinds`) — adding one needs no UI changes.
 | **Google Gemini** | Interactions API (`store: false`) | AI Studio key; thought signatures replayed verbatim; stream resume | ✅ Done |
 | **OpenAI** | Responses API (`store: false`) | API key; encrypted reasoning items replayed; reasoning summaries | ✅ Done |
 | **Anthropic** | Messages API | Adaptive thinking, signed thinking-block replay | ✅ Done |
-| **xAI** | xAI API (stateless) | API key; Grok models; reasoning replayed across tool calls | Next |
+| **xAI** | Responses API (`store: false`) | API key; Grok models; encrypted reasoning replayed across tool calls | ✅ Done |
 | **AWS Bedrock** | ConverseStream | Feature-gated AWS SDK; IAM / SSO profiles | |
 | **Hugging Face** | Inference Providers (OpenAI-compatible) | Presets on the OpenAI-compatible type | |
 
@@ -171,8 +171,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how proposals are approved.
 - Implemented protocols: OpenAI-compatible, OpenAI (Responses API; no built-in tools such as
   web search or code interpreter yet), Google Gemini (AI Studio API key; no Vertex AI, Google
   built-in tools or images inside tool results yet) and Anthropic (API key; no Bedrock/Vertex,
-  Anthropic built-in tools or prompt caching yet). The remaining native adapters — xAI
-  first — arrive during [Phase 5](#native-providers).
+  Anthropic built-in tools or prompt caching yet) and xAI (API key; no server-side tools,
+  files or `previous_response_id` chaining yet). The remaining native adapters — Bedrock
+  and Hugging Face — arrive during [Phase 5](#native-providers).
 - Scheduled runs only fire while the app is open.
 - PDFs are rendered inside the app's process by the OS renderer, not in a sandboxed helper,
   and its time budget is only checked between pages (see [SECURITY.md](SECURITY.md)).

@@ -63,7 +63,10 @@ Contributor guidelines: see CONTRIBUTING.md. Security scope: SECURITY.md.
   altered reasoning items. Send "use tool <name>" to exercise tool calling. Responses round trip:
   `OPENGENT_TEST_OPENAI_API_KEY=x OPENGENT_TEST_OPENAI_RESPONSES_BASE_URL=http://localhost:8787/v1
   OPENGENT_TEST_OPENAI_MODEL=mock-reasoning cargo test -p agent-core --test provider_store_live -- --ignored openai_lists`
-  (drop the base URL/model for real OpenAI).
+  (drop the base URL/model for real OpenAI). xAI speaks the same protocol, so its live test
+  reuses this mock: `OPENGENT_TEST_XAI_API_KEY=x OPENGENT_TEST_XAI_BASE_URL=http://localhost:8787/v1
+  OPENGENT_TEST_XAI_MODEL=mock-reasoning cargo test -p agent-core --test provider_store_live -- --ignored xai`
+  (drop the base URL/model for real xAI).
 - Adapter helpers live in `providers/common.rs` (`CallIds`, `push_bounded`, `str_at`, `own_opaque`, `arguments_object`/
   `arguments_string`, `is_chat_model`, `request_timeout`); adapter-level `Capabilities` are declared in the kind's
   `KindMeta` and adapters return `ProviderKind::X.capabilities()`. Multi-request adapter tests use `tests/common::serve_many`.

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use agent_core::agent::context;
 use agent_core::domain::{ContentBlock, Message, Role, StopReason};
-use agent_core::providers::openai::{OpenAiConfig, OpenAiProvider, FAMILY};
+use agent_core::providers::openai::{OpenAiConfig, OpenAiProvider, DIALECT, FAMILY};
 use agent_core::providers::{CompletionRequest, ModelProvider};
 use serde_json::json;
 
@@ -229,10 +229,13 @@ async fn tool_turn_round_trips_into_next_request_items() {
     };
     let mut messages = vec![Message::text(Role::User, "read a and b")];
     messages.extend(context::render_turn(&stored, &HashMap::new(), false));
-    let body = OpenAiProvider::build_body(&CompletionRequest {
-        messages,
-        ..request("o4-mini")
-    });
+    let body = OpenAiProvider::build_body(
+        &DIALECT,
+        &CompletionRequest {
+            messages,
+            ..request("o4-mini")
+        },
+    );
     let input = body["input"].as_array().unwrap();
     let types: Vec<&str> = input.iter().map(|s| s["type"].as_str().unwrap()).collect();
     assert_eq!(

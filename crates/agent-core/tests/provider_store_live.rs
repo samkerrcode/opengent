@@ -182,6 +182,27 @@ async fn openai_lists_models_and_completes_a_tool_round_trip() {
     .await;
 }
 
+/// `OPENGENT_TEST_XAI_API_KEY=… cargo test -p agent-core -- --ignored xai`
+/// (optional `OPENGENT_TEST_XAI_MODEL`, default `grok-4.7`, and
+/// `OPENGENT_TEST_XAI_BASE_URL`, e.g. `http://localhost:8787/v1` for
+/// `mock-openai-server.mjs` with model `mock-reasoning` — xAI speaks the same
+/// Responses protocol the mock validates).
+#[tokio::test]
+#[ignore = "requires an xAI API key"]
+async fn xai_lists_models_and_completes_a_tool_round_trip() {
+    let Ok(key) = std::env::var("OPENGENT_TEST_XAI_API_KEY") else {
+        eprintln!("OPENGENT_TEST_XAI_API_KEY not set; skipping");
+        return;
+    };
+    tool_round_trip(
+        ProviderKind::XAi,
+        key,
+        std::env::var("OPENGENT_TEST_XAI_BASE_URL").unwrap_or_default(),
+        std::env::var("OPENGENT_TEST_XAI_MODEL").unwrap_or_else(|_| "grok-4.7".into()),
+    )
+    .await;
+}
+
 /// `OPENGENT_TEST_ANTHROPIC_API_KEY=… cargo test -p agent-core -- --ignored anthropic`
 /// (optional `OPENGENT_TEST_ANTHROPIC_MODEL`, default `claude-haiku-5-5`, and
 /// `OPENGENT_TEST_ANTHROPIC_BASE_URL`, e.g. `http://localhost:8790/v1` for
