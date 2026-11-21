@@ -9,16 +9,15 @@
   import BrandMark from "$lib/components/BrandMark.svelte";
   import { providerStore } from "$features/providers/provider-store.svelte";
   import { nav } from "$lib/state/nav.svelte";
+  import { ScrollPin } from "$lib/scroll-pin.svelte";
 
   let { chat, onopensettings, onopenconnections }: { chat: Chat; onopensettings: () => void; onopenconnections: () => void } = $props();
 
   let scroller = $state<HTMLElement | null>(null);
   let column = $state<HTMLElement | null>(null);
   let composer = $state<Composer | null>(null);
-  let pinnedToBottom = $state(true);
-  // Set on programmatic scrolls so the resulting scroll events are not mistaken for the user
-  // scrolling away (content growth between scrollTo and the scroll event used to unpin).
-  let expectedTop: number | null = null;
+  const pin = new ScrollPin({ threshold: 48 });
+  $effect(() => (scroller ? pin.attach(scroller) : undefined));
   let editingTitle = $state(false);
   let titleDraft = $state("");
   // Files dragged over the window. The drop itself is imported in Rust and reaches
@@ -44,65 +43,16 @@
     "Summarize the attached file in five bullets",
   ];
 
-  function scrollToBottom() {
-    if (!scroller) return;
-    expectedTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-    scroller.scrollTop = expectedTop;
-  }
-
   // Column resize covers growth the token effect misses — images resolving after the
   // delta that referenced them, KaTeX layout, a Thinking block collapsing — and re-pins
   // when following. Callbacks run after layout and before paint, so there is no flash.
   $effect(() => {
     const col = column;
     if (!col || !scroller) return;
-    const observer = new ResizeObserver(() => {
-      if (pinnedToBottom) scrollToBottom();
-    });
+    const observer = new ResizeObserver(() => pin.follow());
     observer.observe(col);
     return () => observer.disconnect();
   });
-
-  // Unpinning follows user intent: any upward scroll unpins at once. Content growth never
-  // decreases scrollTop, so a decrease away from the bottom is the user. Re-pinning stays position-based
-  // (back within 48px of the bottom) so following resumes when the user returns there.
-  let lastScrollTop = 0;
-  // A smooth "Jump to latest" scrolls down through the unpinned zone; don't unpin mid-flight.
-  let jumping = false;
-
-  function onScroll() {
-    if (!scroller) return;
-    const top = scroller.scrollTop;
-    const dist = scroller.scrollHeight - top - scroller.clientHeight;
-    // Content shrinking (e.g. the thinking trace collapsing) clamps scrollTop down but leaves
-    // the view at the bottom; only a decrease that leaves the bottom is the user.
-    const scrolledUp = top < lastScrollTop - 1 && dist > 2;
-    lastScrollTop = top;
-    const nearBottom = dist < 48;
-    if (!scrolledUp && expectedTop !== null && Math.abs(top - expectedTop) < 4) return;
-    expectedTop = null;
-    if (scrolledUp) jumping = false;
-    else if (jumping) {
-      if (!nearBottom) return;
-      jumping = false;
-    }
-    pinnedToBottom = !scrolledUp && nearBottom;
-  }
-
-  // Wheel fires synchronously with the gesture, before the next streamed delta can snap the
-  // view back to the bottom and swallow the resulting scroll event — so the first upward
-  // flick unpins.
-  function onWheel(e: WheelEvent) {
-    if (!scroller || e.deltaY >= 0 || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
-    if (scroller.scrollHeight <= scroller.clientHeight) return;
-    // Leave the chat pinned when an inner scroller (e.g. the thinking trace) consumes the wheel.
-    for (let el = e.target as HTMLElement | null; el && el !== scroller; el = el.parentElement) {
-      if (el.scrollTop > 0 && el.scrollHeight > el.clientHeight && /auto|scroll/.test(getComputedStyle(el).overflowY)) return;
-    }
-    jumping = false;
-    expectedTop = null;
-    pinnedToBottom = false;
-  }
 
   // Follow new output while the user is pinned to the bottom. Sending a message always
   // re-pins — it is explicit intent to watch the response, regardless of scroll position.
@@ -125,10 +75,10 @@
       // Only a freshly sent message (still carrying its optimistic local- id) counts as
       // explicit intent to follow. The later swap to the real message id — or a refetch
       // replacing items — must not override a user who scrolled up.
-      if (lastUser.id.startsWith("local-")) pinnedToBottom = true;
+      if (lastUser.id.startsWith("local-")) pin.pin();
     }
     // Re-check inside the callback: the scroll may resolve after the user scrolled away.
-    if (pinnedToBottom) tick().then(() => { if (pinnedToBottom) scrollToBottom(); });
+    if (pin.pinned) tick().then(() => pin.follow());
   });
 
   // Runs on chat switch only. refresh()/loadList() reassign chat.summary, so a bare
@@ -139,20 +89,14 @@
     const id = chat.summary.id;
     if (id === viewedChatId) return;
     viewedChatId = id;
-    pinnedToBottom = true;
+    pin.pin();
     seenUserId = null;
     editingTitle = false;
     tick().then(() => {
-      scrollToBottom();
+      pin.scrollToBottom();
       composer?.focus();
     });
   });
-
-  function jumpToLatest() {
-    pinnedToBottom = true;
-    jumping = true;
-    scroller?.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" });
-  }
 
   function startRename() {
     titleDraft = chat.summary.title;
@@ -188,7 +132,7 @@
   {#if chat.summary.model}<span class="topbar-meta">{chat.summary.model}</span>{/if}
 </header>
 
-<div class="scroller" bind:this={scroller} onscroll={onScroll} onwheel={onWheel}>
+<div class="scroller" bind:this={scroller}>
   <div class="column" bind:this={column}>
     {#if !chat.loaded}
       <p class="loading">Loading…</p>
@@ -264,8 +208,8 @@
   </div>
 </div>
 
-{#if !pinnedToBottom}
-  <button class="btn-outline jump" onclick={jumpToLatest}>Jump to latest ↓</button>
+{#if !pin.pinned}
+  <button class="btn-outline jump" onclick={() => pin.jumpToBottom()}>Jump to latest ↓</button>
 {/if}
 
 <Composer

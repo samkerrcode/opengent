@@ -1,8 +1,8 @@
 <script lang="ts">
   import type { AssistantTurn, TurnSegment } from "$lib/state/run-reducer";
   import { isTerminal, turnText } from "$lib/state/run-reducer";
-  import { renderMarkdown } from "$lib/markdown";
-  import { markdownHtml } from "$lib/stream-cursor";
+  import { markdownView } from "$lib/markdown-view";
+  import { ScrollPin } from "$lib/scroll-pin.svelte";
   import { copyText } from "$lib/clipboard";
   import ToolCallCard from "./ToolCallCard.svelte";
 
@@ -26,10 +26,12 @@
   const thinkingLive = (i: number) => live && i === turn.segments.length - 1;
 
   // The thinking body is height-capped and scrolls internally. While it streams, follow the
-  // tail unless the user scrolled up inside it (returning to its bottom resumes). A closed
-  // body has no layout box (see the CSS), so a scrollTop write then is a no-op and the
-  // browser restores the old offset on reopen — reset to the top on toggle instead, so a
-  // reopened trace reads from the start.
+  // tail after each rendered update unless the user scrolled up inside it (returning to its
+  // bottom resumes); the pin logic is shared with the chat scroller. A closed body has no
+  // layout box (see the CSS), so a scrollTop write then is a no-op and the browser restores
+  // the old offset on reopen — reset to the top on toggle instead, so a reopened trace
+  // reads from the start.
+  let thinkingPin: ScrollPin | null = null;
   function followTail(active: boolean) {
     return (node: HTMLElement) => {
       if (!active) {
@@ -40,26 +42,22 @@
         details?.addEventListener("toggle", onToggle);
         return () => details?.removeEventListener("toggle", onToggle);
       }
-      let following = true;
-      const toEnd = () => {
-        if (following) node.scrollTop = node.scrollHeight;
-      };
-      const onScroll = () => {
-        following = node.scrollHeight - node.scrollTop - node.clientHeight < 8;
-      };
-      toEnd();
-      const observer = new MutationObserver(toEnd);
-      observer.observe(node, { childList: true, subtree: true, characterData: true });
-      node.addEventListener("scroll", onScroll, { passive: true });
+      const pin = new ScrollPin({ threshold: 8 });
+      const detach = pin.attach(node);
+      thinkingPin = pin;
+      pin.scrollToBottom();
       return () => {
-        observer.disconnect();
-        node.removeEventListener("scroll", onScroll);
+        detach();
+        if (thinkingPin === pin) thinkingPin = null;
       };
     };
   }
+  const followThinking = () => thinkingPin?.follow();
   const truncated = $derived(turn.stopReason === "max_tokens");
   // The last segment may end mid-formula while streaming, or when the run was stopped,
-  // failed or hit the token limit; render unclosed math there as pending source.
+  // failed or hit the token limit; render unclosed math there as pending source. Read it
+  // through {@const} in the markup: `turn` is a new object on every delta, and an inline
+  // call would re-run every segment's render attachment each time.
   const cutShort = $derived(live || turn.phase === "cancelled" || turn.phase === "failed" || truncated);
   const partialAt = (i: number) => cutShort && i === turn.segments.length - 1;
   const usageText = $derived.by(() => {
@@ -127,14 +125,20 @@
         {#if seg.kind === "thinking"}
           {#if seg.text.trim()}
             {@const active = thinkingLive(i)}
+            {@const partial = partialAt(i)}
             <details class="thinking-block" open={active}>
               <summary>{active ? "Thinking…" : "Thoughts"}</summary>
-              <div class="markdown thinking-body" {@attach followTail(active)}>{@html renderMarkdown(seg.text, { partial: partialAt(i) })}</div>
+              <div
+                class="markdown thinking-body"
+                {@attach followTail(active)}
+                {@attach markdownView(seg.text, { partial, caret: active, deferred: active, onrender: active ? followThinking : undefined })}
+              ></div>
             </details>
           {/if}
         {:else if seg.kind === "text"}
           {@const last = live && i === turn.segments.length - 1}
-          <div class="markdown" {@attach markdownHtml(renderMarkdown(seg.text, { partial: partialAt(i) }), last)}></div>
+          {@const partial = partialAt(i)}
+          <div class="markdown" {@attach markdownView(seg.text, { partial, caret: last, deferred: last })}></div>
         {:else if seg.kind === "tool"}
           <ToolCallCard segment={seg} runId={turn.runId} />
         {/if}

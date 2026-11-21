@@ -20,6 +20,11 @@ under *Unreleased*.
   block is still streaming; an unfinished formula shows as dimmed source and renders as soon
   as its closing delimiter arrives. A reply that was stopped or cut off keeps its unfinished
   formula as dimmed source instead of ending in an error.
+- **Chat**: Scrolling up in a streaming Thinking block no longer stalls or snaps back, and
+  formulas no longer render scattered or hide surrounding text while it streams. Long,
+  math-heavy replies and reasoning stay responsive because only the changed text is redrawn.
+- **Chat**: Square roots and other stretchy math symbols (long arrows, wide accents, braces)
+  render again; their drawing was being removed by the HTML sanitizer.
 
 ## 0.2.1 — 2026-11-19
 

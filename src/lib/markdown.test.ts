@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { createRequire } from "node:module";
+import { describe, expect, it, vi } from "vitest";
 import { renderMarkdown } from "./markdown";
 
 describe("renderMarkdown", () => {
@@ -95,10 +96,46 @@ describe("renderMarkdown", () => {
     expect(html).not.toContain("katex");
   });
 
+  it("keeps the SVG geometry KaTeX draws square roots with", () => {
+    const doc = new DOMParser().parseFromString(renderMarkdown("$\\sqrt{r^2 - x^2}$"), "text/html");
+    const svg = doc.querySelector(".katex svg");
+    expect(svg?.getAttribute("viewBox")).toBeTruthy();
+    expect(svg?.getAttribute("width")).toBeTruthy();
+    expect(svg?.querySelector("path")?.getAttribute("d")).toBeTruthy();
+  });
+
+  it("allows only http(s) and mailto URLs in links and images", () => {
+    const doc = new DOMParser().parseFromString(
+      renderMarkdown("[a](https://x.test) [b](mailto:a@x.test) [c](ftp://x.test) [d](/relative) ![e](tel:123)"),
+      "text/html",
+    );
+    const hrefs = [...doc.querySelectorAll("a")].map((a) => a.getAttribute("href"));
+    expect(hrefs).toEqual(["https://x.test", "mailto:a@x.test", null, null]);
+    expect(doc.querySelector("img")?.getAttribute("src") ?? null).toBeNull();
+  });
+
   it("keeps KaTeX output free of active content", () => {
     const html = renderMarkdown("$\\href{javascript:alert(1)}{x}$ and $x$");
     const doc = new DOMParser().parseFromString(html, "text/html");
     expect(doc.querySelectorAll("a[href], script, iframe").length).toBe(0);
+  });
+});
+
+describe("KaTeX cache", () => {
+  it("renders each distinct formula once across repeated renders, with identical output", () => {
+    // The plugin is CommonJS: spy on the instance it requires, not the ESM build.
+    const katex = createRequire(import.meta.url)("katex") as { renderToString: (...a: unknown[]) => string };
+    const spy = vi.spyOn(katex, "renderToString");
+    try {
+      const src = "Cache $q_{cache}^1$ and \\(q_{cache}^2\\).\n\n$$\nq_{cache}^3\n$$\n\n```math\nq_{cache}^3\n```";
+      const first = renderMarkdown(src);
+      expect(spy).toHaveBeenCalledTimes(3);
+      expect(renderMarkdown(src)).toBe(first);
+      expect(renderMarkdown(src, { partial: true })).toBe(first);
+      expect(spy).toHaveBeenCalledTimes(3);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

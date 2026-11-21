@@ -4,6 +4,8 @@
 // tables, and blockquotes it lands below the block. So we walk the trailing edge of the
 // rendered DOM (O(depth)) and insert a span there.
 
+import { patchChildren } from "./dom-patch";
+
 const CURSOR_CLASS = "stream-cursor";
 
 // Elements whose content must not receive the caret: void elements and rendered math (KaTeX
@@ -57,10 +59,26 @@ export function placeStreamCursor(root: HTMLElement): void {
   }
 }
 
+/**
+ * Render sanitized HTML into `node` by patching (unchanged nodes keep their identity),
+ * with a caret at the end when `caret` is set.
+ */
+export function applyHtml(node: HTMLElement, html: string, caret: boolean): void {
+  // Drop the previous caret and re-merge the text it split, so the old DOM compares
+  // equal to a fresh parse of the same markup.
+  const old = node.querySelector(`.${CURSOR_CLASS}`);
+  if (old) {
+    const parent = old.parentNode;
+    old.remove();
+    parent?.normalize();
+  }
+  const template = node.ownerDocument.createElement("template");
+  template.innerHTML = html;
+  patchChildren(node, template.content);
+  if (caret) placeStreamCursor(node);
+}
+
 /** Svelte attachment: render sanitized HTML into the node, with a caret while streaming. */
 export function markdownHtml(html: string, streaming: boolean) {
-  return (node: HTMLElement) => {
-    node.innerHTML = html;
-    if (streaming) placeStreamCursor(node);
-  };
+  return (node: HTMLElement) => applyHtml(node, html, streaming);
 }

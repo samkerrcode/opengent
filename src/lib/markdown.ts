@@ -206,20 +206,73 @@ function withoutPartialCloser(token: Token): string {
 const pendingMathHtml = (token: Token) =>
   `<p class="katex-block katex-pending">${md.utils.escapeHtml(withoutPartialCloser(token).trim())}</p>\n`;
 
+// --- KaTeX output cache ---------------------------------------------------------------
+// A streaming segment is re-rendered on every update, so without a cache every finished
+// formula is laid out by KaTeX again each time. The plugin's output is a pure function of
+// the TeX source (inline vs. display is part of the key), so cached HTML is identical to a
+// fresh render; it is still sanitized with the rest of the document. Bounded by size, not
+// entry count: each render visits formulas in document order, so an LRU smaller than one
+// long trace would evict every entry just before it is needed again.
+const KATEX_CACHE_MAX_CHARS = 4 * 1024 * 1024;
+const katexCache = new Map<string, string>();
+let katexCacheChars = 0;
+
+function cachedKatex(key: string, render: () => string): string {
+  const hit = katexCache.get(key);
+  if (hit !== undefined) {
+    katexCache.delete(key);
+    katexCache.set(key, hit);
+    return hit;
+  }
+  const html = render();
+  katexCache.set(key, html);
+  katexCacheChars += key.length + html.length;
+  for (const [k, v] of katexCache) {
+    if (katexCacheChars <= KATEX_CACHE_MAX_CHARS) break;
+    katexCache.delete(k);
+    katexCacheChars -= k.length + v.length;
+  }
+  return html;
+}
+
+// Display math from $$, \[ and inline $$ shares one key space: the plugin renders all of
+// them through the same block renderer.
+for (const [rule, kind] of [
+  ["math_inline", "inline"],
+  ["math_inline_block", "block"],
+] as const) {
+  const plugin = md.renderer.rules[rule]!;
+  md.renderer.rules[rule] = (tokens, idx, options, env, self) =>
+    cachedKatex(`${kind}:${tokens[idx]!.content}`, () => plugin(tokens, idx, options, env, self));
+}
+
 const pluginMathBlock = md.renderer.rules.math_block!;
 md.renderer.rules.math_block = (tokens, idx, options, env, self) => {
   const token = tokens[idx]!;
-  return token.meta?.["pending"] ? pendingMathHtml(token) : pluginMathBlock(tokens, idx, options, env, self);
+  if (token.meta?.["pending"]) return pendingMathHtml(token);
+  return cachedKatex(`block:${token.content}`, () => pluginMathBlock(tokens, idx, options, env, self));
 };
 
 const pluginFence = md.renderer.rules.fence!;
 md.renderer.rules.fence = (tokens, idx, options, env, self) => {
   const token = tokens[idx]!;
-  return token.meta?.["pending"] ? pendingMathHtml(token) : pluginFence(tokens, idx, options, env, self);
+  if (token.meta?.["pending"]) return pendingMathHtml(token);
+  if (token.info.trim().toLowerCase() !== "math") return pluginFence(tokens, idx, options, env, self);
+  return cachedKatex(`block:${token.content}`, () => pluginFence(tokens, idx, options, env, self));
 };
 
+// Links and images may only point at http(s)/mailto. This is enforced in a hook on
+// URL-bearing attributes rather than via ALLOWED_URI_REGEXP: DOMPurify tests that regexp
+// against every attribute outside its small URI-safe list, so a strict one also strips
+// KaTeX's SVG geometry (viewBox, width, height, path d) and √ and other stretchy symbols
+// render empty. DOMPurify's default URI check (no javascript: etc.) still applies.
+const SAFE_URL = /^(?:https?|mailto):/i;
+const URL_ATTRS = new Set(["href", "xlink:href", "src", "srcset", "action", "formaction", "poster", "background", "cite", "ping"]);
+DOMPurify.addHook("uponSanitizeAttribute", (_node, data) => {
+  if (URL_ATTRS.has(data.attrName) && !SAFE_URL.test(data.attrValue.trim())) data.keepAttr = false;
+});
+
 DOMPurify.setConfig({
-  ALLOWED_URI_REGEXP: /^(?:https?|mailto):/i,
   USE_PROFILES: { html: true, mathMl: true, svg: true },
   // KaTeX wraps MathML in <semantics> with the raw TeX in <annotation>; both are treated as
   // disallowed by the mathMl profile, so re-allow them (and friends) explicitly.
