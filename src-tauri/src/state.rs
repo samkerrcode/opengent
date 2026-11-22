@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::ops::Deref;
 use std::sync::Arc;
 
 use agent_core::agent::launcher::RunServices;
@@ -83,20 +82,12 @@ fn prune_orphaned_scopes(mcp: &McpManager, db: &Db) {
     }
 }
 
-/// Host-only handles plus the shared `RunServices`, which commands read through `Deref`
-/// (`state.db`, `state.mcp`, …) so there is a single copy of every store.
+/// Host-only handles plus the `RunServices` shared with the run launcher; commands read
+/// stores through `services`, so there is a single copy of each.
 pub struct AppState {
     pub data_root: DataRoot,
     pub secrets: Arc<dyn SecretStore>,
     pub services: RunServices,
-}
-
-impl Deref for AppState {
-    type Target = RunServices;
-
-    fn deref(&self) -> &RunServices {
-        &self.services
-    }
 }
 
 impl AppState {

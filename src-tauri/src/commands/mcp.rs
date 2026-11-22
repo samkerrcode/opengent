@@ -19,7 +19,7 @@ use crate::AppState;
 
 #[tauri::command]
 pub fn list_mcp_servers(state: State<'_, AppState>) -> Vec<McpServerView> {
-    state.mcp.list_views()
+    state.services.mcp.list_views()
 }
 
 /// Validates and persists a server config (secrets to the keychain) and returns its id. An
@@ -38,7 +38,7 @@ pub async fn save_mcp_server(
     connect: bool,
 ) -> Result<String, Error> {
     // An empty command is rejected by `save` validation; don't prompt for it.
-    if !input.command.trim().is_empty() && state.mcp.store().launch_changed(&input) {
+    if !input.command.trim().is_empty() && state.services.mcp.store().launch_changed(&input) {
         let env_names: Vec<&str> = input.env.iter().map(|e| e.name.trim()).collect();
         let mut detail = input.command.trim().to_owned();
         if let Some(cwd) = input
@@ -69,15 +69,15 @@ pub async fn save_mcp_server(
             return Err(Error::InvalidInput("server command not confirmed".into()));
         }
     }
-    let changed = state.mcp.store().connection_changed(&input);
-    let config = state.mcp.store().save(input)?;
+    let changed = state.services.mcp.store().connection_changed(&input);
+    let config = state.services.mcp.store().save(input)?;
     if config.enabled {
         if connect {
             // "Save & test" waits for the outcome so the UI can report it.
-            state.mcp.connect(&config.id).await;
+            state.services.mcp.connect(&config.id).await;
         } else if changed {
             let id = config.id.clone();
-            let manager: Arc<McpManager> = state.mcp.clone();
+            let manager: Arc<McpManager> = state.services.mcp.clone();
             tauri::async_runtime::spawn(async move {
                 manager.connect(&id).await;
             });
@@ -90,8 +90,8 @@ pub async fn save_mcp_server(
 pub fn delete_mcp_server(state: State<'_, AppState>, id: String) -> Result<(), Error> {
     // Delete from the store first so `disconnect` cleans up status rather than
     // resurrecting an `Idle` entry for a server that no longer exists.
-    state.mcp.store().delete(&id)?;
-    state.mcp.disconnect(&id);
+    state.services.mcp.store().delete(&id)?;
+    state.services.mcp.disconnect(&id);
     Ok(())
 }
 
@@ -102,21 +102,21 @@ pub async fn set_mcp_server_enabled(
     id: String,
     enabled: bool,
 ) -> Result<(), Error> {
-    state.mcp.store().set_enabled(&id, enabled)?;
+    state.services.mcp.store().set_enabled(&id, enabled)?;
     if enabled {
-        let manager = state.mcp.clone();
+        let manager = state.services.mcp.clone();
         tauri::async_runtime::spawn(async move {
             manager.connect(&id).await;
         });
     } else {
-        state.mcp.disconnect(&id);
+        state.services.mcp.disconnect(&id);
     }
     Ok(())
 }
 
 #[tauri::command]
 pub async fn reconnect_mcp_server(state: State<'_, AppState>, id: String) -> Result<(), Error> {
-    let manager = state.mcp.clone();
+    let manager = state.services.mcp.clone();
     tauri::async_runtime::spawn(async move {
         manager.connect(&id).await;
     });
@@ -129,7 +129,7 @@ pub async fn reconnect_mcp_server(state: State<'_, AppState>, id: String) -> Res
 #[tauri::command]
 pub fn mcp_sign_in(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), Error> {
     known_server(&state, &id)?;
-    let manager = state.mcp.clone();
+    let manager = state.services.mcp.clone();
     tauri::async_runtime::spawn(async move {
         let open = move |url: &str| {
             use tauri_plugin_opener::OpenerExt;
@@ -146,13 +146,13 @@ pub fn mcp_sign_in(app: AppHandle, state: State<'_, AppState>, id: String) -> Re
 
 #[tauri::command]
 pub fn mcp_cancel_sign_in(state: State<'_, AppState>, id: String) {
-    state.mcp.cancel_sign_in(&id);
+    state.services.mcp.cancel_sign_in(&id);
 }
 
 /// Forgets the connection's OAuth tokens and disconnects it.
 #[tauri::command]
 pub async fn mcp_sign_out(state: State<'_, AppState>, id: String) -> Result<(), Error> {
-    state.mcp.sign_out(&id).await
+    state.services.mcp.sign_out(&id).await
 }
 
 #[tauri::command]
@@ -164,7 +164,7 @@ pub fn set_mcp_tool_policy(
 ) -> Result<(), Error> {
     // Route through the manager so the tool's definition signature is recorded with
     // `always_allow` grants (verified at dispatch, shown as "changed" when it drifts).
-    state.mcp.set_policy(&server_id, &tool, policy);
+    state.services.mcp.set_policy(&server_id, &tool, policy);
     Ok(())
 }
 
@@ -174,14 +174,18 @@ pub fn set_mcp_default_policy(
     server_id: String,
     policy: ToolPolicy,
 ) -> Result<(), Error> {
-    state.mcp.store().set_default_policy(&server_id, policy)?;
+    state
+        .services
+        .mcp
+        .store()
+        .set_default_policy(&server_id, policy)?;
     Ok(())
 }
 
 /// Clears per-tool overrides so every tool follows the server default.
 #[tauri::command]
 pub fn reset_mcp_tool_policies(state: State<'_, AppState>, server_id: String) -> Result<(), Error> {
-    state.mcp.store().reset_tool_policies(&server_id)
+    state.services.mcp.store().reset_tool_policies(&server_id)
 }
 
 /// Turns a server's instructions off (`accept: None`), or includes them in the system
@@ -193,6 +197,7 @@ pub fn set_mcp_instructions(
     accept: Option<String>,
 ) -> Result<(), Error> {
     state
+        .services
         .mcp
         .store()
         .set_instructions_included(&server_id, accept.as_deref())
@@ -200,12 +205,12 @@ pub fn set_mcp_instructions(
 
 #[tauri::command]
 pub fn get_tool_settings(state: State<'_, AppState>) -> ToolSettings {
-    state.mcp.store().settings()
+    state.services.mcp.store().settings()
 }
 
 #[tauri::command]
 pub fn set_tool_settings(state: State<'_, AppState>, settings: ToolSettings) -> Result<(), Error> {
-    state.mcp.store().set_settings(settings)
+    state.services.mcp.store().set_settings(settings)
 }
 
 /// Reads a scope's permissions from the database (chat overrides or the agent's access).
@@ -214,6 +219,7 @@ pub(crate) async fn load_scope(
     scope: PermissionScope,
 ) -> Result<ScopePolicies, Error> {
     state
+        .services
         .db
         .call(move |c| match scope {
             PermissionScope::Chat(id) => {
@@ -231,12 +237,12 @@ pub async fn list_tool_permissions(
     scope: PermissionScope,
 ) -> Result<Vec<ScopedServerView>, Error> {
     let policies = load_scope(&state, scope).await?;
-    state.mcp.set_scope(scope, policies);
-    Ok(state.mcp.list_scoped(&scope))
+    state.services.mcp.set_scope(scope, policies);
+    Ok(state.services.mcp.list_scoped(&scope))
 }
 
 fn known_server(state: &AppState, server_id: &str) -> Result<(), Error> {
-    state.mcp.store().get(server_id).map(|_| ())
+    state.services.mcp.store().get(server_id).map(|_| ())
 }
 
 /// Read-modify-write of a chat's overrides; the change applies to the chat's next tool
@@ -246,8 +252,16 @@ async fn update_chat_overrides(
     chat_id: ChatId,
     edit: impl FnOnce(&mut ChatToolOverrides) + Send + 'static,
 ) -> Result<(), Error> {
-    let known: Vec<String> = state.mcp.store().list().into_iter().map(|s| s.id).collect();
+    let known: Vec<String> = state
+        .services
+        .mcp
+        .store()
+        .list()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
     let overrides = state
+        .services
         .db
         .call(move |c| {
             let mut o = chats_repo::get_tool_overrides(c, chat_id)?;
@@ -257,7 +271,7 @@ async fn update_chat_overrides(
             Ok(o)
         })
         .await?;
-    state.mcp.set_scope(
+    state.services.mcp.set_scope(
         PermissionScope::Chat(chat_id),
         ScopePolicies::Chat(overrides),
     );
@@ -321,6 +335,7 @@ pub async fn set_agent_server_access(
         return Err(Error::InvalidInput("server id mismatch".into()));
     }
     let agent = state
+        .services
         .db
         .call(move |c| {
             let mut servers = agents_repo::get_agent(c, agent_id)?.servers;
@@ -339,6 +354,7 @@ pub async fn set_agent_server_access(
         })
         .await?;
     state
+        .services
         .mcp
         .set_scope(PermissionScope::Agent(agent.id), agent.scope_policies());
     let _ = app.emit(AGENTS_CHANGED_EVENT, ());
@@ -355,6 +371,7 @@ pub fn resolve_tool_approval(
     decision: ApprovalDecision,
 ) -> bool {
     state
+        .services
         .coordinator
         .resolve_approval(run_id, &call_id, decision)
 }

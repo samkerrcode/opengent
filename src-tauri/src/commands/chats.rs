@@ -46,7 +46,11 @@ pub struct ImportProgress {
 
 #[tauri::command]
 pub async fn list_chats(state: State<'_, AppState>) -> Result<Vec<ChatSummary>, Error> {
-    state.db.call(|c| repo::list_chats(c, LIST_LIMIT)).await
+    state
+        .services
+        .db
+        .call(|c| repo::list_chats(c, LIST_LIMIT))
+        .await
 }
 
 #[tauri::command]
@@ -56,9 +60,14 @@ pub async fn search_chats(
 ) -> Result<Vec<ChatSummary>, Error> {
     let q = query.trim().to_owned();
     if q.is_empty() {
-        return state.db.call(|c| repo::list_chats(c, LIST_LIMIT)).await;
+        return state
+            .services
+            .db
+            .call(|c| repo::list_chats(c, LIST_LIMIT))
+            .await;
     }
     state
+        .services
         .db
         .call(move |c| repo::search_chats(c, &q, LIST_LIMIT))
         .await
@@ -71,6 +80,7 @@ pub async fn create_chat(
     agent_id: Option<AgentId>,
 ) -> Result<ChatSummary, Error> {
     state
+        .services
         .db
         .call(move |c| repo::create_chat_with(c, "New chat", agent_id, None))
         .await
@@ -79,6 +89,7 @@ pub async fn create_chat(
 #[tauri::command]
 pub async fn get_chat(state: State<'_, AppState>, id: ChatId) -> Result<ChatDetail, Error> {
     state
+        .services
         .db
         .call(move |c| repo::get_chat(c, id).map(ChatDetail::for_display))
         .await
@@ -91,6 +102,7 @@ pub async fn rename_chat(
     title: String,
 ) -> Result<(), Error> {
     state
+        .services
         .db
         .call(move |c| repo::rename_chat(c, id, &title))
         .await
@@ -98,11 +110,15 @@ pub async fn rename_chat(
 
 #[tauri::command]
 pub async fn delete_chat(state: State<'_, AppState>, id: ChatId) -> Result<(), Error> {
-    if let Some(run) = state.coordinator.active_run(id) {
-        state.coordinator.cancel(run);
+    if let Some(run) = state.services.coordinator.active_run(id) {
+        state.services.coordinator.cancel(run);
     }
-    state.db.call(move |c| repo::delete_chat(c, id)).await?;
-    state.mcp.remove_scope(PermissionScope::Chat(id));
+    state
+        .services
+        .db
+        .call(move |c| repo::delete_chat(c, id))
+        .await?;
+    state.services.mcp.remove_scope(PermissionScope::Chat(id));
     Ok(())
 }
 
@@ -198,13 +214,14 @@ async fn import_path(
     images: Option<bool>,
     rendering: &mut impl FnMut(&str),
 ) -> Result<AttachmentMeta, Error> {
-    let store = state.attachments.clone();
+    let store = state.services.attachments.clone();
     let file = super::blocking(move || store.load(&path)).await?;
     if let Some(reason) = images.and_then(|images| file.kind().unusable_reason(images)) {
         return Err(Error::InvalidInput(reason.into()));
     }
-    let store = state.attachments.clone();
+    let store = state.services.attachments.clone();
     let (existing, file) = state
+        .services
         .db
         .call(move |conn| Ok((store.find(conn, &file)?, file)))
         .await?;
@@ -214,10 +231,11 @@ async fn import_path(
     if file.kind() == AttachmentKind::Pdf {
         rendering(file.name());
     }
-    let store = state.attachments.clone();
+    let store = state.services.attachments.clone();
     let prepared = super::blocking(move || store.prepare(file)).await?;
-    let store = state.attachments.clone();
+    let store = state.services.attachments.clone();
     state
+        .services
         .db
         .call(move |conn| store.commit(conn, prepared))
         .await
@@ -257,8 +275,9 @@ pub async fn attachment_data_url(
     state: State<'_, AppState>,
     attachment_id: String,
 ) -> Result<String, Error> {
-    let store = state.attachments.clone();
+    let store = state.services.attachments.clone();
     let (meta, page) = state
+        .services
         .db
         .call(move |conn| {
             let meta = store
@@ -276,7 +295,7 @@ pub async fn attachment_data_url(
             Ok((meta, page))
         })
         .await?;
-    let store = state.attachments.clone();
+    let store = state.services.attachments.clone();
     super::blocking(move || {
         Ok(match page {
             Some(page) => data_url(&page.mime, &store.read_page(&page)?),

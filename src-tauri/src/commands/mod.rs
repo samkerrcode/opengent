@@ -49,7 +49,7 @@ pub fn get_app_info(state: State<'_, AppState>) -> AppInfo {
 
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Settings {
-    state.settings.get()
+    state.services.settings.get()
 }
 
 /// Partial update (`{ section: { field: value } }`), validated in Rust; returns the
@@ -60,7 +60,7 @@ pub fn update_settings(
     state: State<'_, AppState>,
     patch: serde_json::Value,
 ) -> Result<Settings, Error> {
-    let settings = state.settings.update(&patch)?;
+    let settings = state.services.settings.update(&patch)?;
     crate::window::apply_theme(&app, settings.appearance.theme);
     Ok(settings)
 }
@@ -118,7 +118,7 @@ pub(crate) async fn blocking<T: Send + 'static>(
 
 #[tauri::command]
 pub fn cancel_run(state: State<'_, AppState>, run_id: RunId) -> bool {
-    state.coordinator.cancel(run_id)
+    state.services.coordinator.cancel(run_id)
 }
 
 #[derive(Debug, Clone, Serialize, TS)]

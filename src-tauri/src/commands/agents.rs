@@ -17,7 +17,7 @@ fn now_ms() -> i64 {
 
 #[tauri::command]
 pub async fn list_agents(state: State<'_, AppState>) -> Result<Vec<Agent>, Error> {
-    state.db.call(|c| repo::list_agents(c)).await
+    state.services.db.call(|c| repo::list_agents(c)).await
 }
 
 /// Validates and stores an agent. Providers must exist when saved; a provider removed later
@@ -26,6 +26,7 @@ pub async fn list_agents(state: State<'_, AppState>) -> Result<Vec<Agent>, Error
 pub async fn save_agent(state: State<'_, AppState>, input: AgentInput) -> Result<Agent, Error> {
     let check = |provider_id: &str, what: &str| {
         state
+            .services
             .providers
             .get(provider_id.trim())
             .map_err(|_| Error::InvalidInput(format!("the {what}'s provider no longer exists")))
@@ -38,9 +39,14 @@ pub async fn save_agent(state: State<'_, AppState>, input: AgentInput) -> Result
     {
         check(&fb.provider_id, "fallback model")?;
     }
-    let agent = state.db.call(move |c| repo::save_agent(c, input)).await?;
+    let agent = state
+        .services
+        .db
+        .call(move |c| repo::save_agent(c, input))
+        .await?;
     // Refresh any running agent chats and reconcile the agent's signature pins.
     state
+        .services
         .mcp
         .set_scope(PermissionScope::Agent(agent.id), agent.scope_policies());
     Ok(agent)
@@ -51,16 +57,21 @@ pub async fn save_agent(state: State<'_, AppState>, input: AgentInput) -> Result
 #[tauri::command]
 pub async fn delete_agent(state: State<'_, AppState>, id: AgentId) -> Result<(), Error> {
     let chats = state
+        .services
         .db
         .call(move |c| chats_repo::list_chat_ids(c, Some(id)))
         .await?;
     for chat in chats {
-        if let Some(run) = state.coordinator.active_run(chat) {
-            state.coordinator.cancel(run);
+        if let Some(run) = state.services.coordinator.active_run(chat) {
+            state.services.coordinator.cancel(run);
         }
     }
-    state.db.call(move |c| repo::delete_agent(c, id)).await?;
-    state.mcp.remove_scope(PermissionScope::Agent(id));
+    state
+        .services
+        .db
+        .call(move |c| repo::delete_agent(c, id))
+        .await?;
+    state.services.mcp.remove_scope(PermissionScope::Agent(id));
     Ok(())
 }
 
@@ -71,6 +82,7 @@ pub async fn list_schedules(
     agent_id: Option<AgentId>,
 ) -> Result<Vec<AgentSchedule>, Error> {
     state
+        .services
         .db
         .call(move |c| repo::list_schedules(c, agent_id))
         .await
@@ -82,6 +94,7 @@ pub async fn save_schedule(
     input: ScheduleInput,
 ) -> Result<AgentSchedule, Error> {
     state
+        .services
         .db
         .call(move |c| repo::save_schedule(c, input, now_ms(), &Local))
         .await
@@ -94,6 +107,7 @@ pub async fn set_schedule_enabled(
     enabled: bool,
 ) -> Result<AgentSchedule, Error> {
     state
+        .services
         .db
         .call(move |c| repo::set_schedule_enabled(c, id, enabled, now_ms(), &Local))
         .await
@@ -101,7 +115,11 @@ pub async fn set_schedule_enabled(
 
 #[tauri::command]
 pub async fn delete_schedule(state: State<'_, AppState>, id: ScheduleId) -> Result<(), Error> {
-    state.db.call(move |c| repo::delete_schedule(c, id)).await
+    state
+        .services
+        .db
+        .call(move |c| repo::delete_schedule(c, id))
+        .await
 }
 
 /// Runs a schedule's prompt immediately in a new chat without changing its next due time.
@@ -112,6 +130,10 @@ pub async fn run_schedule_now(
     state: State<'_, AppState>,
     id: ScheduleId,
 ) -> Result<ChatSummary, Error> {
-    let schedule = state.db.call(move |c| repo::get_schedule(c, id)).await?;
+    let schedule = state
+        .services
+        .db
+        .call(move |c| repo::get_schedule(c, id))
+        .await?;
     scheduler::fire(&app, &state, &schedule, ScheduleOutcome::Manual).await
 }

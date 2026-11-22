@@ -42,7 +42,7 @@ pub fn spawn(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let settle = Instant::now();
         while settle.elapsed() < MCP_SETTLE_MAX
-            && app.state::<AppState>().mcp.pending_connections() > 0
+            && app.state::<AppState>().services.mcp.pending_connections() > 0
         {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
@@ -58,7 +58,11 @@ pub fn spawn(app: AppHandle) {
 async fn tick(app: &AppHandle) -> Result<(), Error> {
     let state = app.state::<AppState>();
     let now = chrono::Utc::now().timestamp_millis();
-    let due = state.db.call(move |c| repo::due_schedules(c, now)).await?;
+    let due = state
+        .services
+        .db
+        .call(move |c| repo::due_schedules(c, now))
+        .await?;
     if due.is_empty() {
         return Ok(());
     }
@@ -70,6 +74,7 @@ async fn tick(app: &AppHandle) -> Result<(), Error> {
         // Persist the decision before running so a crash mid-run can't fire it twice.
         let (id, next, o, run) = (schedule.id, plan.next_run_at, outcome.clone(), plan.run);
         state
+            .services
             .db
             .call(move |c| repo::advance_schedule(c, id, next, &o, run))
             .await?;
@@ -95,6 +100,7 @@ pub async fn fire(
 ) -> Result<ChatSummary, Error> {
     let (agent_id, schedule_id) = (schedule.agent_id, schedule.id);
     let chat = state
+        .services
         .db
         .call(move |c| {
             chats_repo::create_chat_with(c, "Scheduled run", Some(agent_id), Some(schedule_id))
@@ -123,6 +129,7 @@ pub async fn fire(
         Err(e) => {
             // Nothing ran: drop the empty chat rather than leave a blank entry behind.
             state
+                .services
                 .db
                 .spawn_job(move |c| chats_repo::delete_chat(c, chat_id));
             (
@@ -134,6 +141,7 @@ pub async fn fire(
         }
     };
     state
+        .services
         .db
         .call(move |c| repo::set_schedule_result(c, schedule_id, &recorded, chat_ref))
         .await?;

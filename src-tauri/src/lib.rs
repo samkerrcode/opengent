@@ -50,7 +50,7 @@ pub fn run() {
             install_menu(app)?;
             let state = AppState::initialize(app.handle())?;
             // Before the window is first shown, so it never paints in the wrong theme.
-            window::apply_theme(app.handle(), state.settings.get().appearance.theme);
+            window::apply_theme(app.handle(), state.services.settings.get().appearance.theme);
             window::fit_and_show(app);
             tracing::info!(
                 product = agent_core::config::product().display_name,
@@ -59,7 +59,7 @@ pub fn run() {
                 "application state initialized"
             );
             // Bring up enabled MCP servers in the background; status flows via mcp-changed.
-            state.mcp.autoconnect();
+            state.services.mcp.autoconnect();
             app.manage(state);
             // Agent schedules: catch up on runs missed while closed/asleep, then keep ticking.
             scheduler::spawn(app.handle().clone());
@@ -138,7 +138,7 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 // Stop every MCP server (and its process tree) before teardown.
                 if let Some(state) = app.try_state::<AppState>() {
-                    state.mcp.shutdown();
+                    state.services.mcp.shutdown();
                 }
             }
         });

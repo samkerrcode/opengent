@@ -11,7 +11,7 @@ use crate::AppState;
 
 #[tauri::command]
 pub fn list_providers(state: State<'_, AppState>) -> Vec<ProviderConfig> {
-    state.providers.list()
+    state.services.providers.list()
 }
 
 /// Provider kinds the user can add, with the copy and defaults the settings form renders.
@@ -25,17 +25,17 @@ pub fn save_provider(
     state: State<'_, AppState>,
     input: ProviderInput,
 ) -> Result<ProviderConfig, Error> {
-    state.providers.save(input)
+    state.services.providers.save(input)
 }
 
 #[tauri::command]
 pub fn delete_provider(state: State<'_, AppState>, id: String) -> Result<(), Error> {
-    state.providers.delete(&id)
+    state.services.providers.delete(&id)
 }
 
 #[tauri::command]
 pub fn get_active_selection(state: State<'_, AppState>) -> Option<ActiveSelection> {
-    state.providers.active()
+    state.services.providers.active()
 }
 
 #[tauri::command]
@@ -43,7 +43,7 @@ pub fn set_active_selection(
     state: State<'_, AppState>,
     selection: ActiveSelection,
 ) -> Result<(), Error> {
-    state.providers.set_active(selection)
+    state.services.providers.set_active(selection)
 }
 
 /// Effective capabilities for a provider+model pair (image support is model-level).
@@ -53,7 +53,10 @@ pub fn get_model_capabilities(
     provider_id: String,
     model: String,
 ) -> Result<Capabilities, Error> {
-    state.providers.capabilities_for(&provider_id, &model)
+    state
+        .services
+        .providers
+        .capabilities_for(&provider_id, &model)
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -73,15 +76,16 @@ pub async fn test_provider(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<ProviderTestResult, Error> {
-    state.providers.get(&id)?;
+    state.services.providers.get(&id)?;
     let vision = || {
         state
+            .services
             .providers
             .get(&id)
             .map(|p| p.vision_models)
             .unwrap_or_default()
     };
-    Ok(match state.providers.discover_models(&id).await {
+    Ok(match state.services.providers.discover_models(&id).await {
         Ok(models) if models.is_empty() => ProviderTestResult {
             ok: true,
             message: "Connected, but the server listed no models. Enter a model name manually.".into(),
