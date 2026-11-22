@@ -20,6 +20,8 @@ under *Unreleased*.
   screens, so code and tables have more room. The default-size layout and the message box are
   unchanged.
 
+## 0.2.2 — 2026-11-21
+
 ### Fixed
 
 - **Chat**: Display math no longer flashes a red KaTeX parse error while a reply or Thinking
