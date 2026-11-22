@@ -2,7 +2,9 @@
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { commands, describeError, type AppInfo } from "$lib/ipc/commands";
+  import { describeError, type AppInfo } from "$lib/ipc/commands";
+  import { loadAppInfo } from "$lib/app-info";
+  import { isMac } from "$lib/platform";
   import { product } from "$lib/generated/product";
   import Sidebar from "$features/history/Sidebar.svelte";
   import ChatView from "$features/chat/ChatView.svelte";
@@ -24,10 +26,10 @@
   let bootError = $state<string | null>(null);
 
   onMount(async () => {
-    // macOS sends ⌘, through the native menu, not the webview (see onKeydown for Ctrl+,).
+    // macOS sends ⌘, through the native menu (`OPEN_SETTINGS_EVENT`), not the webview.
     void listen("open-settings", () => nav.toggleSettings());
     try {
-      appInfo = await commands.getAppInfo();
+      appInfo = await loadAppInfo();
       void mcpStore.init();
       void chatStore.initBackground();
       await Promise.all([settingsStore.load(), providerStore.load(), chatStore.loadList(), agentStore.init()]);
@@ -46,7 +48,8 @@
       e.preventDefault();
       nav.showChat();
       void chatStore.newChat();
-    } else if (e.key === ",") {
+    } else if (e.key === "," && !isMac) {
+      // On macOS the menu owns ⌘,; handling it here too would toggle Settings twice.
       e.preventDefault();
       nav.toggleSettings();
     }

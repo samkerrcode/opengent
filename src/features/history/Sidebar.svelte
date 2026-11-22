@@ -5,6 +5,7 @@
   import { chatStore } from "$features/chat/chat-store.svelte";
   import { agentStore } from "$features/agents/agent-store.svelte";
   import { nav } from "$lib/state/nav.svelte";
+  import { modKey } from "$lib/platform";
 
   async function openChat(id: string) {
     nav.showChat();
@@ -41,9 +42,9 @@
     <span class="name">{product.displayName}</span>
   </header>
 
-  <button class="new-chat" onclick={newChat} title="New chat (⌘N / Ctrl+N)">
+  <button class="new-chat" onclick={newChat} title="New chat ({modKey}N)">
     <span class="plus" aria-hidden="true">+</span> New chat
-    <kbd>⌘N</kbd>
+    <kbd>{modKey}N</kbd>
   </button>
 
   <button
@@ -96,9 +97,9 @@
   </div>
 
   <footer class="foot">
-    <button class="settings" onclick={() => nav.openSettings()} title="Settings (⌘, / Ctrl+,)">
+    <button class="settings" onclick={() => nav.openSettings()} title="Settings ({modKey},)">
       <span class="ico gear" aria-hidden="true">{"⚙︎"}</span> Settings
-      <kbd>⌘,</kbd>
+      <kbd>{modKey},</kbd>
     </button>
     <button class="settings" onclick={() => nav.openSettings("providers")} title="Model providers">
       <span class="ico" aria-hidden="true">◎</span> Providers

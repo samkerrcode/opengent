@@ -11,12 +11,8 @@ use tauri::{DragDropEvent, Emitter, Manager, WindowEvent};
 use tracing_subscriber::EnvFilter;
 
 pub use state::AppState;
+use state::OPEN_SETTINGS_EVENT;
 
-/// Emitted to the webview when the macOS Settings… menu item (⌘,) is invoked. WKWebView
-/// never reports ⌘, as a `keydown` — AppKit claims key equivalents before the view sees
-/// them — so the shortcut has to live on the native menu. `Ctrl+,` on Windows/Linux goes
-/// through the webview key handler instead.
-pub const OPEN_SETTINGS_EVENT: &str = "open-settings";
 const SETTINGS_MENU_ID: &str = "settings";
 
 /// Adds "Settings…" (⌘,) to the app menu, between About and Services.
@@ -119,14 +115,14 @@ pub fn run() {
             commands::delete_schedule,
             commands::run_schedule_now,
         ])
-        // Native drag-and-drop: with `dragDropEnabled` on (the default), HTML5 drops never
-        // reach the webview — the OS drop lands here instead. Imported in Rust so file
-        // paths never come from the webview; the result is emitted for the chat store.
         .on_menu_event(|app, event| {
             if event.id() == SETTINGS_MENU_ID {
                 let _ = app.emit(OPEN_SETTINGS_EVENT, ());
             }
         })
+        // Native drag-and-drop: with `dragDropEnabled` on (the default), HTML5 drops never
+        // reach the webview — the OS drop lands here instead. Imported in Rust so file
+        // paths never come from the webview; the result is emitted for the chat store.
         .on_window_event(|window, event| {
             if let WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) = event {
                 if window.label() == "main" {

@@ -3,7 +3,7 @@
 
   // A titled card of `SettingRow`s inside a Settings section.
   let { title, description, children }: { title: string; description?: string; children: Snippet } = $props();
-  const id = `settings-group-${Math.random().toString(36).slice(2, 9)}`;
+  const id = $props.id();
 </script>
 
 <section class="group" aria-labelledby={id}>

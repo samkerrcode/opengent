@@ -30,6 +30,10 @@ pub const ATTACHMENTS_DROPPED_EVENT: &str = "attachments-dropped";
 /// A picked or dropped PDF is being rendered (payload: `ImportProgress`), so the composer
 /// can show what it is waiting for.
 pub const ATTACHMENTS_IMPORTING_EVENT: &str = "attachments-importing";
+/// The macOS Settings… menu item (⌘,) was invoked. WKWebView never reports ⌘, as a
+/// `keydown` — AppKit claims key equivalents before the view sees them — so the shortcut
+/// has to live on the native menu. `Ctrl+,` elsewhere goes through the webview key handler.
+pub const OPEN_SETTINGS_EVENT: &str = "open-settings";
 
 /// Persists approval-card "Always allow" grants to the chat or agent they were made in.
 /// The run already uses the grant in memory; if the write fails it is logged and the UI is

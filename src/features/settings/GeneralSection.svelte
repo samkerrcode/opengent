@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { commands, describeError, type AppInfo } from "$lib/ipc/commands";
+  import { describeError, type AppInfo } from "$lib/ipc/commands";
+  import { loadAppInfo } from "$lib/app-info";
   import { copyText } from "$lib/clipboard";
   import SettingsGroup from "./SettingsGroup.svelte";
   import SettingRow from "./SettingRow.svelte";
@@ -8,18 +9,21 @@
   let info = $state<AppInfo | null>(null);
   let error = $state<string | null>(null);
   let copied = $state(false);
+  let copiedTimer: ReturnType<typeof setTimeout> | undefined;
 
   onMount(() => {
-    commands.getAppInfo().then(
+    loadAppInfo().then(
       (i) => (info = i),
       (e) => (error = describeError(e)),
     );
+    return () => clearTimeout(copiedTimer);
   });
 
   async function copyPath() {
     if (!info || !(await copyText(info.data_root))) return;
     copied = true;
-    setTimeout(() => (copied = false), 1500);
+    clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => (copied = false), 1500);
   }
 </script>
 

@@ -37,6 +37,34 @@ describe("trapFocus", () => {
     expect(document.activeElement).toBe(byId("b"));
   });
 
+  it("skips controls hidden by CSS or a closed details element", () => {
+    const { dialog, tab, byId } = setup();
+    dialog.insertAdjacentHTML(
+      "beforeend",
+      `<div style="display: none"><button>gone</button></div>
+       <button style="visibility: hidden">ghost</button>
+       <details><summary id="sum">more</summary><button>folded</button></details>`,
+    );
+    byId("a").focus();
+    tab(true);
+    expect(document.activeElement).toBe(byId("sum"));
+    tab();
+    expect(document.activeElement).toBe(byId("a"));
+  });
+
+  it("pulls focus back in when it fell out of the dialog", () => {
+    const { action, tab, byId } = setup();
+    byId("a").focus();
+    byId("a").remove();
+    expect(document.activeElement).toBe(document.body);
+    tab();
+    expect(document.activeElement).toBe(byId("b"));
+    action.destroy();
+    byId("opener").focus();
+    tab();
+    expect(document.activeElement).toBe(byId("opener"));
+  });
+
   it("restores focus to the opener on destroy", () => {
     const { opener, action, dialog } = setup();
     dialog.remove();
