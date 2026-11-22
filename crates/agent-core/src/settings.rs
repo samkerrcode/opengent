@@ -31,6 +31,7 @@ const VERSION: u16 = 1;
 #[ts(export)]
 pub struct Settings {
     pub general: GeneralSettings,
+    pub appearance: AppearanceSettings,
 }
 
 /// Settings → General. Its About group is read-only (`get_app_info`).
@@ -38,6 +39,26 @@ pub struct Settings {
 #[serde(default)]
 #[ts(export)]
 pub struct GeneralSettings {}
+
+/// Settings → Appearance.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(default)]
+#[ts(export)]
+pub struct AppearanceSettings {
+    pub theme: Theme,
+}
+
+/// Light or dark UI. `System` follows the OS setting; the others override it for this app
+/// only. The shell applies it to the window, so the webview's `prefers-color-scheme` follows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum Theme {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
 
 /// Semantic checks beyond what deserialization enforces (ranges, combinations). Runs on
 /// every update and on load; a stored value that fails it counts as a corrupt file.
@@ -47,11 +68,18 @@ trait Validate {
 
 impl Validate for Settings {
     fn validate(&self) -> Result<()> {
-        self.general.validate()
+        self.general.validate()?;
+        self.appearance.validate()
     }
 }
 
 impl Validate for GeneralSettings {
+    fn validate(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl Validate for AppearanceSettings {
     fn validate(&self) -> Result<()> {
         Ok(())
     }
@@ -291,7 +319,10 @@ mod tests {
         store.persist(&written).unwrap();
         let on_disk: Value =
             serde_json::from_slice(&std::fs::read(tmp.join(FILE_NAME)).unwrap()).unwrap();
-        assert_eq!(on_disk, newer);
+        // Unknown fields survive; sections this build knows are written with their values.
+        let mut expected = newer.clone();
+        expected["appearance"] = json!({ "theme": "system" });
+        assert_eq!(on_disk, expected);
         assert_eq!(SettingsStore::load(&root).unwrap().get(), store.get());
         assert!(store.update(&json!({ "general": { "nope": 1 } })).is_err());
         assert!(store.update(&json!({ "nope": {} })).is_err());
@@ -381,5 +412,40 @@ mod tests {
                 "later": { "a": 1 }
             })
         );
+    }
+
+    #[test]
+    fn theme_defaults_to_system_and_accepts_only_known_values() {
+        assert_eq!(Settings::default().appearance.theme, Theme::System);
+        let base = Settings::default();
+        for (value, theme) in [
+            ("system", Theme::System),
+            ("light", Theme::Light),
+            ("dark", Theme::Dark),
+        ] {
+            let next = apply_patch(&base, &json!({ "appearance": { "theme": value } })).unwrap();
+            assert_eq!(next.appearance.theme, theme);
+        }
+        for bad in [json!("Dark"), json!("sepia"), json!(1), json!(null)] {
+            assert!(
+                matches!(
+                    apply_patch(&base, &json!({ "appearance": { "theme": bad } })),
+                    Err(Error::InvalidInput(_))
+                ),
+                "accepted {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn theme_persists_across_loads() {
+        let (root, tmp) = root();
+        let store = SettingsStore::load(&root).unwrap();
+        store
+            .update(&json!({ "appearance": { "theme": "dark" } }))
+            .unwrap();
+        let reloaded = SettingsStore::load(&root).unwrap().get();
+        assert_eq!(reloaded.appearance.theme, Theme::Dark);
+        std::fs::remove_dir_all(tmp).unwrap();
     }
 }

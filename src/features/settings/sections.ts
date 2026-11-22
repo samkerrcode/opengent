@@ -3,6 +3,7 @@
 // live in the matching section of the Rust `Settings` struct. Order here is rail order.
 import type { Component } from "svelte";
 import type { SettingsPaneId, SettingsSectionId } from "$lib/state/nav.svelte";
+import AppearanceSection from "./AppearanceSection.svelte";
 import GeneralSection from "./GeneralSection.svelte";
 
 type Entry = { label: string; icon: string; description: string };
@@ -29,6 +30,14 @@ const SECTIONS: readonly SettingsSection[] = [
     icon: "⚙︎",
     description: "About this app and where it keeps your data.",
     component: GeneralSection,
+  },
+  {
+    kind: "pane",
+    id: "appearance",
+    label: "Appearance",
+    icon: "◐",
+    description: "Light or dark theme for this app.",
+    component: AppearanceSection,
   },
   {
     kind: "link",

@@ -5,7 +5,7 @@ export type View = { kind: "chat" } | { kind: "agents" } | { kind: "agent"; agen
 export type Modal = "settings" | "providers" | "connections";
 
 /** Sections shown inside the Settings dialog (see `features/settings/sections.ts`). */
-export type SettingsPaneId = "general";
+export type SettingsPaneId = "general" | "appearance";
 /** Everything the Settings rail lists, including the entries that open their own dialogs. */
 export type SettingsSectionId = SettingsPaneId | "providers" | "connections";
 

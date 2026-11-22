@@ -65,10 +65,13 @@ pub fn get_settings(state: State<'_, AppState>) -> Settings {
 /// settings as stored. On error nothing changes, so the UI reverts the control.
 #[tauri::command]
 pub fn update_settings(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     patch: serde_json::Value,
 ) -> Result<Settings, Error> {
-    state.settings.update(&patch)
+    let settings = state.settings.update(&patch)?;
+    crate::window::apply_theme(&app, settings.appearance.theme);
+    Ok(settings)
 }
 
 /// Adapts a Tauri channel to the core's `RunSink`. Channels deliver in order; a send error

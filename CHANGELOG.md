@@ -22,6 +22,10 @@ under *Unreleased*.
   are saved in `settings.json` in the data folder; a damaged file is set aside and the app
   starts with defaults.
 
+- **Platform**: Settings → Appearance lets you keep the app in light or dark mode regardless
+  of the OS setting, or follow the system (the default). The change applies immediately and
+  is remembered.
+
 - **Providers**: xAI (Grok) is a native provider type: add a connection with an xAI Console
   API key and pick from the models your key can call, with vision and reasoning flags taken
   from xAI's model listing. Runs use the Responses API statelessly (`store: false`), stream

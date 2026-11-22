@@ -2,6 +2,7 @@
 //! (`"visible": false` in `tauri.conf.json`) so it can be resized and centred before the first
 //! paint, then is always shown — even if sizing fails.
 
+use agent_core::settings::Theme;
 use tauri::{App, LogicalSize, Manager, PhysicalPosition, Runtime, WebviewWindow};
 
 /// Minimum outer size in logical pixels; mirrors `minWidth`/`minHeight` in `tauri.conf.json`.
@@ -29,6 +30,23 @@ fn fit(work_width: f64, work_height: f64) -> Fit {
     Fit {
         outer: (width, height),
         min: (min_width, min_height),
+    }
+}
+
+/// Applies the Settings → Appearance theme to the main window. `System` clears the override
+/// so the window follows the OS again. The window's theme is what the webview reports as
+/// `prefers-color-scheme`, so every scheme-dependent style and image follows it.
+pub fn apply_theme<R: Runtime, M: Manager<R>>(manager: &M, theme: Theme) {
+    let Some(window) = manager.get_webview_window("main") else {
+        return;
+    };
+    let theme = match theme {
+        Theme::System => None,
+        Theme::Light => Some(tauri::Theme::Light),
+        Theme::Dark => Some(tauri::Theme::Dark),
+    };
+    if let Err(err) = window.set_theme(theme) {
+        tracing::warn!(error = %err, "could not apply the window theme");
     }
 }
 

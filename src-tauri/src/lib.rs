@@ -48,8 +48,10 @@ pub fn run() {
         .setup(|app| {
             #[cfg(target_os = "macos")]
             install_menu(app)?;
-            window::fit_and_show(app);
             let state = AppState::initialize(app.handle())?;
+            // Before the window is first shown, so it never paints in the wrong theme.
+            window::apply_theme(app.handle(), state.settings.get().appearance.theme);
+            window::fit_and_show(app);
             tracing::info!(
                 product = agent_core::config::product().display_name,
                 data_root = %state.data_root.path().display(),

@@ -37,7 +37,7 @@ Each feature is described the same way:
 | [Settings](#settings) | [Settings dialog](#settings-dialog) | App-wide preferences and About details in one dialog, ⌘, / Ctrl+, |
 | [Privacy & data](#privacy--data) | [Local data](#local-data) | Everything under `~/.opengent`; no account, no telemetry |
 | | [Secrets](#secrets) | API keys and tokens only in the OS credential store |
-| [Appearance](#appearance) | [Activity indicator & theme](#activity-indicator--theme) | Live run phases, light/dark theme, reduced motion |
+| [Appearance](#appearance) | [Activity indicator & theme](#activity-indicator--theme) | Live run phases, System / Light / Dark theme setting, reduced motion |
 | | [Window size](#window-size) | Opens at about 80% of the screen, centred, at any display scaling; replies widen in large windows |
 
 Keyboard shortcuts: **⌘N / Ctrl+N** new chat · **⌘, / Ctrl+,** settings · **Esc**
@@ -416,7 +416,7 @@ proposes a call; your permissions decide whether it runs.
   returns to the Connections start screen; it reconnects only if the command, directory,
   environment, URL, authentication or headers changed.
 - A server that provides an icon shows it next to the connection's name in Connections and
-  in the ⚒ Tools menu, in its light or dark variant to match the system theme; otherwise the
+  in the ⚒ Tools menu, in its light or dark variant to match the app's theme; otherwise the
   name's first letter is shown. The name you gave the connection is always the label.
 - **Server instructions** — some servers send tips on using their tools (for example
   GitHub's on pagination and pull request reviews). A connected server's instructions are
@@ -665,6 +665,7 @@ Ctrl+, (Windows); the shortcut closes it again, as do Esc and a click outside. S
 | Section | What's there |
 |---|---|
 | **General** | *About*: the app version, the data folder (with *Copy*) and where secrets are stored (macOS Keychain or Windows Credential Manager) |
+| **Appearance** | *Theme*: System, Light or Dark (see [Activity indicator & theme](#activity-indicator--theme)) |
 | **Providers** | Opens the [provider settings](#provider-settings) dialog |
 | **Connections** | Opens the [Connections](#connections) dialog |
 
@@ -721,14 +722,21 @@ a provider deletes its key.
 
 **What.** A radar symbol next to each reply spins while the model is working and stops when
 the reply ends; the label beside it names the current phase. The app follows your system's
-light or dark theme.
+light or dark theme unless you choose one for the app.
 
-**How it works.** Turning on your OS's reduced-motion setting stops the rotation.
+**How to use.** Open Settings → Appearance and pick a *Color mode*: **System** (the default)
+follows your OS, **Light** and **Dark** keep the app in that mode whatever the OS uses. The
+change applies at once, with no restart, and is remembered across restarts.
+
+**How it works.** The choice is applied to the app window itself, so everything that
+follows light or dark follows it: colors, code highlighting, the light and dark variants of
+MCP server icons, and on Windows the title bar. It is saved in `settings.json` in the data
+folder. Turning on your OS's reduced-motion setting stops the rotation.
 Scrollbars are thin overlays drawn over the content and shown while you scroll, on both
 macOS and Windows.
 
-**Limits.** The indicator shows activity, not progress. There is no in-app theme switch.
-Overlay scrollbars on Windows need WebView2 Runtime 125 or newer; older runtimes keep the
+**Limits.** The indicator shows activity, not progress. The theme is app-wide: there are no
+per-chat themes or custom accent colors. Overlay scrollbars on Windows need WebView2 Runtime 125 or newer; older runtimes keep the
 classic scrollbar.
 
 ### Window size
