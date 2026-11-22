@@ -167,7 +167,7 @@ const XAI: KindMeta = KindMeta {
     default_base_url: Some(xai::DEFAULT_BASE_URL),
     base_url_hint: "xAI API root, ending in /v1",
     base_url_placeholder: xai::DEFAULT_BASE_URL,
-    model_placeholder: "e.g. grok-4.7, grok-4.3, grok-4-1-fast-reasoning",
+    model_placeholder: "e.g. grok-4.7, grok-4.3, grok-4.20-0309-non-reasoning",
     requires_api_key: true,
     api_key_hint: "Create a key in the xAI Console (console.x.ai → API keys).",
     api_key_url: "https://console.x.ai/team/default/api-keys",

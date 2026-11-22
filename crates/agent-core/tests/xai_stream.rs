@@ -99,6 +99,21 @@ async fn invalid_key_maps_to_auth_hint() {
     );
 }
 
+#[tokio::test]
+async fn stream_errors_name_xai() {
+    let (p, _server) = provider(
+        "200 OK",
+        b"data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"}}\n\n",
+        4096,
+    )
+    .await;
+    let err = common::collect(&p, &request("grok-4.7")).await.err.unwrap();
+    assert!(
+        err.contains("xAI reported") && !err.contains("OpenAI"),
+        "{err}"
+    );
+}
+
 const TOOL_BODY: &[u8] = br#"data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1","type":"reasoning","summary":[],"encrypted_content":"ENC1"}}
 
 data: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_1","type":"message","role":"assistant","content":[]}}

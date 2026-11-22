@@ -38,7 +38,9 @@ pub struct XAiConfig {
     pub api_key: Option<String>,
     pub connect_timeout: Duration,
     /// Maximum silence between stream events. Same rationale as OpenAI's: reasoning models
-    /// can think for a long time before the first event.
+    /// can think for a long time before the first event. The whole-request deadline is 4×
+    /// this (`common::request_timeout`), so 225 s gives the 900 s xAI recommends for
+    /// high-effort reasoning.
     pub idle_timeout: Duration,
 }
 
@@ -49,14 +51,17 @@ impl XAiConfig {
             base_url: base_url.into(),
             api_key: None,
             connect_timeout: Duration::from_secs(15),
-            idle_timeout: Duration::from_secs(180),
+            idle_timeout: Duration::from_secs(225),
         }
     }
 }
 
 /// xAI's dialect of the Responses protocol.
 static DIALECT: Dialect = Dialect {
+    kind: ProviderKind::XAi,
+    vendor: "xAI",
     family: FAMILY,
+    image_mimes: Some(&["image/jpeg", "image/jpg", "image/png"]),
     models_path: "/language-models",
     parse_models,
     is_reasoning_model,
@@ -97,20 +102,20 @@ fn is_flagship(m: &str) -> bool {
     version_ok && parts.all(|suf| suf == "latest" || numeric(suf))
 }
 
-/// Grok 4 and newer reason (effort is configurable, not disableable); `*-non-reasoning`
-/// variants and pre-Grok-4 models don't. `grok-3-mini` and `grok-code-fast` reason, and the
-/// `latest` aliases track the flagship.
+/// Current Grok models reason (effort is configurable, not disableable), so unknown and new
+/// names (`grok-build-0.1`, aliases) default to reasoning: xAI accepts the reasoning
+/// options as compatibility fields, while omitting `include` would lose the model's
+/// reasoning across tool calls. Only `*-non-reasoning` variants and the legacy Grok ≤ 3 /
+/// `*-beta` models are excluded (`grok-3-mini` reasons).
 pub fn is_reasoning_model(model: &str) -> bool {
     let m = model_name(model);
-    if m.contains("non-reasoning") {
+    if m.contains("non-reasoning")
+        || m.starts_with("grok-beta")
+        || m.starts_with("grok-vision-beta")
+    {
         return false;
     }
-    m.contains("reasoning")
-        || m.contains("code-fast")
-        || m.starts_with("grok-3-mini")
-        || m == "latest"
-        || m == "grok-latest"
-        || grok_major(&m).is_some_and(|major| major >= 4)
+    m.starts_with("grok-3-mini") || !grok_major(&m).is_some_and(|major| major <= 3)
 }
 
 /// Vision-capable families: flagship Grok releases are multimodal; specialist variants
@@ -126,6 +131,9 @@ fn accepts_images(model: &str) -> bool {
 /// the user's per-model setting always wins.
 pub fn known_context_window(model: &str) -> Option<u32> {
     let m = model_name(model);
+    if m.starts_with("grok-build") {
+        return Some(500_000);
+    }
     if m.contains("-fast") && grok_major(&m) == Some(4) {
         return Some(2_000_000); // grok-4-fast / grok-4-1-fast
     }
@@ -231,7 +239,7 @@ impl ModelProvider for XAiProvider {
     }
 
     fn capabilities(&self) -> Capabilities {
-        ProviderKind::XAi.capabilities()
+        self.inner.capabilities()
     }
 
     fn family(&self) -> Option<&'static str> {
@@ -335,6 +343,8 @@ mod tests {
             "grok-420-reasoning",
             "grok-3-mini-latest",
             "grok-code-fast-1",
+            "grok-build-0.1",
+            "xai/grok-4.20-beta",
             "latest",
         ] {
             assert!(is_reasoning_model(m), "{m}");
@@ -344,6 +354,8 @@ mod tests {
             "grok-4-fast-non-reasoning",
             "grok-3",
             "grok-2-vision-1212",
+            "grok-beta",
+            "grok-vision-beta",
         ] {
             assert!(!is_reasoning_model(m), "{m}");
         }
@@ -359,6 +371,7 @@ mod tests {
             assert!(!accepts_images(m), "{m}");
         }
         assert_eq!(known_context_window("grok-4.7"), Some(500_000));
+        assert_eq!(known_context_window("grok-build-0.1"), Some(500_000));
         assert_eq!(known_context_window("grok-4.3"), Some(1_000_000));
         assert_eq!(
             known_context_window("grok-4.20-multi-agent-0309"),
@@ -385,11 +398,23 @@ mod tests {
                 "reasoning_effort": ["low", "medium", "high", "xhigh"] } },
             { "id": "grok-imagine-image", "input_modalities": ["text"],
               "output_modalities": ["image"], "image_price": 200000000 },
-            { "id": "grok-2", "capabilities": {} }
+            { "id": "grok-2", "capabilities": {} },
+            { "id": "grok-build-0.1", "input_modalities": ["text"], "output_modalities": ["text"] },
+            { "id": "grok-4.20-0309-non-reasoning", "output_modalities": ["text"],
+              "capabilities": { "reasoning_effort": ["low"] } }
         ]});
         let models = parse_models(&doc);
         let ids: Vec<&str> = models.iter().map(|(id, _)| id.as_str()).collect();
-        assert_eq!(ids, ["grok-2", "grok-4.7", "grok-420-reasoning"]);
+        assert_eq!(
+            ids,
+            [
+                "grok-2",
+                "grok-4.20-0309-non-reasoning",
+                "grok-4.7",
+                "grok-420-reasoning",
+                "grok-build-0.1"
+            ]
+        );
         let d = |id: &str| &models.iter().find(|(m, _)| m == id).unwrap().1;
         assert_eq!(d("grok-4.7").vision, Some(true));
         assert_eq!(d("grok-4.7").reasoning, Some(true));
@@ -404,6 +429,43 @@ mod tests {
             d("grok-2").context_window,
             Some(131_072),
             "name-table fallback"
+        );
+        assert_eq!(
+            d("grok-build-0.1").reasoning,
+            Some(true),
+            "unreported reasoning defaults on for current models"
+        );
+        assert_eq!(d("grok-build-0.1").context_window, Some(500_000));
+        assert_eq!(
+            d("grok-4.20-0309-non-reasoning").reasoning,
+            Some(true),
+            "the server report beats the name rules"
+        );
+    }
+
+    #[test]
+    fn unsupported_image_formats_become_a_note() {
+        let messages = vec![Message {
+            role: Role::User,
+            blocks: vec![
+                ContentBlock::Image {
+                    mime: "image/png".into(),
+                    data: "aGk=".into(),
+                },
+                ContentBlock::Image {
+                    mime: "image/webp".into(),
+                    data: "aGk=".into(),
+                },
+            ],
+        }];
+        let body = XAiProvider::build_body(&request("grok-4.7", messages));
+        let content = &body["input"][0]["content"];
+        assert_eq!(content[0]["type"], "input_image");
+        assert_eq!(content[1]["type"], "input_text");
+        let note = content[1]["text"].as_str().unwrap();
+        assert!(
+            note.contains("image/webp") && note.contains("xAI"),
+            "{note}"
         );
     }
 }

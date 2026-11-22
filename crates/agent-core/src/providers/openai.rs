@@ -31,6 +31,7 @@ use super::common::{
     push_bounded, read_json, request_timeout, send_checked, spawn_stream, status_error, str_at,
     CallIds, StreamEnd, MAX_TOOL_ARG_CHARS,
 };
+use super::registry::ProviderKind;
 use super::sse::SseEvent;
 use super::{
     opaque_within_limit, Capabilities, CompletionRequest, DiscoveredModel, ModelDiscovery,
@@ -50,9 +51,16 @@ const MAX_OPEN_ITEMS: usize = 256;
 /// opaque-state families so one vendor's encrypted reasoning is never replayed to another.
 #[derive(Debug)]
 pub struct Dialect {
+    /// The provider kind served; its `KindMeta` declares the adapter capabilities.
+    pub kind: ProviderKind,
+    /// Vendor name used in user-facing errors.
+    pub vendor: &'static str,
     /// Opaque-state family tag. Stable: stored history references it and state is replayed
     /// only to an adapter with the same tag.
     pub family: &'static str,
+    /// Image mime types the vendor accepts; others are replaced by a text note instead of
+    /// failing the request. `None` = any.
+    pub image_mimes: Option<&'static [&'static str]>,
     /// `GET {base}{models_path}` lists the provider's models.
     pub models_path: &'static str,
     /// Parses the listing document into chat models with metadata.
@@ -69,7 +77,10 @@ pub struct Dialect {
 
 /// The OpenAI Responses dialect.
 pub static DIALECT: Dialect = Dialect {
+    kind: ProviderKind::OpenAi,
+    vendor: "OpenAI",
     family: FAMILY,
+    image_mimes: None,
     models_path: "/models",
     parse_models,
     is_reasoning_model,
@@ -274,6 +285,17 @@ impl OpenAiProvider {
                             ContentBlock::Text { text } if !text.is_empty() => {
                                 Some(json!({ "type": "input_text", "text": text }))
                             }
+                            ContentBlock::Image { mime, .. }
+                                if dialect
+                                    .image_mimes
+                                    .is_some_and(|ok| !ok.contains(&mime.as_str())) =>
+                            {
+                                Some(json!({ "type": "input_text", "text": format!(
+                                    "<attachment type=\"{mime}\" status=\"omitted\" reason=\"{} \
+                                     does not accept this image format\" />",
+                                    dialect.vendor
+                                ) }))
+                            }
                             ContentBlock::Image { mime, data } => Some(json!({
                                 "type": "input_image",
                                 "image_url": format!("data:{mime};base64,{data}"),
@@ -394,7 +416,7 @@ impl ModelProvider for OpenAiProvider {
     }
 
     fn capabilities(&self) -> Capabilities {
-        super::registry::ProviderKind::OpenAi.capabilities()
+        self.config.dialect.kind.capabilities()
     }
 
     fn family(&self) -> Option<&'static str> {
@@ -414,7 +436,7 @@ impl ModelProvider for OpenAiProvider {
         let config = self.config.clone();
         spawn_stream(tx.clone(), cancel.clone(), async move {
             let resp = send_checked(req, &config.base_url, config.connect_timeout).await?;
-            let mut state = StreamState::new(config.dialect.family);
+            let mut state = StreamState::new(config.dialect);
             let end = pump_sse(resp, config.idle_timeout, &cancel, &tx, |ev, out| {
                 state.handle(ev, out)
             })
@@ -465,10 +487,9 @@ enum OpenItem {
 
 /// Responses SSE state machine. Calls and reasoning items are emitted when their item is
 /// done, so stored blocks keep the exact order the server produced them in.
-#[derive(Default)]
 struct StreamState {
-    /// Opaque-state family tag emitted on `ProviderEvent::Opaque`.
-    family: &'static str,
+    /// Supplies the opaque-state family tag and the vendor name for errors.
+    dialect: &'static Dialect,
     open: std::collections::BTreeMap<u64, OpenItem>,
     call_ids: CallIds,
     /// A terminal event was handled (`Done` or an error was produced).
@@ -476,10 +497,12 @@ struct StreamState {
 }
 
 impl StreamState {
-    fn new(family: &'static str) -> Self {
+    fn new(dialect: &'static Dialect) -> Self {
         Self {
-            family,
-            ..Default::default()
+            dialect,
+            open: Default::default(),
+            call_ids: CallIds::default(),
+            finished: false,
         }
     }
 
@@ -557,9 +580,10 @@ impl StreamState {
                     ) {
                         "content_filter" => {
                             self.finished = true;
-                            return Err(Error::Provider(
-                                "the response was stopped by OpenAI's content filter".into(),
-                            ));
+                            return Err(Error::Provider(format!(
+                                "the response was stopped by {}'s content filter",
+                                self.dialect.vendor
+                            )));
                         }
                         _ => StopReason::MaxTokens,
                     }
@@ -571,15 +595,16 @@ impl StreamState {
                 self.finished = true;
                 let response = v.get("response").unwrap_or(&Value::Null);
                 return Err(Error::Provider(
-                    extract_error_message(response)
-                        .unwrap_or_else(|| "OpenAI reported the response failed".into()),
+                    extract_error_message(response).unwrap_or_else(|| {
+                        format!("{} reported the response failed", self.dialect.vendor)
+                    }),
                 ));
             }
             "error" => {
                 self.finished = true;
-                return Err(Error::Provider(
-                    extract_error_message(&v).unwrap_or_else(|| "OpenAI stream error".into()),
-                ));
+                return Err(Error::Provider(extract_error_message(&v).unwrap_or_else(
+                    || format!("{} stream error", self.dialect.vendor),
+                )));
             }
             // Lifecycle (`created`, `in_progress`), per-part bookkeeping, `*.done` echoes of
             // already-streamed text, and anything newer than this adapter.
@@ -619,7 +644,7 @@ impl StreamState {
             "reasoning" => {
                 if let Some(data) = reasoning_state(item) {
                     out.push(ProviderEvent::Opaque {
-                        provider: self.family,
+                        provider: self.dialect.family,
                         data,
                     });
                 }
@@ -627,7 +652,7 @@ impl StreamState {
             "message" => {
                 if let Some(phase) = item.get("phase").filter(|p| p.is_string()) {
                     out.push(ProviderEvent::Opaque {
-                        provider: self.family,
+                        provider: self.dialect.family,
                         data: json!({ "phase": phase }),
                     });
                 }
@@ -927,7 +952,7 @@ mod tests {
     }
 
     fn run(events: Vec<Value>) -> (Vec<ProviderEvent>, Result<()>, bool) {
-        let mut state = StreamState::new(FAMILY);
+        let mut state = StreamState::new(&DIALECT);
         let mut out = Vec::new();
         for ev in events {
             if let Err(e) = state.handle(sse(ev), &mut out) {

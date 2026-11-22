@@ -271,18 +271,27 @@ Choose the **xAI** tile, paste the key, **Save & test**, then pick a default mod
 
 **How it works.** xAI speaks the Responses protocol, so the adapter is the same one OpenAI
 uses with xAI's own endpoints and model rules. Requests are stateless (`store: false`):
-the full local history is sent each turn and xAI keeps no conversation — its 30-day
-server-side history is never enabled. Reasoning models return their thinking as encrypted
-reasoning items, which are kept locally and replayed so Grok stays aware of its earlier
-reasoning across turns. Models are listed with the vision and reasoning flags xAI reports;
-context windows come from a built-in table per model family and your own setting always wins.
+the full local history is sent each turn and no conversation is stored for later retrieval.
+xAI still keeps API requests for 30 days for abuse review unless your team has Zero Data
+Retention turned on; see [SECURITY.md](../SECURITY.md#data-handling-by-provider). Reasoning
+models return their thinking as encrypted reasoning items, which are kept locally and
+replayed so Grok stays aware of its earlier reasoning across turns. Models are listed with
+the vision and reasoning flags xAI reports; context windows come from a built-in table per
+model family and your own setting always wins. A single request may run up to 15 minutes,
+as xAI recommends for high-effort reasoning.
 
 **Limits.** API keys only — no management keys, OAuth or US regional endpoint preset
 (you can enter `https://us.api.x.ai/v1` as the base URL yourself). xAI's built-in tools
-(web and X search, code execution), file search, batches and `previous_response_id`
-chaining aren't offered. Reasoning effort is the model default. A dropped connection fails
-the turn. Grok's thinking content stays encrypted — only its summary (when returned) is
-readable.
+(web and X search, code execution), file search, batches, prompt caching (planned for
+[Phase 6](../README.md#roadmap)) and `previous_response_id` chaining aren't offered.
+Reasoning effort is the model default. A dropped connection fails the turn. Grok's thinking
+content stays encrypted — only its summary (when returned) is readable. Images must be JPEG
+or PNG; GIF and WebP attachments are replaced by a note telling the model they were
+omitted. Models newer than the built-in table use your context-window setting, or 8K.
+**Cost:** xAI bills a request whose prompt reaches 200K tokens at about twice the normal
+rate for all of its tokens. OpenGent fills most of Grok's 500K–2M windows before trimming
+history, so a long chat crosses that threshold without warning — set a lower context window on the provider or
+model to stay under it.
 
 #### OpenAI-compatible
 

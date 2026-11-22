@@ -11,7 +11,8 @@
 //   non-chat model (text-embedding-mock) to exercise discovery filtering.
 // - `GET /v1/language-models` answers in xAI's shape (input/output_modalities and
 //   capabilities.reasoning_effort) so the native xAI provider type can be exercised
-//   against this server too; it adds a text-embedding entry that the xAI filter drops.
+//   against this server too; it adds an image-generation entry (mock-imagine) that the
+//   xAI output_modalities filter drops.
 // - "use tool <name>" against a request with tools returns a function_call item; the
 //   follow-up must answer every call with a function_call_output.
 // - Replay validation: requests must use store:false, carry no item ids, replay every
