@@ -3,4 +3,9 @@
 /**
  * Settings → General. Its About group is read-only (`get_app_info`).
  */
-export type GeneralSettings = Record<symbol, never>;
+export type GeneralSettings = { 
+/**
+ * Send the OS, time zone and each user message's local send time to models
+ * (`agent::environment`). Read when a run starts.
+ */
+share_environment: boolean, };

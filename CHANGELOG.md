@@ -22,6 +22,10 @@ under *Unreleased*.
   are saved in `settings.json` in the data folder; a damaged file is set aside and the app
   starts with defaults.
 
+- **Chat**: Models now know your OS, time zone and when each of your messages was sent, so
+  they can answer date and time questions — in chats, agents and scheduled runs. On by
+  default; turn it off with *Share environment with models* in *Settings → General*.
+
 - **Providers**: xAI (Grok) is a native provider type: add a connection with an xAI Console
   API key and pick from the models your key can call, with vision and reasoning flags taken
   from xAI's model listing. Runs use the Responses API statelessly (`store: false`), stream

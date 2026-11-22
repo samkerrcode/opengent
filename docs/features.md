@@ -26,6 +26,7 @@ Each feature is described the same way:
 | | [Provider settings](#provider-settings) | Add, test and manage connections; keys go to the OS keychain |
 | | [Model list & hiding](#model-list--hiding) | Discovered models, per-model context windows, hide the ones you don't use |
 | | [Reasoning continuity](#reasoning-continuity) | A model's reasoning carries across tool calls |
+| | [Environment context](#environment-context) | Models know your OS, time zone and when each message was sent |
 | [Tools](#tools-mcp-connections) | [Connections](#connections) | MCP servers over stdio or Streamable HTTP, with OAuth sign-in or client credentials |
 | | [Tool permissions](#tool-permissions) | *Allow* / *Ask* / *Disable* per tool, enforced in Rust |
 | | [Scopes](#permission-scopes) | Defaults per connection, overrides per chat, own set per agent |
@@ -390,6 +391,32 @@ reasoning text stays in the chat either way.
 large reasoning blocks (over 64 KiB) aren't stored; the model then reasons afresh on the next
 turn.
 
+### Environment context
+
+**What.** Models are told your operating system, your time zone and when each of your messages
+was sent, so they can answer questions like "what's due tomorrow?" and give advice that fits
+your system. It works in every chat and agent, in scheduled runs, and with or without tools.
+
+**How to use.** On by default. Turn it off with **Share environment with models** in
+**Settings → General**. A change applies to replies started after it.
+
+**How it works.** The system prompt gets one short line, for example
+`macOS 12.6, America/Toronto. User messages start with their local send time.` On Windows the
+version reads like `Windows 11 (build 22631)`. Each of your messages is sent with its local send
+time in front, for example `[Sun 2026-11-22 14:35]`, taken from when the message was stored and
+shown in the time zone rules in effect at that moment, so a clock change doesn't alter earlier
+messages. A scheduled run's prompt carries the time the schedule fired. The stamps are added only
+to what the model receives: they aren't saved in the chat or shown in it. Because the system
+prompt has no clock and earlier messages never change, requests stay cache-friendly from turn to
+turn. With the setting off nothing is collected and requests are exactly as they would be
+without this feature.
+
+**Limits.** No hostname, username, home folder, locale, screen or hardware details are sent. If
+the OS version can't be read it is left out; if the time zone name can't be read the current UTC
+offset (e.g. `UTC-05:00`) is used instead. Turning the setting on in an existing chat also sends
+the send times of its earlier messages. A configured fallback model receives the same
+information. It costs roughly 20 tokens per request plus about 10 per user message.
+
 ---
 
 ## Tools (MCP connections)
@@ -664,7 +691,7 @@ Ctrl+, (Windows); the shortcut closes it again, as do Esc and a click outside. S
 
 | Section | What's there |
 |---|---|
-| **General** | *About*: the app version, the data folder (with *Copy*) and where secrets are stored (macOS Keychain or Windows Credential Manager) |
+| **General** | *Models*: **Share environment with models** ([environment context](#environment-context)). *About*: the app version, the data folder (with *Copy*) and where secrets are stored (macOS Keychain or Windows Credential Manager) |
 | **Providers** | Opens the [provider settings](#provider-settings) dialog |
 | **Connections** | Opens the [Connections](#connections) dialog |
 
@@ -675,8 +702,7 @@ secrets. If the file is missing the defaults are used;
 if it is damaged it is kept next to the original as `settings.json.corrupt-<time>` and the
 app starts with defaults.
 
-**Limits.** General has no adjustable options yet; later features add their own sections.
-Providers and Connections still open as separate dialogs. There is no search, import or
+**Limits.** Later features add their own sections. Providers and Connections still open as separate dialogs. There is no search, import or
 export, and settings are app-wide (not per chat or agent).
 
 ---
@@ -699,7 +725,9 @@ network traffic is to the providers and MCP servers you configure.
 **How it works.** With a local model (Ollama, LM Studio, vLLM, llama.cpp) nothing leaves
 your machine. Hosted providers receive the conversation for each request and are used in
 their stateless mode; what each vendor may retain is covered in
-[SECURITY.md](../SECURITY.md#data-handling-by-provider).
+[SECURITY.md](../SECURITY.md#data-handling-by-provider). Unless you turn off
+[environment context](#environment-context), requests also include your OS version, time zone
+and the send time of each of your messages.
 
 **Limits.** Local chat data isn't encrypted by the app; it relies on your OS account and disk
 encryption. Per-chat encryption is on the [roadmap](../README.md#proposed-features).

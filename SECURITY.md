@@ -146,6 +146,12 @@ In every case:
 - "Stateless" and `store: false` mean **no API-level storage**. A vendor's own logging,
   abuse monitoring or legally mandated retention still applies under its data-usage terms and
   your account settings. Level 2 needs an agreement with the vendor; the app can't grant it.
+- Besides the conversation, each request carries a small environment snapshot unless
+  *Share environment with models* (Settings → General) is off: the OS name and version, the
+  time zone, and the local send time of every user message in the chat (so turning it on in
+  an existing chat also sends earlier messages' send times). It is produced by the app, not
+  by a tool; no hostname, username or paths are included. A configured fallback provider
+  receives the same data. With the setting off, nothing is collected or sent.
 - Provider continuation state that must be replayed on the next turn (OpenAI and xAI
   encrypted reasoning items, Gemini thought signatures, Anthropic thinking signatures) is
   stored locally

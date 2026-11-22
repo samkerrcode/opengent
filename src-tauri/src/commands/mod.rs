@@ -14,6 +14,7 @@ pub use providers::*;
 use std::collections::{HashMap, HashSet};
 
 use agent_core::agent::context::{self, AgentPrompt, PromptProfile, ToolContext};
+use agent_core::agent::environment::{EnvContext, Environment};
 use agent_core::agent::{FallbackModel, RunRecorder, RunRequest, RunSink};
 use agent_core::config::{product, ProductInfo};
 use agent_core::domain::{ChatId, ContentBlock, Role, RunEvent, RunId};
@@ -176,6 +177,8 @@ pub(crate) async fn launch_run<S: RunSink>(
     if state.coordinator.active_run(chat_id).is_some() {
         return Err(Error::RunBusy);
     }
+    // Read once: a change applies to runs started after it.
+    let share_environment = state.settings.get().general.share_environment;
 
     // Rust owns agent configuration: an agent chat's models, tools and prompt are read from
     // the database, never taken from the webview.
@@ -373,11 +376,23 @@ pub(crate) async fn launch_run<S: RunSink>(
         .ok_or_else(|| Error::Internal("assistant message vanished".into()))?;
 
     // History = everything complete/interrupted before the placeholder, as domain messages.
-    let mut history: Vec<_> = messages
+    let stored: Vec<&StoredMessage> = messages
         .iter()
         .filter(|m| m.id != assistant_id && !m.blocks.is_empty())
-        .map(StoredMessage::to_message)
         .collect();
+    let mut history: Vec<_> = stored.iter().map(|m| m.to_message()).collect();
+    // Off means nothing is collected. Stamps use the OS zone's rules at each message's
+    // instant, like schedules.
+    let env = if share_environment {
+        let environment = blocking(|| Ok(Environment::detect())).await?;
+        EnvContext::new(
+            &environment,
+            stored.iter().map(|m| m.created_at),
+            &chrono::Local,
+        )
+    } else {
+        EnvContext::default()
+    };
     // Provider state only replays to its own protocol family; drop the rest before
     // budgeting so it costs neither tokens nor request bytes.
     let families: Vec<&str> = [
@@ -433,6 +448,7 @@ pub(crate) async fn launch_run<S: RunSink>(
         caps.images,
         &tool_ctx,
         &profile,
+        &env,
     );
     if compiled.trimmed_messages > 0 {
         notices.push(format!(

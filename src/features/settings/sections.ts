@@ -27,7 +27,7 @@ const SECTIONS: readonly SettingsSection[] = [
     id: "general",
     label: "General",
     icon: "⚙︎",
-    description: "About this app and where it keeps your data.",
+    description: "What models are told about your system, about this app and where it keeps your data.",
     component: GeneralSection,
   },
   {

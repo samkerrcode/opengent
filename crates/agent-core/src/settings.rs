@@ -34,10 +34,22 @@ pub struct Settings {
 }
 
 /// Settings → General. Its About group is read-only (`get_app_info`).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(default)]
 #[ts(export)]
-pub struct GeneralSettings {}
+pub struct GeneralSettings {
+    /// Send the OS, time zone and each user message's local send time to models
+    /// (`agent::environment`). Read when a run starts.
+    pub share_environment: bool,
+}
+
+impl Default for GeneralSettings {
+    fn default() -> Self {
+        Self {
+            share_environment: true,
+        }
+    }
+}
 
 /// Semantic checks beyond what deserialization enforces (ranges, combinations). Runs on
 /// every update and on load; a stored value that fails it counts as a corrupt file.
@@ -248,6 +260,7 @@ mod tests {
         let (root, tmp) = root();
         let store = SettingsStore::load(&root).unwrap();
         assert_eq!(store.get(), Settings::default());
+        assert!(store.get().general.share_environment, "on by default");
         assert!(!tmp.join(FILE_NAME).exists(), "loading must not write");
         std::fs::remove_dir_all(tmp).unwrap();
     }
@@ -280,7 +293,7 @@ mod tests {
         let (root, tmp) = root();
         let newer = json!({
             "version": 1,
-            "general": { "future_flag": true },
+            "general": { "share_environment": true, "future_flag": true },
             "future_section": { "x": 1 }
         });
         std::fs::write(tmp.join(FILE_NAME), newer.to_string()).unwrap();
@@ -296,6 +309,27 @@ mod tests {
         assert!(store.update(&json!({ "general": { "nope": 1 } })).is_err());
         assert!(store.update(&json!({ "nope": {} })).is_err());
         assert!(store.update(&json!([])).is_err());
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn share_environment_can_be_turned_off_and_persists() {
+        let (root, tmp) = root();
+        let store = SettingsStore::load(&root).unwrap();
+        let next = store
+            .update(&json!({ "general": { "share_environment": false } }))
+            .unwrap();
+        assert!(!next.general.share_environment);
+        assert!(
+            !SettingsStore::load(&root)
+                .unwrap()
+                .get()
+                .general
+                .share_environment
+        );
+        assert!(store
+            .update(&json!({ "general": { "share_environment": "no" } }))
+            .is_err());
         std::fs::remove_dir_all(tmp).unwrap();
     }
 
