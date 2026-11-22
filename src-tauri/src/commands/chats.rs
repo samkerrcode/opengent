@@ -112,7 +112,7 @@ pub async fn delete_chat(state: State<'_, AppState>, id: ChatId) -> Result<(), E
 /// file, a `%PDF-` file, or a magic-byte-sniffed PNG/JPEG/GIF/WebP), which no extension
 /// list can describe without hiding attachable files. `include_images` is the active
 /// model's image capability: images and PDFs picked for a text-only model are rejected
-/// with a reason before anything is rendered or stored. `launch_run` enforces the same
+/// with a reason before anything is rendered or stored. `launcher::launch` enforces the same
 /// gate (`AttachmentMeta::unusable_reason`, mirrored in `src/lib/attachments.ts`).
 #[tauri::command]
 pub async fn pick_attachments(

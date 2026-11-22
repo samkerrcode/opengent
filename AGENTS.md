@@ -23,8 +23,11 @@ Contributor guidelines: see CONTRIBUTING.md. Security scope: SECURITY.md.
   `crates/agent-core/build.rs` exposes the same fields to Rust as `PRODUCT_*` env vars.
 - `crates/agent-core` – UI-independent runtime (config, domain, agent loop, providers, storage, secrets, http, mcp,
   `agents` = user-configured agents + schedule math). No Tauri deps. SQLite migrations are append-only (`storage/migrations.rs`).
-- `src-tauri` – Tauri host: `AppState`, IPC commands, capabilities, CSP. `commands::launch_run` is the single
-  run entry point (interactive chats and `scheduler.rs` background runs).
+- `crates/agent-core/src/agent/launcher.rs` – `launcher::launch` is the single run entry point for every host
+  (interactive chats, `scheduler.rs` background runs, future CLI/SDK). Hosts pass already-created `RunServices`
+  (owned by `AppState`) and a `RunSink`; startup policy (opening the DB, connecting MCP, runtime) stays in the host.
+- `src-tauri` – Tauri host: `AppState`, IPC commands, capabilities, CSP, the sinks and app events. `start_run` and
+  `scheduler::fire` are thin callers of `launcher::launch`.
 - `src` – Svelte frontend. `src/lib/generated/bindings` are ts-rs outputs from Rust DTOs (committed; CI checks drift).
 
 ## Commands

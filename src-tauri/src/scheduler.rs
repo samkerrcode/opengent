@@ -8,6 +8,7 @@
 
 use std::time::{Duration, Instant};
 
+use agent_core::agent::launcher::{self, RunParams};
 use agent_core::agent::RunSink;
 use agent_core::agents::{plan_due, AgentSchedule, ScheduleOutcome};
 use agent_core::domain::RunEvent;
@@ -18,7 +19,6 @@ use agent_core::Error;
 use chrono::Local;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::commands::{launch_run, RunParams};
 use crate::state::{AGENTS_CHANGED_EVENT, BACKGROUND_RUN_EVENT, BACKGROUND_RUN_STARTED_EVENT};
 use crate::AppState;
 
@@ -101,11 +101,11 @@ pub async fn fire(
         })
         .await?;
     let announce = app.clone();
-    let result = launch_run(
-        state,
+    let result = launcher::launch(
+        &state.services,
         RunParams {
             chat_id: chat.id,
-            selection: None,
+            model: None,
             prompt: schedule.prompt.clone(),
             attachment_ids: Vec::new(),
             replace_from: None,
