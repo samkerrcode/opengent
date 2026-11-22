@@ -7,6 +7,8 @@
   import ChatView from "$features/chat/ChatView.svelte";
   import ProviderSettings from "$features/providers/ProviderSettings.svelte";
   import McpSettings from "$features/mcp/McpSettings.svelte";
+  import SettingsDialog from "$features/settings/SettingsDialog.svelte";
+  import { settingsStore } from "$features/settings/settings-store.svelte";
   import ContextMenu, { type ContextMenuItem } from "$lib/components/ContextMenu.svelte";
   import { copyText } from "$lib/clipboard";
   import { chatStore } from "$features/chat/chat-store.svelte";
@@ -25,7 +27,7 @@
       appInfo = await commands.getAppInfo();
       void mcpStore.init();
       void chatStore.initBackground();
-      await Promise.all([providerStore.load(), chatStore.loadList(), agentStore.init()]);
+      await Promise.all([settingsStore.load(), providerStore.load(), chatStore.loadList(), agentStore.init()]);
     } catch (e) {
       bootError = describeError(e);
     }
@@ -43,7 +45,7 @@
       void chatStore.newChat();
     } else if (e.key === ",") {
       e.preventDefault();
-      nav.modal = nav.modal === "settings" ? null : "settings";
+      nav.toggleSettings();
     }
   }
 
@@ -97,7 +99,7 @@
 <svelte:document onclick={onClick} />
 
 <div class="shell">
-  <Sidebar {appInfo} onopensettings={() => (nav.modal = "settings")} onopenconnections={() => (nav.modal = "connections")} />
+  <Sidebar {appInfo} />
   <main class="canvas" aria-label="Conversation">
     {#if bootError}
       <div class="boot-error" role="alert">
@@ -108,10 +110,10 @@
       <AgentsView />
     {:else if nav.view.kind === "agent"}
       {#key nav.view.agentId}
-        <AgentEditor agentId={nav.view.agentId} onopenconnections={() => (nav.modal = "connections")} />
+        <AgentEditor agentId={nav.view.agentId} onopenconnections={() => nav.openSettings("connections")} />
       {/key}
     {:else if chatStore.active}
-      <ChatView chat={chatStore.active} onopensettings={() => (nav.modal = "settings")} onopenconnections={() => (nav.modal = "connections")} />
+      <ChatView chat={chatStore.active} onopenproviders={() => nav.openSettings("providers")} onopenconnections={() => nav.openSettings("connections")} />
     {/if}
     {#if chatStore.error}
       <div class="toast" role="alert">
@@ -122,12 +124,18 @@
   </main>
 </div>
 
+<!-- Settings comes first: when its rail opens Providers or Connections, it is torn down
+     (restoring focus to its opener) before the next dialog captures that opener. -->
 {#if nav.modal === "settings"}
-  <ProviderSettings onclose={() => (nav.modal = null)} />
+  <SettingsDialog onclose={() => nav.closeModal()} />
+{/if}
+
+{#if nav.modal === "providers"}
+  <ProviderSettings onclose={() => nav.closeModal()} />
 {/if}
 
 {#if nav.modal === "connections"}
-  <McpSettings onclose={() => (nav.modal = null)} />
+  <McpSettings onclose={() => nav.closeModal()} />
 {/if}
 
 {#if ctxMenu}

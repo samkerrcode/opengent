@@ -16,7 +16,7 @@
     await chatStore.newChat();
   }
 
-  let { appInfo, onopensettings, onopenconnections }: { appInfo: AppInfo | null; onopensettings: () => void; onopenconnections: () => void } = $props();
+  let { appInfo }: { appInfo: AppInfo | null } = $props();
 
   const groups = $derived.by(() => {
     const now = Date.now();
@@ -96,10 +96,14 @@
   </div>
 
   <footer class="foot">
-    <button class="settings" onclick={onopensettings} title="Providers & settings (⌘,)">
-      <span aria-hidden="true">⚙</span> Providers
+    <button class="settings" onclick={() => nav.openSettings()} title="Settings (⌘, / Ctrl+,)">
+      <span aria-hidden="true">⚙</span> Settings
+      <kbd>⌘,</kbd>
     </button>
-    <button class="settings" onclick={onopenconnections} title="MCP tool servers">
+    <button class="settings" onclick={() => nav.openSettings("providers")} title="Model providers">
+      <span aria-hidden="true">◎</span> Providers
+    </button>
+    <button class="settings" onclick={() => nav.openSettings("connections")} title="MCP tool servers">
       <span aria-hidden="true">⚒</span> Connections
     </button>
     {#if appInfo}

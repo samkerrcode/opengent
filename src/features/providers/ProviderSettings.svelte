@@ -5,6 +5,7 @@
   import ProviderIcon from "./ProviderIcon.svelte";
   import { describeError, type ImageSupport, type KindSpec, type ProviderConfig, type ProviderInput, type ProviderKind, type ProviderPreset, type ProviderTestResult, type TlsMode } from "$lib/ipc/commands";
   import { product } from "$lib/generated/product";
+  import { trapFocus } from "$lib/focus-trap";
 
   let { onclose }: { onclose: () => void } = $props();
 
@@ -302,6 +303,7 @@
     aria-labelledby="settings-title"
     tabindex="-1"
     bind:this={dialog}
+    use:trapFocus
     onkeydown={onKeydown}
   >
     <header class="head">

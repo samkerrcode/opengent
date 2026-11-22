@@ -16,6 +16,7 @@ pub mod mcp;
 pub mod pdf;
 pub mod providers;
 pub mod secrets;
+pub mod settings;
 pub mod storage;
 
 pub use error::{Error, Result};

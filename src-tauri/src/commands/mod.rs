@@ -19,6 +19,7 @@ use agent_core::config::{product, ProductInfo};
 use agent_core::domain::{ChatId, ContentBlock, Role, RunEvent, RunId};
 use agent_core::mcp::{PermissionScope, ScopePolicies};
 use agent_core::secrets::SecretRef;
+use agent_core::settings::Settings;
 use agent_core::storage::agents as agents_repo;
 use agent_core::storage::chats as repo;
 use agent_core::storage::{AttachmentKind, ChatSummary, StoredMessage};
@@ -53,6 +54,21 @@ pub fn get_app_info(state: State<'_, AppState>) -> AppInfo {
         platform: std::env::consts::OS,
         debug_build: cfg!(debug_assertions),
     }
+}
+
+#[tauri::command]
+pub fn get_settings(state: State<'_, AppState>) -> Settings {
+    state.settings.get()
+}
+
+/// Partial update (`{ section: { field: value } }`), validated in Rust; returns the
+/// settings as stored. On error nothing changes, so the UI reverts the control.
+#[tauri::command]
+pub fn update_settings(
+    state: State<'_, AppState>,
+    patch: serde_json::Value,
+) -> Result<Settings, Error> {
+    state.settings.update(&patch)
 }
 
 /// Adapts a Tauri channel to the core's `RunSink`. Channels deliver in order; a send error

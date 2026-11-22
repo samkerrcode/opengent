@@ -95,7 +95,8 @@ Checksums are in `SHA256SUMS.txt`; see
 ### First run
 
 1. **Try it instantly.** The built-in *Simulated* model works with no setup.
-2. **Add a model.** Open **Providers** (⌘, on macOS / Ctrl+, on Windows) and pick a tile:
+2. **Add a model.** Click **Providers** in the sidebar (or open **Settings** with ⌘, on macOS /
+   Ctrl+, on Windows, then **Providers**) and pick a tile:
    - **Local and free:** *OpenAI-compatible* → the **Ollama** or **LM Studio** preset (presets
      for vLLM / llama.cpp and OpenRouter are included too).
    - **Hosted:** *OpenAI*, *Anthropic* or *Google Gemini* → paste an API key. Keys go straight

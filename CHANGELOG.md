@@ -16,6 +16,12 @@ under *Unreleased*.
 
 ### Added
 
+- **Platform**: A Settings dialog for app-wide preferences, opened from *Settings* in the
+  sidebar or with ⌘, / Ctrl+,. Its *General* section shows the version, the data folder and
+  where secrets are stored; *Providers* and *Connections* are listed there too. Preferences
+  are saved in `settings.json` in the data folder; a damaged file is set aside and the app
+  starts with defaults.
+
 - **Providers**: xAI (Grok) is a native provider type: add a connection with an xAI Console
   API key and pick from the models your key can call, with vision and reasoning flags taken
   from xAI's model listing. Runs use the Responses API statelessly (`store: false`), stream
@@ -23,6 +29,10 @@ under *Unreleased*.
   storage so Grok keeps its earlier thinking across turns and tool calls.
 
 ### Changed
+
+- **Platform**: ⌘, / Ctrl+, opens Settings instead of Providers; Providers is one click away
+  in its list and keeps its own sidebar button. Tab now stays inside open dialogs, and closing
+  one returns focus to where it was.
 
 - **Chat**: Replies use more of the width in large or maximized windows and on high-resolution
   screens, so code and tables have more room. The default-size layout and the message box are

@@ -12,7 +12,7 @@ use ts_rs::TS;
 
 use super::server_meta::{InstructionsStatus, ServerMeta};
 use crate::agent::tools::ToolSettings;
-use crate::config::DataRoot;
+use crate::config::{write_private, DataRoot};
 use crate::domain::{ToolAccess, ToolPolicy};
 use crate::providers::openai_compat::normalize_base_url;
 use crate::secrets::{SecretRef, SecretStore};
@@ -494,27 +494,6 @@ fn secret_ref(server_id: &str, scope: &str, name: &str) -> Result<SecretRef> {
         })
         .collect();
     SecretRef::new(format!("mcp/{server_id}/{scope}/{clean}"))
-}
-
-/// Writes the file owner-only on unix: non-secret env values can still be sensitive.
-#[cfg(unix)]
-fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?
-        .write_all(bytes)?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    std::fs::write(path, bytes)?;
-    Ok(())
 }
 
 /// Splits a command line into program + args honoring single/double quotes and backslash

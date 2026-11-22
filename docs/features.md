@@ -34,12 +34,13 @@ Each feature is described the same way:
 | [Agents](#agents) | [Agents](#agents) | Reusable role with models, instructions and its own tools |
 | | [Fallback model](#fallback-model) | A second model takes over when the first can't start |
 | | [Schedules](#schedules) | Run an agent once, on an interval, or on weekdays |
+| [Settings](#settings) | [Settings dialog](#settings-dialog) | App-wide preferences and About details in one dialog, ⌘, / Ctrl+, |
 | [Privacy & data](#privacy--data) | [Local data](#local-data) | Everything under `~/.opengent`; no account, no telemetry |
 | | [Secrets](#secrets) | API keys and tokens only in the OS credential store |
 | [Appearance](#appearance) | [Activity indicator & theme](#activity-indicator--theme) | Live run phases, light/dark theme, reduced motion |
 | | [Window size](#window-size) | Opens at about 80% of the screen, centred, at any display scaling; replies widen in large windows |
 
-Keyboard shortcuts: **⌘N / Ctrl+N** new chat · **⌘, / Ctrl+,** provider settings · **Esc**
+Keyboard shortcuts: **⌘N / Ctrl+N** new chat · **⌘, / Ctrl+,** settings · **Esc**
 stop the current reply or close a dialog · **Shift+Enter** new line in the composer.
 
 ---
@@ -325,7 +326,8 @@ no account, key or network. It is always available in the model picker.
 
 **What.** One place to add, test, edit and remove provider connections.
 
-**How to use.** Open **Providers** (⌘, / Ctrl+,). The dialog opens on a picker: one tile per
+**How to use.** Click **Providers** in the sidebar, or open **Settings** (⌘, / Ctrl+,) and
+choose **Providers**. The dialog opens on a picker: one tile per
 provider type next to **Your providers**, the list of saved connections.
 
 1. Click a tile. The form asks only for the essentials: name, API key (with *Show* and *Get
@@ -650,6 +652,35 @@ after 15 minutes if nobody answers. No OS notifications yet.
 
 ---
 
+## Settings
+
+### Settings dialog
+
+**What.** One dialog for app-wide preferences, with a list of sections on the left and the
+selected section on the right.
+
+**How to use.** Click **Settings** at the bottom of the sidebar, or press ⌘, (macOS) /
+Ctrl+, (Windows); the shortcut closes it again, as do Esc and a click outside. Sections:
+
+| Section | What's there |
+|---|---|
+| **General** | *About*: the app version, the data folder (with *Copy*) and where secrets are stored (macOS Keychain or Windows Credential Manager) |
+| **Providers** | Opens the [provider settings](#provider-settings) dialog |
+| **Connections** | Opens the [Connections](#connections) dialog |
+
+**How it works.** Changes apply as soon as you make them; there is no Save button. If a
+change can't be saved, the control returns to its previous value and the reason is shown
+next to it. Preferences are kept in `settings.json` in the data folder and contain no
+secrets. If the file is missing the defaults are used;
+if it is damaged it is kept next to the original as `settings.json.corrupt-<time>` and the
+app starts with defaults.
+
+**Limits.** General has no adjustable options yet; later features add their own sections.
+Providers and Connections still open as separate dialogs. There is no search, import or
+export, and settings are app-wide (not per chat or agent).
+
+---
+
 ## Privacy & data
 
 ### Local data
@@ -662,6 +693,7 @@ network traffic is to the providers and MCP servers you configure.
 | Chats, messages, agents, schedules | SQLite database in `~/.opengent` |
 | Attachments | `~/.opengent/attachments` |
 | Provider and connection settings | JSON files in `~/.opengent` (no secrets) |
+| App-wide preferences | `~/.opengent/settings.json` (no secrets) |
 | API keys, secret headers and variables, OAuth tokens and client secrets | OS credential store |
 
 **How it works.** With a local model (Ollama, LM Studio, vLLM, llama.cpp) nothing leaves

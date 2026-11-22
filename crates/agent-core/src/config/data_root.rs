@@ -67,6 +67,27 @@ fn create_private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Writes the file owner-only on unix: non-secret config values can still be sensitive.
+#[cfg(unix)]
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?
+        .write_all(bytes)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

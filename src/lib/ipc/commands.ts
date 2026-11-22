@@ -21,6 +21,7 @@ import type { RunId } from "$lib/generated/bindings/RunId";
 import type { RunStarted } from "$lib/generated/bindings/RunStarted";
 import type { StoredMessage } from "$lib/generated/bindings/StoredMessage";
 import type { SecretProbe } from "$lib/generated/bindings/SecretProbe";
+import type { Settings } from "$lib/generated/bindings/Settings";
 import type { TlsMode } from "$lib/generated/bindings/TlsMode";
 import type { ApprovalDecision } from "$lib/generated/bindings/ApprovalDecision";
 import type { KeyValueInput } from "$lib/generated/bindings/KeyValueInput";
@@ -94,6 +95,7 @@ export type {
   RunId,
   RunStarted,
   SecretProbe,
+  Settings,
   StoredMessage,
   TlsMode,
   ToolAccess,
@@ -104,6 +106,9 @@ export type {
   ToolPolicy,
   ToolSettings,
 };
+
+/** Partial settings update: any sections, any of their fields. Rust validates it. */
+export type SettingsPatch = { [S in keyof Settings]?: Partial<Settings[S]> };
 
 export function isCoreError(value: unknown): value is CoreError {
   return typeof value === "object" && value !== null && "kind" in value;
@@ -118,6 +123,10 @@ export function describeError(error: unknown): string {
 
 export const commands = {
   getAppInfo: () => invoke<AppInfo>("get_app_info"),
+
+  getSettings: () => invoke<Settings>("get_settings"),
+  /** Returns the settings as stored; rejects (changing nothing) if the patch is invalid. */
+  updateSettings: (patch: SettingsPatch) => invoke<Settings>("update_settings", { patch }),
 
   /** `providerId`/`model` are ignored (pass null) for agent chats: Rust uses the agent's. */
   startRun(

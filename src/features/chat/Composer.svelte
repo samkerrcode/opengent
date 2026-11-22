@@ -13,7 +13,7 @@
     onstop,
     onattach,
     onremoveattachment,
-    onopensettings,
+    onopenproviders,
     onopenconnections,
     chatId,
     agent = null,
@@ -33,7 +33,7 @@
     onstop: () => void;
     onattach: () => void;
     onremoveattachment: (id: string) => void;
-    onopensettings: () => void;
+    onopenproviders: () => void;
     onopenconnections: () => void;
   } = $props();
 
@@ -156,7 +156,7 @@
             ◆ {agent.name} · {agent.default_model.model}
           </button>
         {:else}
-          <ModelPicker {onopensettings} />
+          <ModelPicker {onopenproviders} />
         {/if}
         <button
           type="button"

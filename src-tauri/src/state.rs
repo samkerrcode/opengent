@@ -6,6 +6,7 @@ use agent_core::config::{resolve_data_root, DataRoot};
 use agent_core::mcp::{McpManager, McpStore, PermissionScope, ScopePolicies};
 use agent_core::providers::registry::ProviderStore;
 use agent_core::secrets::{MemorySecretStore, SecretStore};
+use agent_core::settings::SettingsStore;
 use agent_core::storage::agents as agents_repo;
 use agent_core::storage::chats as chats_repo;
 use agent_core::storage::{AttachmentStore, Db};
@@ -81,6 +82,7 @@ pub struct AppState {
     pub coordinator: Arc<RunCoordinator>,
     pub secrets: Arc<dyn SecretStore>,
     pub providers: ProviderStore,
+    pub settings: SettingsStore,
     pub mcp: Arc<McpManager>,
     pub db: Db,
     pub attachments: Arc<AttachmentStore>,
@@ -100,6 +102,7 @@ impl AppState {
         // custom credential headers can't leak to a redirect target.
         let http = agent_core::http::client()?;
         let providers = ProviderStore::load(&data_root, secrets.clone(), http)?;
+        let settings = SettingsStore::load(&data_root)?;
         let db = Db::open(&data_root.database_path())?;
         let attachments = Arc::new(AttachmentStore::new(data_root.attachments_dir()));
         let handle = app.clone();
@@ -121,6 +124,7 @@ impl AppState {
             ),
             secrets,
             providers,
+            settings,
             mcp,
             db,
             attachments,

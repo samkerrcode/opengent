@@ -11,7 +11,7 @@
   import { nav } from "$lib/state/nav.svelte";
   import { ScrollPin } from "$lib/scroll-pin.svelte";
 
-  let { chat, onopensettings, onopenconnections }: { chat: Chat; onopensettings: () => void; onopenconnections: () => void } = $props();
+  let { chat, onopenproviders, onopenconnections }: { chat: Chat; onopenproviders: () => void; onopenconnections: () => void } = $props();
 
   let scroller = $state<HTMLElement | null>(null);
   let column = $state<HTMLElement | null>(null);
@@ -156,12 +156,12 @@
             You're on the built-in simulated model, so replies are synthetic. Connect a real provider to get
             started — local (Ollama, LM Studio) or hosted.
           </p>
-          <button class="btn-primary" onclick={onopensettings}>Connect a provider</button>
+          <button class="btn-primary" onclick={onopenproviders}>Connect a provider</button>
         {:else if providerStore.active}
           <p>Talking to <strong>{providerStore.active.model}</strong> via {providerStore.activeProvider?.name}.</p>
         {:else}
           <p>{product.displayName} works with any model provider. Pick one to begin.</p>
-          <button class="btn-primary" onclick={onopensettings}>Choose a provider</button>
+          <button class="btn-primary" onclick={onopenproviders}>Choose a provider</button>
         {/if}
         <ul class="suggestions">
           {#each suggestions as s (s)}
@@ -225,7 +225,7 @@
   onstop={() => chatStore.stop(chat)}
   onattach={() => chatStore.pickAttachments(chat)}
   onremoveattachment={(id) => chatStore.removePending(chat, id)}
-  {onopensettings}
+  {onopenproviders}
   {onopenconnections}
 />
 

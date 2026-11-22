@@ -3,6 +3,7 @@
   import ToolAccessBadge from "./ToolAccessBadge.svelte";
   import ToolPolicySelect from "./ToolPolicySelect.svelte";
   import Switch from "$lib/components/Switch.svelte";
+  import { trapFocus } from "$lib/focus-trap";
   import ServerIconView from "./ServerIconView.svelte";
   import { authForm, authInput, blankAuth, redirectUri, statusText, type AuthForm } from "./connection";
   import {
@@ -230,7 +231,7 @@
 </script>
 
 <div class="backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && onclose()}>
-  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="conn-title" tabindex="-1" bind:this={dialog} onkeydown={onKeydown}>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="conn-title" tabindex="-1" bind:this={dialog} use:trapFocus onkeydown={onKeydown}>
     <header class="head">
       <h2 id="conn-title">Connections</h2>
       <button class="btn-ghost" onclick={onclose} aria-label="Close">✕</button>
