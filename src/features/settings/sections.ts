@@ -26,7 +26,7 @@ const SECTIONS: readonly SettingsSection[] = [
     kind: "pane",
     id: "general",
     label: "General",
-    icon: "⚙",
+    icon: "⚙︎",
     description: "About this app and where it keeps your data.",
     component: GeneralSection,
   },

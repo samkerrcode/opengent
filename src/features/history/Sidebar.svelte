@@ -97,14 +97,14 @@
 
   <footer class="foot">
     <button class="settings" onclick={() => nav.openSettings()} title="Settings (⌘, / Ctrl+,)">
-      <span aria-hidden="true">⚙</span> Settings
+      <span class="ico gear" aria-hidden="true">{"⚙︎"}</span> Settings
       <kbd>⌘,</kbd>
     </button>
     <button class="settings" onclick={() => nav.openSettings("providers")} title="Model providers">
-      <span aria-hidden="true">◎</span> Providers
+      <span class="ico" aria-hidden="true">◎</span> Providers
     </button>
     <button class="settings" onclick={() => nav.openSettings("connections")} title="MCP tool servers">
-      <span aria-hidden="true">⚒</span> Connections
+      <span class="ico" aria-hidden="true">⚒</span> Connections
     </button>
     {#if appInfo}
       <div class="status" title={appInfo.data_root}>
@@ -291,6 +291,19 @@
   .settings:hover {
     background: var(--bg-hover);
     color: var(--fg);
+  }
+  .ico {
+    display: inline-grid;
+    place-items: center;
+    width: 16px;
+    height: 16px;
+    font-size: 14px;
+    line-height: 1;
+  }
+  /* The text-style gear (FE0E keeps it from turning into an emoji on Windows) is drawn
+     smaller than ◎ and ⚒ at the same font size. */
+  .ico.gear {
+    font-size: 17px;
   }
   .status {
     font-size: 11.5px;

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { listen } from "@tauri-apps/api/event";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { commands, describeError, type AppInfo } from "$lib/ipc/commands";
   import { product } from "$lib/generated/product";
@@ -23,6 +24,8 @@
   let bootError = $state<string | null>(null);
 
   onMount(async () => {
+    // macOS sends ⌘, through the native menu, not the webview (see onKeydown for Ctrl+,).
+    void listen("open-settings", () => nav.toggleSettings());
     try {
       appInfo = await commands.getAppInfo();
       void mcpStore.init();

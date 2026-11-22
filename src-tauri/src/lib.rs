@@ -7,10 +7,41 @@ mod scheduler;
 mod state;
 mod window;
 
-use tauri::{DragDropEvent, Manager, WindowEvent};
+use tauri::{DragDropEvent, Emitter, Manager, WindowEvent};
 use tracing_subscriber::EnvFilter;
 
 pub use state::AppState;
+
+/// Emitted to the webview when the macOS Settings… menu item (⌘,) is invoked. WKWebView
+/// never reports ⌘, as a `keydown` — AppKit claims key equivalents before the view sees
+/// them — so the shortcut has to live on the native menu. `Ctrl+,` on Windows/Linux goes
+/// through the webview key handler instead.
+pub const OPEN_SETTINGS_EVENT: &str = "open-settings";
+const SETTINGS_MENU_ID: &str = "settings";
+
+/// Adds "Settings…" (⌘,) to the app menu, between About and Services.
+#[cfg(target_os = "macos")]
+fn install_menu(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem};
+    let menu = Menu::default(app.handle())?;
+    if let Some(MenuItemKind::Submenu(app_menu)) = menu.items()?.into_iter().next() {
+        let settings = MenuItem::with_id(
+            app,
+            SETTINGS_MENU_ID,
+            "Settings…",
+            true,
+            Some("CmdOrCtrl+,"),
+        )?;
+        if app_menu.items()?.len() >= 2 {
+            let separator = PredefinedMenuItem::separator(app.handle())?;
+            app_menu.insert_items(&[&settings, &separator], 2)?;
+        } else {
+            app_menu.append_items(&[&settings])?;
+        }
+    }
+    app.set_menu(menu)?;
+    Ok(())
+}
 
 pub fn run() {
     init_tracing();
@@ -19,6 +50,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            install_menu(app)?;
             window::fit_and_show(app);
             let state = AppState::initialize(app.handle())?;
             tracing::info!(
@@ -89,6 +122,11 @@ pub fn run() {
         // Native drag-and-drop: with `dragDropEnabled` on (the default), HTML5 drops never
         // reach the webview — the OS drop lands here instead. Imported in Rust so file
         // paths never come from the webview; the result is emitted for the chat store.
+        .on_menu_event(|app, event| {
+            if event.id() == SETTINGS_MENU_ID {
+                let _ = app.emit(OPEN_SETTINGS_EVENT, ());
+            }
+        })
         .on_window_event(|window, event| {
             if let WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) = event {
                 if window.label() == "main" {
