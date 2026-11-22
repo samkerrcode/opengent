@@ -5,12 +5,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::environment::EnvContext;
 use crate::config::product;
 use crate::domain::{ContentBlock, Message, Role};
 use crate::providers::CompletionRequest;
 
 /// Bump whenever the system prompt text changes; it is part of the cache key.
-pub const SYSTEM_PROMPT_VERSION: u16 = 4;
+pub const SYSTEM_PROMPT_VERSION: u16 = 5;
 
 /// Used when the provider does not report a context window.
 pub const DEFAULT_CONTEXT_TOKENS: u32 = 8192;
@@ -37,7 +38,7 @@ pub fn system_prompt() -> String {
 
 /// Bump whenever the agent system prompt text changes (cache key, like
 /// `SYSTEM_PROMPT_VERSION`).
-pub const AGENT_PROMPT_VERSION: u16 = 1;
+pub const AGENT_PROMPT_VERSION: u16 = 2;
 
 /// A user-configured agent as seen by the prompt compiler.
 #[derive(Debug, Clone)]
@@ -101,15 +102,16 @@ pub fn agent_system_prompt(agent: &AgentPrompt) -> String {
     s
 }
 
-/// The full system prompt: base prompt, then the tools section, then (agents only) the
-/// user's instructions, so the stable prefix stays cacheable per agent.
-pub fn system_for(profile: &PromptProfile, tools_prompt: &str) -> String {
+/// The full system prompt: base prompt, then the tools section, then the environment
+/// section, then (agents only) the user's instructions, so the stable prefix stays
+/// cacheable per agent.
+pub fn system_for(profile: &PromptProfile, tools_prompt: &str, env_prompt: &str) -> String {
     match profile {
-        PromptProfile::Default => format!("{}{tools_prompt}", system_prompt()),
+        PromptProfile::Default => format!("{}{tools_prompt}{env_prompt}", system_prompt()),
         PromptProfile::Agent(agent) => {
             let instructions = agent.instructions.trim();
             format!(
-                "{}{tools_prompt}\n\n## Agent instructions\n{}",
+                "{}{tools_prompt}{env_prompt}\n\n## Agent instructions\n{}",
                 agent_system_prompt(agent),
                 if instructions.is_empty() {
                     "(No additional instructions were provided. Act as a helpful general-purpose \
@@ -700,6 +702,19 @@ pub fn retain_opaque_for(history: &mut [Message], families: &[&str]) {
     }
 }
 
+/// Puts a send-time stamp at the start of a rendered user message.
+fn stamp_message(m: &mut Message, stamp: &str) {
+    match m.blocks.first_mut() {
+        Some(ContentBlock::Text { text }) => text.insert_str(0, &format!("{stamp} ")),
+        _ => m.blocks.insert(
+            0,
+            ContentBlock::Text {
+                text: stamp.to_owned(),
+            },
+        ),
+    }
+}
+
 fn message_tokens(m: &Message) -> u32 {
     4 + m
         .blocks
@@ -725,7 +740,8 @@ pub struct CompiledContext {
 /// Keeps the most recent messages that fit, never splitting the final user turn or a tool
 /// turn's call/result steps. Dropping the oldest turns is a disclosed, lossy fallback;
 /// summarization checkpoints arrive later. Images are capped per request too
-/// (`ImageBudget`): the newest turns keep theirs, older ones get placeholders.
+/// (`ImageBudget`): the newest turns keep theirs, older ones get placeholders. User
+/// messages get their send-time stamp from `env` (counted in the budget, never stored).
 #[allow(clippy::too_many_arguments)]
 pub fn compile(
     model: &str,
@@ -736,9 +752,10 @@ pub fn compile(
     images_supported: bool,
     tools: &ToolContext,
     profile: &PromptProfile,
+    env: &EnvContext,
 ) -> CompiledContext {
     let window = context_window.unwrap_or(DEFAULT_CONTEXT_TOKENS);
-    let system = system_for(profile, &tools.prompt);
+    let system = system_for(profile, &tools.prompt, &env.prompt);
     let budget = ((window as f32) * (1.0 - OUTPUT_RESERVE)) as u32;
     let mut used = estimate_tokens(&system) + tools.definition_tokens + 8;
 
@@ -747,13 +764,16 @@ pub fn compile(
     let mut kept_groups: Vec<Vec<Message>> = Vec::new();
     let mut processed = 0usize;
     let mut images = ImageBudget::default();
-    for m in history.iter().rev() {
-        let rendered = render_turn_within(m, contents, images_supported, &mut images);
+    for (i, m) in history.iter().enumerate().rev() {
+        let mut rendered = render_turn_within(m, contents, images_supported, &mut images);
         // Drop messages that render to nothing (e.g. an assistant turn that contains only
         // reasoning after Thinking blocks are excluded) — empty content confuses providers.
         if rendered.is_empty() {
             processed += 1;
             continue;
+        }
+        if let (Role::User, Some(Some(stamp))) = (m.role, env.stamps.get(i)) {
+            stamp_message(&mut rendered[0], stamp);
         }
         let cost: u32 = rendered.iter().map(message_tokens).sum();
         if used + cost > budget && !kept_groups.is_empty() {
@@ -830,7 +850,7 @@ mod tests {
 
     #[test]
     fn agent_prompt_appends_user_instructions_after_tools() {
-        let system = system_for(&agent(false, "Reply in French."), "\n\n## Tools\nT");
+        let system = system_for(&agent(false, "Reply in French."), "\n\n## Tools\nT", "");
         assert!(system.starts_with("You are Scout, a custom AI agent"));
         assert!(system.contains("Your purpose: Watches release notes."));
         let tools = system.find("## Tools").unwrap();
@@ -844,7 +864,7 @@ mod tests {
 
     #[test]
     fn unattended_agent_prompt_forbids_waiting_on_the_user() {
-        let system = system_for(&agent(true, ""), "");
+        let system = system_for(&agent(true, ""), "", "");
         assert!(system.contains("## Scheduled run"));
         assert!(system.contains("No additional instructions"));
         let c = compile(
@@ -856,6 +876,7 @@ mod tests {
             false,
             &no_tools(),
             &agent(true, "x"),
+            &EnvContext::default(),
         );
         assert!(c.request.system.unwrap().contains("Scout"));
     }
@@ -871,6 +892,7 @@ mod tests {
             false,
             &no_tools(),
             &PromptProfile::Default,
+            &EnvContext::default(),
         );
         assert_eq!(c.trimmed_messages, 0);
         assert_eq!(c.request.messages.len(), 4);
@@ -893,6 +915,7 @@ mod tests {
             false,
             &no_tools(),
             &PromptProfile::Default,
+            &EnvContext::default(),
         );
         assert!(c.trimmed_messages >= 6, "trimmed {}", c.trimmed_messages);
         assert_eq!(c.request.messages.first().unwrap().role, Role::User);
@@ -910,9 +933,156 @@ mod tests {
             false,
             &no_tools(),
             &PromptProfile::Default,
+            &EnvContext::default(),
         );
         assert_eq!(c.request.messages.len(), 1);
         assert_eq!(c.trimmed_messages, 0);
+    }
+
+    mod environment {
+        use super::*;
+        use crate::agent::environment::tests::{Toronto, FALL_BACK_MS};
+        use crate::agent::environment::Environment;
+
+        const MINUTE: i64 = 60_000;
+
+        fn env() -> Environment {
+            Environment {
+                os: Some("macOS 12.6".into()),
+                time_zone: Some("America/Toronto".into()),
+            }
+        }
+
+        fn run(history: &[Message], sent_at: &[i64], profile: &PromptProfile) -> CompiledContext {
+            let tools = ToolContext {
+                prompt: "\n\n## Tools\nT".into(),
+                definition_tokens: 0,
+            };
+            compile(
+                "m",
+                history,
+                Some(100_000),
+                None,
+                &HashMap::new(),
+                false,
+                &tools,
+                profile,
+                &EnvContext::new(&env(), sent_at.iter().copied(), &Toronto),
+            )
+        }
+
+        fn texts(c: &CompiledContext) -> Vec<String> {
+            c.request
+                .messages
+                .iter()
+                .map(|m| match &m.blocks[0] {
+                    ContentBlock::Text { text } => text.clone(),
+                    o => format!("{o:?}"),
+                })
+                .collect()
+        }
+
+        #[test]
+        fn section_sits_after_tools_and_before_agent_instructions() {
+            let section = env().prompt();
+            for tools in ["", "\n\n## Tools\nT"] {
+                let default = system_for(&PromptProfile::Default, tools, &section);
+                assert!(default.ends_with(&format!("{tools}{section}")));
+                let agent = system_for(&agent(false, "Reply in French."), tools, &section);
+                let at = agent.find("## Environment").unwrap();
+                assert!(agent.find("## Operating rules").unwrap() < at);
+                assert!(at < agent.find("## Agent instructions").unwrap());
+                assert!(agent.ends_with("Reply in French."));
+                if !tools.is_empty() {
+                    assert!(agent.find("## Tools").unwrap() < at);
+                }
+            }
+        }
+
+        #[test]
+        fn user_messages_carry_their_send_time_and_history_stays_stable() {
+            let history = turns(4, 10);
+            let at = [FALL_BACK_MS - MINUTE, 0, FALL_BACK_MS + 59 * MINUTE, 0];
+            let first = run(&history[..1], &at[..1], &PromptProfile::Default);
+            let later = run(&history, &at, &PromptProfile::Default);
+            assert_eq!(
+                first.request.system, later.request.system,
+                "the system prompt has no clock"
+            );
+            assert_eq!(first.request.messages[..], later.request.messages[..1]);
+            let texts = texts(&later);
+            // Before and after the fall-back, each with the offset of its own instant.
+            assert_eq!(
+                texts[0],
+                format!("[Sun 2026-11-01 01:59] {}", "x".repeat(10))
+            );
+            assert_eq!(texts[1], "x".repeat(10), "assistant turns are not stamped");
+            assert_eq!(
+                texts[2],
+                format!("[Sun 2026-11-01 01:59] {}", "x".repeat(10))
+            );
+            let agent = run(&history, &at, &agent(true, "x"));
+            assert!(agent.request.system.unwrap().contains("## Environment"));
+        }
+
+        #[test]
+        fn stamp_counts_toward_the_budget_and_leads_image_only_messages() {
+            let history = turns(1, 10);
+            let on = run(&history, &[0], &PromptProfile::Default);
+            let off = compile(
+                "m",
+                &history,
+                Some(100_000),
+                None,
+                &HashMap::new(),
+                false,
+                &ToolContext {
+                    prompt: "\n\n## Tools\nT".into(),
+                    definition_tokens: 0,
+                },
+                &PromptProfile::Default,
+                &EnvContext::default(),
+            );
+            assert!(on.estimated_input_tokens > off.estimated_input_tokens);
+
+            let mut m = Message {
+                role: Role::User,
+                blocks: vec![ContentBlock::Image {
+                    mime: "image/png".into(),
+                    data: "AA".into(),
+                }],
+            };
+            stamp_message(&mut m, "[Sun 2026-11-22 14:35]");
+            assert_eq!(
+                m.blocks[0],
+                ContentBlock::Text {
+                    text: "[Sun 2026-11-22 14:35]".into()
+                }
+            );
+            assert!(matches!(m.blocks[1], ContentBlock::Image { .. }));
+        }
+
+        #[test]
+        fn sharing_off_compiles_exactly_as_before() {
+            let history = turns(3, 10);
+            for profile in [PromptProfile::Default, agent(false, "Be brief.")] {
+                let c = compile(
+                    "m",
+                    &history,
+                    Some(8192),
+                    None,
+                    &HashMap::new(),
+                    false,
+                    &no_tools(),
+                    &profile,
+                    &EnvContext::default(),
+                );
+                let system = c.request.system.unwrap();
+                assert_eq!(system, system_for(&profile, "", ""));
+                assert!(!system.contains("## Environment"));
+                assert_eq!(c.request.messages, history);
+            }
+        }
     }
 
     #[test]
@@ -1269,6 +1439,7 @@ mod tests {
             false,
             &no_tools(),
             &PromptProfile::Default,
+            &EnvContext::default(),
         );
         // Kept groups always start on a user turn and never with a bare tool message.
         assert_eq!(c.request.messages.first().unwrap().role, Role::User);
@@ -1495,6 +1666,7 @@ mod tests {
             true,
             &no_tools(),
             &PromptProfile::Default,
+            &EnvContext::default(),
         );
         let per_turn: Vec<usize> = c
             .request

@@ -5,6 +5,7 @@
 pub mod context;
 mod coordinator;
 mod emitter;
+pub mod environment;
 mod recorder;
 pub mod tools;
 

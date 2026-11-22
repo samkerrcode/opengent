@@ -3,11 +3,23 @@
   import { describeError, type AppInfo } from "$lib/ipc/commands";
   import { loadAppInfo } from "$lib/app-info";
   import { copyText } from "$lib/clipboard";
+  import Switch from "$lib/components/Switch.svelte";
+  import { settingsStore } from "./settings-store.svelte";
   import SettingsGroup from "./SettingsGroup.svelte";
   import SettingRow from "./SettingRow.svelte";
 
   let info = $state<AppInfo | null>(null);
   let error = $state<string | null>(null);
+  let shareError = $state<string | null>(null);
+
+  async function setShareEnvironment(on: boolean) {
+    shareError = null;
+    try {
+      await settingsStore.update({ general: { share_environment: on } });
+    } catch (e) {
+      shareError = describeError(e);
+    }
+  }
   let copied = $state(false);
   let copiedTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -26,6 +38,22 @@
     copiedTimer = setTimeout(() => (copied = false), 1500);
   }
 </script>
+
+<SettingsGroup title="Models">
+  <SettingRow
+    label="Share environment with models"
+    description="Tells models your OS version, time zone and the local time each of your messages was sent, so they can answer questions about dates and give advice for your system. Applies to replies started after a change; turning it on also sends the send times of a chat's earlier messages."
+    error={shareError}
+  >
+    {#if settingsStore.settings}
+      <Switch
+        checked={settingsStore.settings.general.share_environment}
+        onchange={setShareEnvironment}
+        label="Share environment with models"
+      />
+    {/if}
+  </SettingRow>
+</SettingsGroup>
 
 <SettingsGroup title="About">
   {#if info}

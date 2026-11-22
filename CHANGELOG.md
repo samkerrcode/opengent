@@ -22,6 +22,10 @@ under *Unreleased*.
   are saved in `settings.json` in the data folder; a damaged file is set aside and the app
   starts with defaults.
 
+- **Chat**: Models now know your OS, time zone and when each of your messages was sent, so
+  they can answer date and time questions — in chats, agents and scheduled runs. On by
+  default; turn it off with *Share environment with models* in *Settings → General*.
+
 - **Platform**: Settings → Appearance lets you keep the app in light or dark mode regardless
   of the OS setting, or follow the system (the default). The change applies immediately and
   is remembered.

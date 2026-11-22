@@ -3,8 +3,8 @@ import { applyPatch } from "./settings-store.svelte";
 import type { Settings } from "$lib/ipc/commands";
 
 describe("applyPatch", () => {
-  // `font_size` stands in for a second field, to show the merge keeps fields it isn't given.
-  const base = { general: {}, appearance: { theme: "system", font_size: 14 } } as unknown as Settings;
+  // A second field in each section shows the merge keeps fields it isn't given.
+  const base = { general: { share_environment: true }, appearance: { theme: "system", font_size: 14 } } as unknown as Settings;
 
   it("replaces only the named fields and leaves the input untouched", () => {
     const next = applyPatch(base, { appearance: { theme: "dark" } }) as unknown as Record<string, Record<string, unknown>>;
@@ -14,7 +14,7 @@ describe("applyPatch", () => {
   });
 
   it("sets the theme the Appearance pane sends", () => {
-    const settings: Settings = { general: {}, appearance: { theme: "system" } };
+    const settings: Settings = { general: { share_environment: true }, appearance: { theme: "system" } };
     expect(applyPatch(settings, { appearance: { theme: "light" } }).appearance.theme).toBe("light");
     expect(settings.appearance.theme).toBe("system");
   });
