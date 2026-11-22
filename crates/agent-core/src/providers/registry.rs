@@ -17,6 +17,7 @@ use super::fake::FakeProvider;
 use super::gemini::{self, GeminiConfig, GeminiProvider};
 use super::openai::{self, OpenAiConfig, OpenAiProvider};
 use super::openai_compat::{normalize_base_url, OpenAiCompatConfig, OpenAiCompatProvider};
+use super::xai::{self, XAiConfig, XAiProvider};
 use super::{Capabilities, DiscoveredModel, ModelProvider};
 use crate::config::DataRoot;
 use crate::secrets::{SecretRef, SecretStore};
@@ -37,6 +38,8 @@ pub enum ProviderKind {
     GoogleGemini,
     /// Anthropic Claude via the Messages API with an Anthropic API key.
     Anthropic,
+    /// xAI Grok via the Responses API with an xAI API key.
+    XAi,
     Simulated,
 }
 
@@ -155,6 +158,24 @@ const ANTHROPIC: KindMeta = KindMeta {
     presets: &[],
 };
 
+const XAI: KindMeta = KindMeta {
+    capabilities: NATIVE_CAPS,
+    label: "xAI",
+    tagline: "Grok models",
+    description: "Grok models through xAI's Responses API, using an API key from the xAI \
+                  Console.",
+    default_base_url: Some(xai::DEFAULT_BASE_URL),
+    base_url_hint: "xAI API root, ending in /v1",
+    base_url_placeholder: xai::DEFAULT_BASE_URL,
+    model_placeholder: "e.g. grok-4.7, grok-4.3, grok-4.20-0309-non-reasoning",
+    requires_api_key: true,
+    api_key_hint: "Create a key in the xAI Console (console.x.ai → API keys).",
+    api_key_url: "https://console.x.ai/team/default/api-keys",
+    usage_option: false,
+    user_creatable: true,
+    presets: &[],
+};
+
 const SIMULATED: KindMeta = KindMeta {
     capabilities: Capabilities {
         streaming: true,
@@ -180,11 +201,12 @@ const SIMULATED: KindMeta = KindMeta {
 };
 
 impl ProviderKind {
-    pub const ALL: [ProviderKind; 5] = [
+    pub const ALL: [ProviderKind; 6] = [
         ProviderKind::OpenAiCompatible,
         ProviderKind::OpenAi,
         ProviderKind::GoogleGemini,
         ProviderKind::Anthropic,
+        ProviderKind::XAi,
         ProviderKind::Simulated,
     ];
 
@@ -194,6 +216,7 @@ impl ProviderKind {
             ProviderKind::OpenAi => &OPENAI,
             ProviderKind::GoogleGemini => &GOOGLE_GEMINI,
             ProviderKind::Anthropic => &ANTHROPIC,
+            ProviderKind::XAi => &XAI,
             ProviderKind::Simulated => &SIMULATED,
         }
     }
@@ -681,6 +704,11 @@ impl ProviderStore {
                 c.api_key = key;
                 Arc::new(AnthropicProvider::new(c, http))
             }
+            ProviderKind::XAi => {
+                let mut c = XAiConfig::new(id, base_url);
+                c.api_key = key;
+                Arc::new(XAiProvider::new(c, http))
+            }
         })
     }
 
@@ -1099,6 +1127,25 @@ mod tests {
         let caps = s.capabilities_for(&saved.id, "claude-sonnet-5-5").unwrap();
         assert!(caps.tools && caps.images, "name heuristic covers claude 5");
         let spec = ProviderKind::Anthropic.spec();
+        assert!(spec.requires_api_key && !spec.usage_option);
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn xai_requires_key_defaults_url_and_reports_family() {
+        let (s, tmp) = store();
+        let mut x = input("xAI");
+        x.kind = ProviderKind::XAi;
+        x.base_url = String::new();
+        x.api_key = None;
+        assert!(s.save(x.clone()).is_err(), "key required");
+        x.api_key = Some("xai-test".into());
+        let saved = s.save(x).unwrap();
+        assert_eq!(saved.base_url, xai::DEFAULT_BASE_URL);
+        assert_eq!(s.build(&saved.id).unwrap().family(), Some(xai::FAMILY));
+        let caps = s.capabilities_for(&saved.id, "grok-4.7").unwrap();
+        assert!(caps.tools && caps.streaming);
+        let spec = ProviderKind::XAi.spec();
         assert!(spec.requires_api_key && !spec.usage_option);
         std::fs::remove_dir_all(tmp).unwrap();
     }

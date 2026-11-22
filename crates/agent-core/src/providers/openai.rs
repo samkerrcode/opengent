@@ -1,5 +1,6 @@
-//! OpenAI adapter for the Responses API (`POST {base}/responses`), authenticated with an
-//! OpenAI API key.
+//! Adapter for the Responses API (`POST {base}/responses`). Written for OpenAI, whose API
+//! key authenticates it; xAI exposes the same protocol and plugs in its own `Dialect`
+//! (model-catalog rules and a separate opaque-state family).
 //!
 //! Requests are stateless (`store: false`): the full history is sent as an ordered list of
 //! input items (`message`, `reasoning`, `function_call`, `function_call_output`), which maps
@@ -30,6 +31,7 @@ use super::common::{
     push_bounded, read_json, request_timeout, send_checked, spawn_stream, status_error, str_at,
     CallIds, StreamEnd, MAX_TOOL_ARG_CHARS,
 };
+use super::registry::ProviderKind;
 use super::sse::SseEvent;
 use super::{
     opaque_within_limit, Capabilities, CompletionRequest, DiscoveredModel, ModelDiscovery,
@@ -43,6 +45,49 @@ pub const FAMILY: &str = "openai_responses";
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 /// Bounds per-stream bookkeeping against a hostile server inventing output indices.
 const MAX_OPEN_ITEMS: usize = 256;
+
+/// The vendor-specific side of the Responses protocol. The wire format is shared; vendors
+/// differ in their model catalog (names, capabilities, listing endpoint) and need separate
+/// opaque-state families so one vendor's encrypted reasoning is never replayed to another.
+#[derive(Debug)]
+pub struct Dialect {
+    /// The provider kind served; its `KindMeta` declares the adapter capabilities.
+    pub kind: ProviderKind,
+    /// Vendor name used in user-facing errors.
+    pub vendor: &'static str,
+    /// Opaque-state family tag. Stable: stored history references it and state is replayed
+    /// only to an adapter with the same tag.
+    pub family: &'static str,
+    /// Image mime types the vendor accepts; others are replaced by a text note instead of
+    /// failing the request. `None` = any.
+    pub image_mimes: Option<&'static [&'static str]>,
+    /// `GET {base}{models_path}` lists the provider's models.
+    pub models_path: &'static str,
+    /// Parses the listing document into chat models with metadata.
+    pub parse_models: fn(&Value) -> Vec<(String, DiscoveredModel)>,
+    /// Reasoning families accept `reasoning`/`include` options and return reasoning items;
+    /// sending the options to other models is rejected.
+    pub is_reasoning_model: fn(&str) -> bool,
+    /// Best-known input budget per family; `None` = unknown.
+    pub known_context_window: fn(&str) -> Option<u32>,
+    /// Best-known output cap per family; the compiler's budget is clamped to it.
+    /// `None` = don't clamp.
+    pub known_max_output: fn(&str) -> Option<u32>,
+}
+
+/// The OpenAI Responses dialect.
+pub static DIALECT: Dialect = Dialect {
+    kind: ProviderKind::OpenAi,
+    vendor: "OpenAI",
+    family: FAMILY,
+    image_mimes: None,
+    models_path: "/models",
+    parse_models,
+    is_reasoning_model,
+    known_context_window,
+    known_max_output,
+};
+
 /// Listed model families that are not text chat models on the Responses API.
 const NON_CHAT_MARKERS: &[&str] = &[
     "embedding",
@@ -67,13 +112,16 @@ const NON_CHAT_MARKERS: &[&str] = &[
 #[derive(Debug, Clone)]
 pub struct OpenAiConfig {
     pub id: String,
-    /// e.g. `https://api.openai.com/v1` — `/responses` and `/models` are appended.
+    /// e.g. `https://api.openai.com/v1` — `/responses` and the dialect's listing path are
+    /// appended.
     pub base_url: String,
     pub api_key: Option<String>,
     pub connect_timeout: Duration,
     /// Maximum silence between stream events. Generous: reasoning models can think for a
     /// long time before the first event when summaries are sparse.
     pub idle_timeout: Duration,
+    /// Which vendor's model catalog and opaque-state family this connection serves.
+    pub dialect: &'static Dialect,
 }
 
 impl OpenAiConfig {
@@ -84,6 +132,7 @@ impl OpenAiConfig {
             api_key: None,
             connect_timeout: Duration::from_secs(15),
             idle_timeout: Duration::from_secs(180),
+            dialect: &DIALECT,
         }
     }
 }
@@ -224,7 +273,7 @@ impl OpenAiProvider {
     }
 
     /// Builds the `responses.create` body. Pure, so the item mapping is unit-tested.
-    pub fn build_body(request: &CompletionRequest) -> Value {
+    pub fn build_body(dialect: &Dialect, request: &CompletionRequest) -> Value {
         let mut input: Vec<Value> = Vec::new();
         for m in &request.messages {
             match m.role {
@@ -235,6 +284,17 @@ impl OpenAiProvider {
                         .filter_map(|b| match b {
                             ContentBlock::Text { text } if !text.is_empty() => {
                                 Some(json!({ "type": "input_text", "text": text }))
+                            }
+                            ContentBlock::Image { mime, .. }
+                                if dialect
+                                    .image_mimes
+                                    .is_some_and(|ok| !ok.contains(&mime.as_str())) =>
+                            {
+                                Some(json!({ "type": "input_text", "text": format!(
+                                    "<attachment type=\"{mime}\" status=\"omitted\" reason=\"{} \
+                                     does not accept this image format\" />",
+                                    dialect.vendor
+                                ) }))
                             }
                             ContentBlock::Image { mime, data } => Some(json!({
                                 "type": "input_image",
@@ -274,7 +334,7 @@ impl OpenAiProvider {
                                 "arguments": arguments_string(arguments),
                             })),
                             b => {
-                                let Some(data) = own_opaque(b, FAMILY) else {
+                                let Some(data) = own_opaque(b, dialect.family) else {
                                     continue;
                                 };
                                 if let Some(item) = data
@@ -321,12 +381,12 @@ impl OpenAiProvider {
         if let Some(system) = request.system.as_deref().filter(|s| !s.is_empty()) {
             body["instructions"] = json!(system);
         }
-        if is_reasoning_model(&request.model) {
+        if (dialect.is_reasoning_model)(&request.model) {
             body["reasoning"] = json!({ "summary": "auto" });
             body["include"] = json!(["reasoning.encrypted_content"]);
         }
         if let Some(max) = request.max_output_tokens {
-            let max = known_max_output(&request.model).map_or(max, |cap| max.min(cap));
+            let max = (dialect.known_max_output)(&request.model).map_or(max, |cap| max.min(cap));
             body["max_output_tokens"] = json!(max);
         }
         if !request.tools.is_empty() {
@@ -356,11 +416,11 @@ impl ModelProvider for OpenAiProvider {
     }
 
     fn capabilities(&self) -> Capabilities {
-        super::registry::ProviderKind::OpenAi.capabilities()
+        self.config.dialect.kind.capabilities()
     }
 
     fn family(&self) -> Option<&'static str> {
-        Some(FAMILY)
+        Some(self.config.dialect.family)
     }
 
     fn stream(
@@ -372,11 +432,11 @@ impl ModelProvider for OpenAiProvider {
         let req = self
             .request(reqwest::Method::POST, "/responses")
             .header(reqwest::header::ACCEPT, "text/event-stream")
-            .json(&Self::build_body(request));
+            .json(&Self::build_body(self.config.dialect, request));
         let config = self.config.clone();
         spawn_stream(tx.clone(), cancel.clone(), async move {
             let resp = send_checked(req, &config.base_url, config.connect_timeout).await?;
-            let mut state = StreamState::default();
+            let mut state = StreamState::new(config.dialect);
             let end = pump_sse(resp, config.idle_timeout, &cancel, &tx, |ev, out| {
                 state.handle(ev, out)
             })
@@ -394,14 +454,16 @@ impl ModelProvider for OpenAiProvider {
     fn discover(&self) -> ProviderFuture<'_, ModelDiscovery> {
         Box::pin(async move {
             let resp = self
-                .request(reqwest::Method::GET, "/models")
+                .request(reqwest::Method::GET, self.config.dialect.models_path)
                 .send()
                 .await
                 .map_err(|e| map_transport(&self.config.base_url, e))?;
             if !resp.status().is_success() {
                 return Err(status_error(resp).await);
             }
-            let models = parse_models(&read_json(resp, "/models").await?);
+            let models = (self.config.dialect.parse_models)(
+                &read_json(resp, self.config.dialect.models_path).await?,
+            );
             Ok(ModelDiscovery {
                 models: models.iter().map(|(id, _)| id.clone()).collect(),
                 details: models.into_iter().collect(),
@@ -425,8 +487,9 @@ enum OpenItem {
 
 /// Responses SSE state machine. Calls and reasoning items are emitted when their item is
 /// done, so stored blocks keep the exact order the server produced them in.
-#[derive(Default)]
 struct StreamState {
+    /// Supplies the opaque-state family tag and the vendor name for errors.
+    dialect: &'static Dialect,
     open: std::collections::BTreeMap<u64, OpenItem>,
     call_ids: CallIds,
     /// A terminal event was handled (`Done` or an error was produced).
@@ -434,6 +497,15 @@ struct StreamState {
 }
 
 impl StreamState {
+    fn new(dialect: &'static Dialect) -> Self {
+        Self {
+            dialect,
+            open: Default::default(),
+            call_ids: CallIds::default(),
+            finished: false,
+        }
+    }
+
     fn handle(&mut self, ev: SseEvent, out: &mut Vec<ProviderEvent>) -> Result<()> {
         let Ok(v) = serde_json::from_str::<Value>(&ev.data) else {
             return Ok(()); // keep-alives and anything we don't model
@@ -508,9 +580,10 @@ impl StreamState {
                     ) {
                         "content_filter" => {
                             self.finished = true;
-                            return Err(Error::Provider(
-                                "the response was stopped by OpenAI's content filter".into(),
-                            ));
+                            return Err(Error::Provider(format!(
+                                "the response was stopped by {}'s content filter",
+                                self.dialect.vendor
+                            )));
                         }
                         _ => StopReason::MaxTokens,
                     }
@@ -522,15 +595,16 @@ impl StreamState {
                 self.finished = true;
                 let response = v.get("response").unwrap_or(&Value::Null);
                 return Err(Error::Provider(
-                    extract_error_message(response)
-                        .unwrap_or_else(|| "OpenAI reported the response failed".into()),
+                    extract_error_message(response).unwrap_or_else(|| {
+                        format!("{} reported the response failed", self.dialect.vendor)
+                    }),
                 ));
             }
             "error" => {
                 self.finished = true;
-                return Err(Error::Provider(
-                    extract_error_message(&v).unwrap_or_else(|| "OpenAI stream error".into()),
-                ));
+                return Err(Error::Provider(extract_error_message(&v).unwrap_or_else(
+                    || format!("{} stream error", self.dialect.vendor),
+                )));
             }
             // Lifecycle (`created`, `in_progress`), per-part bookkeeping, `*.done` echoes of
             // already-streamed text, and anything newer than this adapter.
@@ -570,7 +644,7 @@ impl StreamState {
             "reasoning" => {
                 if let Some(data) = reasoning_state(item) {
                     out.push(ProviderEvent::Opaque {
-                        provider: FAMILY,
+                        provider: self.dialect.family,
                         data,
                     });
                 }
@@ -578,7 +652,7 @@ impl StreamState {
             "message" => {
                 if let Some(phase) = item.get("phase").filter(|p| p.is_string()) {
                     out.push(ProviderEvent::Opaque {
-                        provider: FAMILY,
+                        provider: self.dialect.family,
                         data: json!({ "phase": phase }),
                     });
                 }
@@ -711,7 +785,7 @@ mod tests {
                 ],
             },
         ];
-        let body = OpenAiProvider::build_body(&request("gpt-5.2", messages));
+        let body = OpenAiProvider::build_body(&DIALECT, &request("gpt-5.2", messages));
         assert_eq!(body["model"], "gpt-5.2");
         assert_eq!(body["instructions"], "sys");
         assert_eq!(body["store"], false);
@@ -770,7 +844,7 @@ mod tests {
         req.system = None;
         req.tools.clear();
         req.max_output_tokens = None;
-        let body = OpenAiProvider::build_body(&req);
+        let body = OpenAiProvider::build_body(&DIALECT, &req);
         for key in [
             "instructions",
             "tools",
@@ -781,7 +855,7 @@ mod tests {
             assert!(body.get(key).is_none(), "{key}: {body}");
         }
         assert!(
-            OpenAiProvider::build_body(&request("gpt-5-chat-latest", vec![]))
+            OpenAiProvider::build_body(&DIALECT, &request("gpt-5-chat-latest", vec![]))
                 .get("reasoning")
                 .is_none()
         );
@@ -827,22 +901,25 @@ mod tests {
         let mut req = request("gpt-4o", vec![Message::text(Role::User, "hi")]);
         req.max_output_tokens = Some(262_144); // the compiler's 25%-of-1M budget
         assert_eq!(
-            OpenAiProvider::build_body(&req)["max_output_tokens"],
+            OpenAiProvider::build_body(&DIALECT, &req)["max_output_tokens"],
             16_384
         );
         req.model = "gpt-6-astra".into();
         assert_eq!(
-            OpenAiProvider::build_body(&req)["max_output_tokens"],
+            OpenAiProvider::build_body(&DIALECT, &req)["max_output_tokens"],
             128_000
         );
         req.model = "mystery".into();
         assert_eq!(
-            OpenAiProvider::build_body(&req)["max_output_tokens"],
+            OpenAiProvider::build_body(&DIALECT, &req)["max_output_tokens"],
             262_144
         );
         req.model = "gpt-5".into();
         req.max_output_tokens = Some(4_096);
-        assert_eq!(OpenAiProvider::build_body(&req)["max_output_tokens"], 4_096);
+        assert_eq!(
+            OpenAiProvider::build_body(&DIALECT, &req)["max_output_tokens"],
+            4_096
+        );
     }
 
     #[test]
@@ -875,7 +952,7 @@ mod tests {
     }
 
     fn run(events: Vec<Value>) -> (Vec<ProviderEvent>, Result<()>, bool) {
-        let mut state = StreamState::default();
+        let mut state = StreamState::new(&DIALECT);
         let mut out = Vec::new();
         for ev in events {
             if let Err(e) = state.handle(sse(ev), &mut out) {

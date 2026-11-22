@@ -9,6 +9,10 @@
 // - Models: mock-fast, mock-slow, mock-vision, and mock-reasoning (streams a reasoning
 //   summary and returns an encrypted reasoning item). The listing also carries a
 //   non-chat model (text-embedding-mock) to exercise discovery filtering.
+// - `GET /v1/language-models` answers in xAI's shape (input/output_modalities and
+//   capabilities.reasoning_effort) so the native xAI provider type can be exercised
+//   against this server too; it adds an image-generation entry (mock-imagine) that the
+//   xAI output_modalities filter drops.
 // - "use tool <name>" against a request with tools returns a function_call item; the
 //   follow-up must answer every call with a function_call_output.
 // - Replay validation: requests must use store:false, carry no item ids, replay every
@@ -148,6 +152,30 @@ createServer(async (req, res) => {
     // Sorts after the chat models, so "Save & test" never picks it as a default.
     const data = [...models, "text-embedding-mock"].map((id) => ({ id, object: "model", owned_by: "mock" }));
     return sendJson(res, 200, { object: "list", data });
+  }
+  if (req.method === "GET" && url.pathname === "/v1/language-models") {
+    if (req.headers.authorization === "Bearer bad") return apiError(res, 401, "Incorrect API key provided", "invalid_request_error", "invalid_api_key");
+    const languageModel = (id, inputs, effort) => ({
+      id,
+      object: "model",
+      owned_by: "mock",
+      created: 0,
+      version: "1.0",
+      input_modalities: inputs,
+      output_modalities: ["text"],
+      aliases: [],
+      ...(effort ? { capabilities: { reasoning_effort: ["low", "high"], default_reasoning_effort: "high" } } : {}),
+    });
+    return sendJson(res, 200, {
+      models: [
+        languageModel("mock-fast", ["text"]),
+        languageModel("mock-slow", ["text"]),
+        languageModel("mock-vision", ["text", "image"]),
+        languageModel("mock-reasoning", ["text"], true),
+        // An image-generation entry to exercise the output_modalities filter.
+        { id: "mock-imagine", object: "model", owned_by: "mock", created: 0, version: "1.0", input_modalities: ["text"], output_modalities: ["image"], aliases: [], image_price: 1 },
+      ],
+    });
   }
   if (req.method === "POST" && url.pathname === "/v1/responses") {
     let raw = "";

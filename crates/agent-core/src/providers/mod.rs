@@ -11,6 +11,7 @@ pub mod openai;
 pub mod openai_compat;
 pub mod registry;
 pub mod sse;
+pub mod xai;
 
 use std::collections::HashMap;
 use std::future::Future;

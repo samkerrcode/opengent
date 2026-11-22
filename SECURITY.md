@@ -101,6 +101,7 @@ ZDR contract) is settled between you and the vendor.
 | **OpenAI** | OpenAI | Responses API with `store: false` | 3 | **2**, once OpenAI has approved ZDR for your organization |
 | **Anthropic** | Anthropic | Messages API (stateless by design) | 3 | **2**, with a ZDR arrangement for your organization — see the model exceptions below |
 | **Google Gemini** | Google | Interactions API with `store: false` | 3 | 3 with an AI Studio key, the only credential supported — Google's documented ZDR path is Vertex AI, which OpenGent doesn't support |
+| **xAI** | xAI | Responses API with `store: false` | 3 | **2**, with Zero Data Retention turned on for your xAI team (a team admin can enable it in the xAI Console where offered) |
 | **Hosted gateway** — OpenRouter or another *OpenAI-compatible* service | The gateway and the vendors behind it | Chat Completions, stateless | 4 | Whatever the gateway's terms and routing guarantee |
 | **Company gateway** — an *OpenAI-compatible* endpoint your organization runs | Your organization, plus anything it forwards to | Chat Completions, stateless | Set by your organization | **1** when it serves internal models only |
 
@@ -128,6 +129,15 @@ Per provider:
   Vertex AI, which the adapter doesn't support. The other retention sources Google lists —
   Search/Maps grounding (30 days), the File API, explicit context caching and Live API
   session resumption — are features OpenGent doesn't use.
+- **xAI.** Every request sends `store: false`, so no response is stored for later retrieval
+  and `previous_response_id` chaining is never used. Encrypted reasoning items are returned
+  to the app and replayed from local storage instead of being referenced by id, which is the
+  pattern a ZDR team needs. `store: false` does **not** stop xAI's
+  [audit retention](https://docs.x.ai/developers/faq/security): by default xAI keeps all API
+  requests and responses, encrypted at rest, for 30 days for abuse review. Only team-level
+  Zero Data Retention removes that, and it applies to every key on the team. The adapter uses
+  none of the features ZDR disables or that hold data server-side: files, batches,
+  Collections and xAI-hosted tools (web/X search, code execution) stay off.
 - **OpenAI-compatible.** Stateless by protocol: the app sends only the request body. What the
   other side keeps is that server's policy. For the strongest guarantee, use a local model.
 
@@ -136,8 +146,9 @@ In every case:
 - "Stateless" and `store: false` mean **no API-level storage**. A vendor's own logging,
   abuse monitoring or legally mandated retention still applies under its data-usage terms and
   your account settings. Level 2 needs an agreement with the vendor; the app can't grant it.
-- Provider continuation state that must be replayed on the next turn (OpenAI encrypted
-  reasoning items, Gemini thought signatures, Anthropic thinking signatures) is stored locally
+- Provider continuation state that must be replayed on the next turn (OpenAI and xAI
+  encrypted reasoning items, Gemini thought signatures, Anthropic thinking signatures) is
+  stored locally
   with the message it came with, never crosses IPC or appears in search, and is only sent
   back to the provider family that issued it.
 - Provider traffic originates in Rust, never the webview. API keys live in the OS keychain.

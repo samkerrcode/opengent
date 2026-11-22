@@ -22,7 +22,7 @@ Each feature is described the same way:
 | | [Rich rendering](#rich-rendering) | Sanitized Markdown, code highlighting, KaTeX math, reasoning blocks |
 | | [Attachments](#attachments) | Text files, images (PNG, JPEG, GIF, WebP) and PDFs in a prompt — picker or drag-and-drop |
 | | [History & search](#history--search) | Chats saved locally, searchable, recovered after a crash |
-| [Models & providers](#models--providers) | [Provider types](#provider-types) | OpenAI, Google Gemini, Anthropic, any OpenAI-compatible server, Simulated |
+| [Models & providers](#models--providers) | [Provider types](#provider-types) | OpenAI, Google Gemini, Anthropic, xAI, any OpenAI-compatible server, Simulated |
 | | [Provider settings](#provider-settings) | Add, test and manage connections; keys go to the OS keychain |
 | | [Model list & hiding](#model-list--hiding) | Discovered models, per-model context windows, hide the ones you don't use |
 | | [Reasoning continuity](#reasoning-continuity) | A model's reasoning carries across tool calls |
@@ -193,6 +193,7 @@ A **provider** is a saved connection to a model service. You can add several of 
 | **OpenAI** | OpenAI Platform (Responses API) | API key | Summaries | Built-in table per model family |
 | **Google Gemini** | Google AI Studio (Interactions API) | API key | Thought summaries | Reported by Google |
 | **Anthropic** | Anthropic API (Messages API) | API key | Thinking summaries | Reported by Anthropic |
+| **xAI** | xAI API (Responses API) | API key | Detailed summaries | Reported reasoning, built-in context table |
 | **OpenAI-compatible** | Any Chat Completions server: Ollama, LM Studio, vLLM, llama.cpp, OpenRouter, a company gateway | Optional | When the server streams it | Set by you, or reported |
 | **Simulated** | Nothing — built in | None | — | — |
 
@@ -259,6 +260,38 @@ search, code execution), citations, batch and prompt caching aren't offered (cac
 the turn. On the Claude 5.1 generation, trimming old history can discard earlier reasoning —
 the turn still succeeds, with less continuity. Zero data retention is arranged with Anthropic
 per organization; see [SECURITY.md](../SECURITY.md#data-handling-by-provider).
+
+#### xAI
+
+**What.** Grok models with tools and image input; reasoning models keep their thinking
+across tool calls.
+
+**How to use.** Create a key in the [xAI Console](https://console.x.ai) → *API keys*.
+Choose the **xAI** tile, paste the key, **Save & test**, then pick a default model.
+
+**How it works.** xAI speaks the Responses protocol, so the adapter is the same one OpenAI
+uses with xAI's own endpoints and model rules. Requests are stateless (`store: false`):
+the full local history is sent each turn and no conversation is stored for later retrieval.
+xAI still keeps API requests for 30 days for abuse review unless your team has Zero Data
+Retention turned on; see [SECURITY.md](../SECURITY.md#data-handling-by-provider). Reasoning
+models return their thinking as encrypted reasoning items, which are kept locally and
+replayed so Grok stays aware of its earlier reasoning across turns. Models are listed with
+the vision and reasoning flags xAI reports; context windows come from a built-in table per
+model family and your own setting always wins. A single request may run up to 15 minutes,
+as xAI recommends for high-effort reasoning.
+
+**Limits.** API keys only — no management keys, OAuth or US regional endpoint preset
+(you can enter `https://us.api.x.ai/v1` as the base URL yourself). xAI's built-in tools
+(web and X search, code execution), file search, batches, prompt caching (planned for
+[Phase 6](../README.md#roadmap)) and `previous_response_id` chaining aren't offered.
+Reasoning effort is the model default. A dropped connection fails the turn. Grok's thinking
+content stays encrypted — only its summary (when returned) is readable. Images must be JPEG
+or PNG; GIF and WebP attachments are replaced by a note telling the model they were
+omitted. Models newer than the built-in table use your context-window setting, or 8K.
+**Cost:** xAI bills a request whose prompt reaches 200K tokens at about twice the normal
+rate for all of its tokens. OpenGent fills most of Grok's 500K–2M windows before trimming
+history, so a long chat crosses that threshold without warning — set a lower context window on the provider or
+model to stay under it.
 
 #### OpenAI-compatible
 
@@ -342,7 +375,7 @@ its hidden list.
 
 ### Reasoning continuity
 
-**What.** OpenAI, Gemini and Anthropic return protected reasoning data that must be sent back
+**What.** OpenAI, Gemini, Anthropic and xAI return protected reasoning data that must be sent back
 on the next request for the model to continue its line of thought across tool calls. OpenGent
 stores and replays it for you.
 
