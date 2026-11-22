@@ -22,6 +22,8 @@ under *Unreleased*.
   replies and tool calls, and replay each turn's encrypted reasoning items from local
   storage so Grok keeps its earlier thinking across turns and tool calls.
 
+## 0.2.2 — 2026-11-21
+
 ### Fixed
 
 - **Chat**: Display math no longer flashes a red KaTeX parse error while a reply or Thinking
