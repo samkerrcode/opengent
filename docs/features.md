@@ -710,7 +710,7 @@ after display scaling, so a 4K screen at 300% gets the same proportion as a 1080
 fills the usable area. Resize it freely once it is open.
 
 The conversation keeps a comfortable reading width at the default size. In a larger or
-maximized window it widens gradually, up to about 128 characters per line, so code, tables
+maximized window it widens gradually, up to about 160 characters per line, so code, tables
 and lists get more room. The message box keeps the same width at every size. Like the window,
 this is measured after display scaling: a 4K screen at 300% looks the same as a 1080p screen,
 and at 100% it gets the widest conversation.
