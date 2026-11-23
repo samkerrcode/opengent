@@ -38,43 +38,57 @@ It's built to be equally at home on a personal machine and in a business setting
 
 https://github.com/user-attachments/assets/e552658e-231b-44a2-97c2-7181deb878e3
 
+<p align="center">
+  <a href="#install">Install</a> ·
+  <a href="docs/features.md">Feature guide</a> ·
+  <a href="docs/cli.md">Command line</a> ·
+  <a href="#roadmap">Roadmap</a> ·
+  <a href="SECURITY.md">Security</a> ·
+  <a href="CHANGELOG.md">Changelog</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
+
 ## Highlights
 
-- **Model-agnostic.** Any OpenAI-compatible endpoint — Ollama, LM Studio, vLLM, llama.cpp,
-  OpenRouter, or a self-hosted gateway — plus native OpenAI, Google Gemini, Anthropic and
-  xAI, with a built-in simulated provider for trying the app without an account. Native
-  Bedrock and Hugging Face adapters are on the [roadmap](#native-providers).
+- **Model-agnostic.** Native adapters for OpenAI, Google Gemini, Anthropic and xAI, plus any
+  OpenAI-compatible endpoint — Ollama, LM Studio, vLLM, llama.cpp, OpenRouter, or a
+  self-hosted gateway. Switch models mid-chat. A built-in simulated provider lets you try
+  the app without an account. Bedrock and Hugging Face are on the
+  [roadmap](#native-providers).
 - **Real tools, real permissions.** Connect [MCP](https://modelcontextprotocol.io) servers over
-  stdio or Streamable HTTP. Each tool is *Allow*, *Ask*, or *Disable*; permissions are
-  enforced in Rust at dispatch, and an *Always allow* grant reverts to *Ask* if the tool's
-  definition changes.
+  stdio or Streamable HTTP, with OAuth sign-in or client credentials for remote servers.
+  Each tool is *Allow*, *Ask*, or *Disable*; permissions are enforced in Rust at dispatch,
+  and an *Always allow* grant reverts to *Ask* if the tool's definition changes.
 - **Transparent execution.** Every turn shows its real phases — generating, awaiting approval,
   calling a tool — with inspectable arguments and results. Nothing is simulated or hidden.
 - **Agents & schedules.** Package a role, default + fallback model, instructions and a tool
-  selection into an agent; run it on demand or once / every N minutes / on chosen weekdays,
+  selection into an agent; run it on demand, once, on an interval, or on chosen weekdays,
   with catch-up handling for runs missed while the app was closed.
 - **Command line.** An `opengent` binary lists your models and connections, runs prompts and
-  agents headlessly (text or JSON events, with the app's stored permissions), and manages
-  schedules — alongside the app or with it closed. See the [command-line guide](docs/cli.md)
-  for installing and using it.
+  agents headlessly (plain text or JSON events, under the app's stored permissions), and
+  manages schedules — alongside the app or with it closed. See the
+  [command-line guide](docs/cli.md).
 - **Polished chat.** Token-by-token streaming, sanitized Markdown with code highlighting and
-  KaTeX math, file, image and PDF attachments, search, and recovery of interrupted runs.
-- **Small, fast, local.** A ~6 MiB app on the OS webview. Data lives in `~/.opengent`, secrets in
-  the macOS Keychain / Windows Credential Manager, and there is no telemetry.
+  KaTeX math, collapsible reasoning blocks, file, image and PDF attachments, search,
+  light / dark themes, and recovery of interrupted runs.
+- **Small, fast, local.** A native app on the OS webview — the Windows installer is under
+  7 MB. Data lives in `~/.opengent`, secrets in the macOS Keychain / Windows Credential
+  Manager, and there is no telemetry.
 
-See **[docs/features.md](docs/features.md)** for the full feature guide.
+See the **[feature guide](docs/features.md)** for everything the app does and how to use it.
 
 ## Why OpenGent
 
 | | OpenGent | A typical vendor desktop app |
 |---|---|---|
-| **Models** | Any OpenAI-compatible server, local or hosted, plus native OpenAI, Gemini and Anthropic | The vendor's own models |
+| **Models** | Native OpenAI, Gemini, Anthropic and xAI, plus any OpenAI-compatible server, local or hosted | The vendor's own models |
 | **Account** | None | Vendor sign-in |
 | **Tool permissions** | Per tool (*Allow* / *Ask* / *Disable*), enforced in Rust; a grant reverts to *Ask* when the tool's definition changes | Varies by vendor |
 | **Scheduled agents** | Built in, run on your machine | Varies by vendor |
+| **Automation** | A headless `opengent` command line on the same data and permissions | Varies by vendor |
 | **Your data** | Chats on your disk, keys in the OS keychain, no telemetry | Usually stored in the vendor's cloud |
 | **Source** | Open, MIT OR Apache-2.0 | Usually closed |
-| **Footprint** | ~6 MiB on the OS webview | Often a bundled browser runtime |
+| **Footprint** | Uses the OS webview; installers are 7–17 MB | Often a bundled browser runtime |
 
 ## Install
 
@@ -103,12 +117,33 @@ Checksums are in `SHA256SUMS.txt`; see
    Ctrl+, on Windows, then **Providers**) and pick a tile:
    - **Local and free:** *OpenAI-compatible* → the **Ollama** or **LM Studio** preset (presets
      for vLLM / llama.cpp and OpenRouter are included too).
-   - **Hosted:** *OpenAI*, *Anthropic* or *Google Gemini* → paste an API key. Keys go straight
-     to the OS keychain.
+   - **Hosted:** *OpenAI*, *Anthropic*, *Google Gemini* or *xAI* (from 0.3.0) → paste an API
+     key. Keys go straight to the OS keychain.
 3. **Add tools (optional).** Open **Connections** and add MCP servers. You can paste a standard
    `{"mcpServers": {…}}` JSON config. Each tool is *Allow*, *Ask* or *Disable*.
+4. **Build an agent (optional).** Open **Agents** to save a role with its own model,
+   instructions and tools, then chat with it or put it on a schedule.
 
 To update, download and install the newer release; your data in `~/.opengent` is kept.
+
+### Command line (optional)
+
+The `opengent` command line runs prompts and agents without a window, using the providers,
+connections and permissions you set up in the app. It isn't in the release downloads yet
+([#65](https://github.com/samkerrcode/opengent/issues/65)), so it is built from source and
+needs only Rust:
+
+```sh
+git clone https://github.com/samkerrcode/opengent.git && cd opengent
+cargo install --path crates/cli --locked
+
+opengent models                                   # what can I run?
+opengent run --model simulated "hello"            # no account needed
+git diff --staged | opengent run --model "<provider>/<model>"
+```
+
+The [command-line guide](docs/cli.md) covers every option, scripting with `--json`, and
+troubleshooting.
 
 ## Status
 
@@ -117,6 +152,11 @@ the [Releases](https://github.com/samkerrcode/opengent/releases) page, and both 
 verified by hand. Phases 0–4 of the [roadmap](#roadmap) are complete and Phase 5 (native
 providers) is in progress. Installers are unsigned until signing and notarization land in Phase 7.
 Versioning and the release process are described in [docs/releasing.md](docs/releasing.md).
+
+This README describes `main`. A few things here are newer than the latest release and ship
+with **0.3.0**: the xAI provider, the `opengent` command line, the Settings dialog, the
+light / dark theme setting, and environment context for models. The *Unreleased* section of
+the [changelog](CHANGELOG.md) has the full list.
 
 ## Roadmap
 
@@ -127,13 +167,13 @@ detailed in [CHANGELOG.md](CHANGELOG.md); shipped features are documented in
 | Phase | Scope | Status |
 |---|---|---|
 | **0 – Foundation** | Cross-platform Tauri/Svelte build, product identity, typed IPC, run coordinator with real streaming/cancellation, native keychain + rmcp feasibility, CI | ✅ Done (macOS and Windows verified) |
-| **1 – Workspace & persistence** | SQLite (WAL) chat history, search, attachments as immutable content-hashed snapshots, restart recovery, command palette, inspector panel | ✅ Done (command palette and inspector deferred) |
+| **1 – Workspace & persistence** | SQLite (WAL) chat history, search, attachments as immutable content-hashed snapshots, restart recovery | ✅ Done |
 | **2 – Custom/local providers** | OpenAI-compatible Chat Completions streaming, provider/model settings, capability flags, incremental sanitized Markdown, context limits. *First usable chat.* | ✅ Done |
 | **3 – MCP agent** | stdio + Streamable HTTP servers, tool discovery, Allow / Ask / Disable permissions, approval UI, full loop: model → approval → tool → result → model. *Agent alpha.* | ✅ Done |
 | **4 – OAuth** | Browser sign-in (authorization code + PKCE, U2M) and client credentials (M2M) for MCP servers; token lifecycle in the keychain | ✅ Done |
 | **5 – Native providers** | One adapter per vendor protocol, each shipped independently — see [Native providers](#native-providers) | In progress (Gemini, OpenAI, Anthropic, xAI done; Bedrock, Hugging Face next) |
-| **6 – Provider context & caching** | Provider-aware prompt caching (OpenAI `prompt_cache_key`, Anthropic `cache_control`), cross-provider context projection, summarization checkpoints | |
-| **7 – Release hardening** | Performance profiling, accessibility, export/import, signing & notarization, installers | |
+| **6 – Provider context & caching** | Provider-aware prompt caching (OpenAI `prompt_cache_key`, Anthropic `cache_control`), cross-provider context projection, summarization checkpoints ([#57](https://github.com/samkerrcode/opengent/issues/57)) | |
+| **7 – Release hardening** | Performance profiling, accessibility, export/import, signing & notarization | |
 | **8 – Extensions** | Sub-agents, A2A, skills, hooks, model router — through the existing `ModelProvider` / tool / permission seams | |
 
 ### Native providers
@@ -160,29 +200,44 @@ numbered phases:
 |---|---|
 | **Encrypted chats** | A lock toggle in the composer prompts for a password. Every message in that chat is encrypted at rest with a strong, ideally quantum-resistant algorithm, and you have to unlock the chat again after navigating away or relaunching. |
 | **Security policies** | A policies menu with configurable data masking. Sensitive values are detected and replaced with placeholder tokens before a prompt leaves the app, the model is told to keep the tokens, and the original values are restored in the response. Each classification (phone numbers, SSN/TIN, email addresses) can be toggled separately. |
-| **Native tools & sandboxed runtime** | Built-in tools you can configure from the Tools menu: file creation and editing; a basic POSIX command set (curl, grep, glob, cat, …) running in an isolated per-chat filesystem (a headless container or an embedded runtime, whichever balances security and performance best); and web search over free, configurable sources and APIs. |
+| **Native tools & sandboxed runtime** | Built-in tools you can configure from the Tools menu: file creation and editing; a basic POSIX command set (curl, grep, glob, cat, …) running in an isolated per-chat filesystem (a headless container or an embedded runtime, whichever balances security and performance best); and web search over free, configurable sources and APIs. Design: [#49](https://github.com/samkerrcode/opengent/issues/49). |
 | **Image generation** | Text-to-image, with automatic detection of provider models that support it. |
+
+Also being designed in open issues, not yet approved: shipping the command line in the
+release downloads ([#65](https://github.com/samkerrcode/opengent/issues/65)), adding MCP
+servers from the command line ([#62](https://github.com/samkerrcode/opengent/issues/62)),
+publishing `agent-core` as a Rust agent SDK
+([#60](https://github.com/samkerrcode/opengent/issues/60)), and chart and HTML artifacts
+([#53](https://github.com/samkerrcode/opengent/issues/53),
+[#54](https://github.com/samkerrcode/opengent/issues/54)).
 
 Have an idea? Open a [feature or enhancement request](https://github.com/samkerrcode/opengent/issues/new/choose).
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how proposals are approved.
 
 ### Known limitations
 
-- There's no packaged end-to-end UI test; the webview path is verified manually with
-  `tauri:dev`.
-- The command palette and inspector panel from Phase 1 are deferred (sidebar search covers the
-  main need for now).
-- Implemented protocols: OpenAI-compatible, OpenAI (Responses API; no built-in tools such as
-  web search or code interpreter yet), Google Gemini (AI Studio API key; no Vertex AI, Google
-  built-in tools or images inside tool results yet) and Anthropic (API key; no Bedrock/Vertex,
-  Anthropic built-in tools or prompt caching yet) and xAI (API key; no server-side tools,
-  files or `previous_response_id` chaining yet). The remaining native adapters — Bedrock
-  and Hugging Face — arrive during [Phase 5](#native-providers).
-- Scheduled runs only fire while the app is open.
-- PDFs are rendered inside the app's process by the OS renderer, not in a sandboxed helper,
-  and its time budget is only checked between pages (see [SECURITY.md](SECURITY.md)).
-- Attachments are never deleted from disk, even when their chat is.
-- Installers are unsigned, so macOS and Windows warn on first launch (see [Install](#install)).
+- **Providers.** Each native adapter covers the vendor's core chat API with an API key;
+  vendor-hosted tools (web search, code execution and the like) aren't offered yet.
+  Per-provider limits are in the [feature guide](docs/features.md#provider-types):
+  - *OpenAI* — Responses API; no Azure OpenAI.
+  - *Google Gemini* — AI Studio keys only; no Vertex AI, and no images inside tool results.
+  - *Anthropic* — no Bedrock or Vertex, and no prompt caching until
+    [Phase 6](#roadmap).
+  - *xAI* — no file search or `previous_response_id` chaining.
+  - Bedrock and Hugging Face adapters arrive during [Phase 5](#native-providers).
+- **Schedules** only fire while the app is open; the command line manages schedules but
+  doesn't run them.
+- **Command line.** Not in the release downloads yet (build it from source), and it can't
+  attach files or change providers, connections or permissions.
+- **Context.** When a chat outgrows the model's context window, the oldest turns are
+  trimmed; there is no summarization yet.
+- **PDFs** are rendered inside the app's process by the OS renderer, not in a sandboxed
+  helper, and the time budget is only checked between pages (see [SECURITY.md](SECURITY.md)).
+- **Attachments** are never deleted from disk, even when their chat is.
+- **Installers** are unsigned, so macOS and Windows warn on first launch (see
+  [Install](#install)).
+- **Testing.** There's no packaged end-to-end UI test; the webview path is verified manually
+  with `tauri:dev`.
 
 ## Security
 
@@ -227,7 +282,9 @@ npm run gen:types                                  # regenerate TS bindings afte
 cargo test -p agent-core -- --ignored              # live tests (keychain; MCP needs the env var below)
 OPENGENT_TEST_MCP_COMMAND="npx -y @modelcontextprotocol/server-everything" \
   cargo test -p agent-core live_stdio_probe -- --ignored
-node scripts/dev/mock-openai-server.mjs              # fake OpenAI server at http://localhost:8787/v1
+node scripts/dev/mock-openai-server.mjs              # fake OpenAI / xAI server at http://localhost:8787/v1
+node scripts/dev/mock-gemini-server.mjs              # fake Gemini server at http://localhost:8789/v1
+node scripts/dev/mock-anthropic-server.mjs           # fake Anthropic server at http://localhost:8790/v1
 node scripts/dev/mock-mcp-server.mjs                 # stdio MCP server for manual testing
 node scripts/dev/mock-mcp-server.mjs --http 8788     # same server over Streamable HTTP at /mcp
 node scripts/dev/mock-mcp-server.mjs --many 50       # pad the catalog to test on-demand loading
@@ -241,7 +298,8 @@ Environment variable names derive from the product slug, so they follow a rename
 `product.json`.
 
 For a realistic local test server, run the mock OpenAI server and point a provider at
-`http://localhost:8787/v1`.
+`http://localhost:8787/v1`. The mock servers' models, keys and options are listed in
+[AGENTS.md](AGENTS.md#commands).
 
 Release installers are built by `.github/workflows/release.yml`, so a local
 `npm run tauri:build` (bundle in `target/release/bundle/`) is rarely needed. If you do run it,
@@ -257,10 +315,12 @@ Svelte UI  ──typed commands / ordered Channel──▶  Tauri host (src-taur
                                              agent-core (Rust, no UI deps) ◀────┘
                                              ├── config      product identity, data root
                                              ├── domain      ids, messages, run events
-                                             ├── agent       run coordinator, context, tool loop
+                                             ├── agent       run launcher, coordinator, context, tool loop
                                              ├── agents      user agents, schedule math
                                              ├── providers   ModelProvider trait + adapters
                                              ├── storage     SQLite (WAL), migrations, attachments
+                                             ├── settings    app-wide preferences
+                                             ├── pdf         PDF page rendering (OS engine)
                                              ├── secrets     SecretStore (Keychain / Cred. Manager)
                                              ├── http        shared rustls client
                                              └── mcp         rmcp client (stdio, Streamable HTTP)
@@ -273,6 +333,9 @@ Design rules (contributor conventions live in [AGENTS.md](AGENTS.md)):
   and the Tauri bundle; the name is not hardcoded anywhere else.
 - **Rust owns the truth.** The webview holds view state only. It has no shell, filesystem, or
   HTTP capability; everything goes through validated commands.
+- **One run path for every host.** The desktop app, its scheduler and the command line all
+  start runs through the same launcher in `agent-core`, so permissions and behavior are
+  identical with or without a window.
 - **Ordered streaming with backpressure.** Run events carry a schema version and a monotonic
   sequence number, are coalesced (~30 ms / 2 KiB) before crossing IPC, and are delivered over
   Tauri Channels. A dropped receiver cancels the run.
@@ -293,10 +356,10 @@ Design rules (contributor conventions live in [AGENTS.md](AGENTS.md)):
 | `crates/agent-core/` | Runtime library; fully testable without a window |
 | `crates/cli/` | The `opengent` command line (headless runs on the same runtime and data) |
 | `src-tauri/` | Tauri host: `AppState`, IPC commands, scheduler, capabilities, CSP, icons |
-| `src/` | Svelte app: `features/{chat,history,providers,mcp,agents}`, `lib/ipc`, `lib/state` |
+| `src/` | Svelte app: `features/{chat,history,providers,mcp,agents,settings}`, `lib/ipc`, `lib/state` |
 | `src/lib/generated/bindings/` | TypeScript types generated from Rust DTOs by ts-rs (committed; CI checks drift) |
 | `scripts/dev/` | Mock OpenAI (Chat Completions + Responses), Gemini, Anthropic and MCP servers for local testing |
-| `docs/` | Feature guide, release & versioning policy, and branding assets |
+| `docs/` | Feature guide, command-line guide, release & versioning policy, and branding assets |
 | `.github/workflows/ci.yml` | macOS + Windows checks and tests on every PR; unsigned release-profile build on pushes to `main` |
 | `.github/workflows/release.yml` | Tag-driven installers (universal macOS `.dmg`, Windows `.exe` + `.msi`) as a draft GitHub release |
 
