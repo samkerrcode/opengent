@@ -92,13 +92,23 @@ pub fn parse(args: &mut Args) -> Result<RunOptions> {
         if std::io::stdin().is_terminal() {
             return Err(CliError::Usage("give a prompt to run".into()));
         }
-        // Bounded: the launcher rejects anything over the limit anyway.
-        let mut buf = String::new();
+        // Bounded: a prompt of the allowed length is at most four bytes per character.
+        let limit = MAX_PROMPT_CHARS * 4;
+        let mut buf = Vec::new();
         std::io::stdin()
-            .take((MAX_PROMPT_CHARS * 4 + 4) as u64)
-            .read_to_string(&mut buf)
+            .take(limit as u64 + 1)
+            .read_to_end(&mut buf)
             .map_err(|e| CliError::Failed(format!("couldn't read the prompt from stdin: {e}")))?;
-        o.prompt = buf;
+        if buf.len() > limit {
+            return Err(CliError::Usage(format!(
+                "the prompt on stdin is too long (the limit is {MAX_PROMPT_CHARS} characters)"
+            )));
+        }
+        o.prompt = String::from_utf8(buf)
+            .map_err(|_| CliError::Usage("the prompt on stdin isn't valid UTF-8".into()))?;
+        if o.prompt.trim().is_empty() {
+            return Err(CliError::Usage("the prompt on stdin is empty".into()));
+        }
     }
     if o.no_mcp && (!o.mcp.is_empty() || !o.tools.is_empty()) {
         return Err(CliError::Usage(
@@ -166,7 +176,63 @@ async fn execute(
     result
 }
 
+/// The signals that ask the run to stop: Ctrl-C, and what a supervisor or a closing
+/// terminal sends (SIGTERM, SIGHUP; Ctrl-Break on Windows). Listening starts when this is
+/// created, so a signal that arrives while the run isn't waiting for one is kept for the
+/// next `recv` — without it the process would die with a reply still marked as streaming
+/// and its MCP server processes left behind.
+struct Interrupt {
+    #[cfg(unix)]
+    signals: [tokio::signal::unix::Signal; 3],
+    #[cfg(windows)]
+    ctrl_c: tokio::signal::windows::CtrlC,
+    #[cfg(windows)]
+    ctrl_break: tokio::signal::windows::CtrlBreak,
+}
+
+impl Interrupt {
+    #[cfg(unix)]
+    fn new() -> std::io::Result<Self> {
+        use tokio::signal::unix::{signal, SignalKind};
+        Ok(Self {
+            signals: [
+                signal(SignalKind::interrupt())?,
+                signal(SignalKind::terminate())?,
+                signal(SignalKind::hangup())?,
+            ],
+        })
+    }
+
+    #[cfg(windows)]
+    fn new() -> std::io::Result<Self> {
+        Ok(Self {
+            ctrl_c: tokio::signal::windows::ctrl_c()?,
+            ctrl_break: tokio::signal::windows::ctrl_break()?,
+        })
+    }
+
+    #[cfg(unix)]
+    async fn recv(&mut self) {
+        let [a, b, c] = &mut self.signals;
+        tokio::select! {
+            _ = a.recv() => {}
+            _ = b.recv() => {}
+            _ = c.recv() => {}
+        }
+    }
+
+    #[cfg(windows)]
+    async fn recv(&mut self) {
+        tokio::select! {
+            _ = self.ctrl_c.recv() => {}
+            _ = self.ctrl_break.recv() => {}
+        }
+    }
+}
+
 async fn execute_in(opts: &RunOptions, s: &RunServices, interactive: bool) -> Result<()> {
+    let mut interrupt = Interrupt::new()
+        .map_err(|e| CliError::Failed(format!("couldn't listen for Ctrl-C: {e}")))?;
     let chat = match &opts.chat {
         Some(raw) => {
             let id: ChatId = raw
@@ -247,7 +313,14 @@ async fn execute_in(opts: &RunOptions, s: &RunServices, interactive: bool) -> Re
                 .collect()
         }
     };
-    connect_servers(&s.mcp, &connect).await;
+    // Nothing is stored yet, so stopping here only has to end the sessions (`execute`).
+    tokio::select! {
+        () = connect_servers(&s.mcp, &connect) => {}
+        () = interrupt.recv() => {
+            note("cancelled");
+            return Err(CliError::Exit(EXIT_CANCELLED));
+        }
+    }
     let overrides = selection
         .map(|sel| sel.apply(base, &configs, &s.mcp))
         .transpose()?;
@@ -331,7 +404,7 @@ async fn execute_in(opts: &RunOptions, s: &RunServices, interactive: bool) -> Re
     let mut terminal = terminal;
     let interrupted = tokio::select! {
         _ = &mut terminal => false,
-        Ok(()) = tokio::signal::ctrl_c() => true,
+        () = interrupt.recv() => true,
     };
     if interrupted {
         s.coordinator.cancel(started.run_id);
@@ -339,7 +412,7 @@ async fn execute_in(opts: &RunOptions, s: &RunServices, interactive: bool) -> Re
         tokio::select! {
             _ = &mut terminal => {}
             _ = tokio::time::sleep(CANCEL_WAIT) => note("the run didn't stop in time"),
-            Ok(()) = tokio::signal::ctrl_c() => std::process::exit(EXIT_INTERRUPTED.into()),
+            () = interrupt.recv() => std::process::exit(EXIT_INTERRUPTED.into()),
         }
     }
     // The terminal event is sent after the final write was queued on the database worker,
@@ -347,13 +420,8 @@ async fn execute_in(opts: &RunOptions, s: &RunServices, interactive: bool) -> Re
     // log failures, so the exit code comes from what was actually stored.
     let id = started.assistant_message.id.clone();
     let status =
-        s.db.call(move |c| {
-            Ok(chats_repo::list_messages(c, chat_id)?
-                .into_iter()
-                .find(|m| m.id == id)
-                .map(|m| m.status))
-        })
-        .await?;
+        s.db.call(move |c| chats_repo::message_status(c, &id))
+            .await?;
     writer.finish(Duration::from_secs(2));
     match status {
         Some(MessageStatus::Complete) => Ok(()),
@@ -845,11 +913,14 @@ impl Writer {
     }
 
     fn approve(&mut self, run_id: agent_core::domain::RunId, call_id: &str) {
-        let call = self.calls.get(call_id).cloned();
-        let (server, tool, arguments) = match &call {
-            Some(c) => (c.server.clone(), c.tool.clone(), c.arguments.clone()),
-            None => (None, String::new(), serde_json::Value::Null),
+        // A call this process never saw announced can't be shown, so it can't be approved.
+        let Some(call) = self.calls.get(call_id).cloned() else {
+            note("denied a tool call that was never announced");
+            self.coordinator
+                .resolve_approval(run_id, call_id, ApprovalDecision::Deny);
+            return;
         };
+        let (server, tool, arguments) = (call.server, call.tool, call.arguments);
         let label = term::tool_label(server.as_deref(), &tool);
         if server
             .as_deref()

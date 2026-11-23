@@ -8,8 +8,10 @@ use agent_core::storage::agents as repo;
 use agent_core::storage::Db;
 use chrono::{Local, NaiveDateTime, NaiveTime, TimeZone};
 
+use std::fmt::Write as _;
+
 use crate::args::{self, Arg, Args};
-use crate::{no_more, CliError, Result};
+use crate::{no_more, term, CliError, Result};
 
 pub fn schedule(args: &mut Args) -> Result<()> {
     match args.word().as_deref() {
@@ -32,12 +34,13 @@ fn open_db() -> Result<(Db, agent_core::storage::ProcessLock)> {
 
 /// An agent by id, or by name (case-insensitive) when that is unambiguous.
 pub fn find_agent(agents: &[Agent], spec: &str) -> Result<Agent> {
+    let spec = spec.trim();
     if let Some(a) = agents.iter().find(|a| a.id.to_string() == spec) {
         return Ok(a.clone());
     }
     let named: Vec<&Agent> = agents
         .iter()
-        .filter(|a| a.name.eq_ignore_ascii_case(spec.trim()))
+        .filter(|a| a.name.eq_ignore_ascii_case(spec))
         .collect();
     match named.as_slice() {
         [a] => Ok((*a).clone()),
@@ -109,8 +112,8 @@ fn add(args: &mut Args) -> Result<()> {
         Ok((s, agent.name))
     })?;
     let (s, name) = schedule;
-    println!("{}", s.id);
-    crate::term::note(&format!(
+    term::out(&format!("{}\n", s.id))?;
+    term::note(&format!(
         "Scheduled agent \"{name}\" {}; next run {}.\nSchedules run while the desktop app is \
          open; one that comes due while it is closed is {} when it opens.",
         describe(&s.recurrence),
@@ -153,22 +156,20 @@ fn list(args: &mut Args) -> Result<()> {
         .filter(|s| filter.as_ref().is_none_or(|a| a.id == s.agent_id))
         .collect();
     if json {
-        let text = serde_json::to_string_pretty(&schedules)
-            .map_err(|e| CliError::Failed(e.to_string()))?;
-        println!("{text}");
-        return Ok(());
+        return crate::list::print_json(&schedules);
     }
     if schedules.is_empty() {
-        println!("No schedules.");
-        return Ok(());
+        return term::out("No schedules.\n");
     }
+    let mut text = String::new();
     for s in &schedules {
         let name = agents
             .iter()
             .find(|a| a.id == s.agent_id)
-            .map(|a| crate::term::sanitize(&a.name, false))
+            .map(|a| term::sanitize(&a.name, false))
             .unwrap_or_default();
-        println!(
+        let _ = writeln!(
+            text,
             "{}  {name}  {}  next {}{}",
             s.id,
             describe(&s.recurrence),
@@ -176,7 +177,7 @@ fn list(args: &mut Args) -> Result<()> {
             if s.enabled { "" } else { "  (off)" }
         );
     }
-    Ok(())
+    term::out(&text)
 }
 
 fn remove(args: &mut Args) -> Result<()> {
@@ -191,7 +192,7 @@ fn remove(args: &mut Args) -> Result<()> {
         .map_err(|_| CliError::Usage(format!("`{id}` is not a schedule id")))?;
     let (db, _lock) = open_db()?;
     db.call_blocking(move |c| repo::delete_schedule(c, id))?;
-    crate::term::note(&format!("Removed schedule {id}."));
+    term::note(&format!("Removed schedule {id}."));
     Ok(())
 }
 

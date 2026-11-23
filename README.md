@@ -55,7 +55,8 @@ https://github.com/user-attachments/assets/e552658e-231b-44a2-97c2-7181deb878e3
   with catch-up handling for runs missed while the app was closed.
 - **Command line.** An `opengent` binary lists your models and connections, runs prompts and
   agents headlessly (text or JSON events, with the app's stored permissions), and manages
-  schedules — alongside the app or with it closed.
+  schedules — alongside the app or with it closed. See the [command-line guide](docs/cli.md)
+  for installing and using it.
 - **Polished chat.** Token-by-token streaming, sanitized Markdown with code highlighting and
   KaTeX math, file, image and PDF attachments, search, and recovery of interrupted runs.
 - **Small, fast, local.** A ~6 MiB app on the OS webview. Data lives in `~/.opengent`, secrets in
@@ -233,6 +234,7 @@ node scripts/dev/mock-mcp-server.mjs --many 50       # pad the catalog to test o
 OPENGENT_DATA_DIR=/tmp/og ./target/release/opengent-desktop   # run against an alternate data root
 OPENGENT_LOG=debug npm run tauri:dev                          # tracing filter
 cargo build -p opengent-cli --release                         # headless CLI: ./target/release/opengent help
+cargo install --path crates/cli --locked                      # …or install it on PATH (docs/cli.md)
 ```
 
 Environment variable names derive from the product slug, so they follow a rename of

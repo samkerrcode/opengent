@@ -2813,6 +2813,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing-subscriber",
  "uuid",
 ]
 

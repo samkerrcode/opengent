@@ -33,6 +33,10 @@ Contributor guidelines: see CONTRIBUTING.md. Security scope: SECURITY.md.
   `Db::open_root` (process lock — only a process that is alone migrates and runs `recover_interrupted`; others need
   the exact schema) and the CLI loads `ProviderStore`/`McpStore`/`SettingsStore` with `load_read_only` (no writes, no
   pins, no accepted instructions). "One run per chat" is enforced in the database by `chats::start_turn`.
+  Results go to stdout only through `term::out` (never `print!`: it panics on a closed pipe), everything else through
+  `term::note`; untrusted text shown on a terminal passes `term::sanitize`. A run's exit code comes from the stored
+  reply (`chats::message_status`), and `run::Interrupt` (Ctrl-C, SIGTERM, SIGHUP) must be listening before anything is
+  spawned or stored. Logs go to stderr at `warn` unless `OPENGENT_LOG` (`config::log_env_var`, shared with the app) is set.
 - `src` – Svelte frontend. `src/lib/generated/bindings` are ts-rs outputs from Rust DTOs (committed; CI checks drift).
 
 ## Commands
@@ -127,3 +131,5 @@ Contributor guidelines: see CONTRIBUTING.md. Security scope: SECURITY.md.
   works / limits, plus its "At a glance" row — no code paths or change history) and add an entry under *Unreleased*
   in `CHANGELOG.md` (Added / Changed / Fixed / Security, prefixed with the area); move shipped roadmap items out of
   README "Proposed features". A new or changed provider also updates the SECURITY.md data-handling table.
+  A change to the CLI's commands, options, output, exit codes or environment variables also updates `docs/cli.md`
+  (the user guide: install, usage, scripting, troubleshooting) and the usage text in `crates/cli/src/main.rs`.

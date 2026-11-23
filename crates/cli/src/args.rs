@@ -7,7 +7,9 @@ use crate::CliError;
 
 #[derive(Debug, PartialEq)]
 pub enum Arg {
-    /// Flag name without dashes, and a value given inline as `--name=value`.
+    /// Flag name without its `--`, and a value given inline as `--name=value`. A short
+    /// option other than `-h`/`-V` keeps its dash (`-x`): none exist, so it is only ever
+    /// reported back as typed (`unknown`).
     Flag(String, Option<String>),
     Positional(String),
 }
@@ -30,6 +32,14 @@ impl Args {
         self.items.pop_front()
     }
 
+    /// Whether `--help` or `-h` is among the remaining options (before any `--`).
+    pub fn wants_help(&self) -> bool {
+        self.items
+            .iter()
+            .take_while(|a| *a != "--")
+            .any(|a| a == "--help" || a == "-h")
+    }
+
     pub fn next_arg(&mut self) -> Option<Arg> {
         let item = self.items.pop_front()?;
         if self.positional_only {
@@ -48,7 +58,7 @@ impl Args {
         Some(match item.as_str() {
             "-h" => Arg::Flag("help".into(), None),
             "-V" => Arg::Flag("version".into(), None),
-            s if s.len() > 1 && s.starts_with('-') => Arg::Flag(s[1..].to_owned(), None),
+            s if s.len() > 1 && s.starts_with('-') => Arg::Flag(s.to_owned(), None),
             _ => Arg::Positional(item),
         })
     }
@@ -74,7 +84,8 @@ pub fn switch(flag: &str, inline: Option<String>) -> Result<(), CliError> {
 }
 
 pub fn unknown(flag: &str) -> CliError {
-    CliError::Usage(format!("unknown option `--{flag}`"))
+    let dashes = if flag.starts_with('-') { "" } else { "--" };
+    CliError::Usage(format!("unknown option `{dashes}{flag}`"))
 }
 
 #[cfg(test)]
@@ -106,6 +117,28 @@ mod tests {
         let mut a = args(&["--", "--not-a-flag", "-x"]);
         assert_eq!(a.next_arg(), Some(Arg::Positional("--not-a-flag".into())));
         assert_eq!(a.next_arg(), Some(Arg::Positional("-x".into())));
+    }
+
+    #[test]
+    fn help_is_found_among_options_only() {
+        assert!(args(&["--agent", "a", "--help"]).wants_help());
+        assert!(args(&["-h"]).wants_help());
+        assert!(!args(&["--", "--help"]).wants_help());
+        assert!(!args(&["what does --helpful mean"]).wants_help());
+    }
+
+    #[test]
+    fn unknown_options_are_reported_as_typed() {
+        let message = |a: Option<Arg>| match a {
+            Some(Arg::Flag(f, _)) => match unknown(&f) {
+                CliError::Usage(m) => m,
+                e => panic!("{e:?}"),
+            },
+            a => panic!("{a:?}"),
+        };
+        let mut a = args(&["-x", "--bogus"]);
+        assert_eq!(message(a.next_arg()), "unknown option `-x`");
+        assert_eq!(message(a.next_arg()), "unknown option `--bogus`");
     }
 
     #[test]

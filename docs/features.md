@@ -689,7 +689,8 @@ connections, run a prompt (optionally with an agent) and print the reply, and ma
 schedules. It uses the same data folder, providers, connections, permissions and keychain
 entries as the app, and works with the app open or closed.
 
-**How to use.**
+**How to use.** Installing it, every option, scripting with `--json` and troubleshooting are
+in the [command-line guide](cli.md); in short:
 
 | Command | Does |
 |---|---|
@@ -698,6 +699,7 @@ entries as the app, and works with the app open or closed.
 | `opengent run [options] <prompt>` | Runs one prompt. The reply goes to stdout; notices and tool activity go to stderr. Without a prompt argument, piped stdin is read |
 | `opengent schedule add --agent <name> (--at … \| --every …) [--skip-missed] <prompt>` | Adds an agent schedule. `--at "2026-12-01 09:00"` or `--at 09:00` (local time); `--every 30m`, `2h`, `1d`, `weekdays@09:00`, `mon,thu@18:30`, `daily@07:15` |
 | `opengent schedule list [--agent <name>] [--json]` / `schedule remove <id>` | Lists or deletes schedules |
+| `opengent help` / `version` | Usage (also `--help` or `-h` after any command) and the version |
 
 `run` options:
 
@@ -716,7 +718,10 @@ entries as the app, and works with the app open or closed.
 - `--json` — prints every run event as one JSON line (the same events the app receives).
 
 Exit codes: `0` the reply was stored complete, `1` the run or command failed, `2` usage
-error, `3` cancelled (Ctrl-C, or the output was closed).
+error, `3` cancelled (Ctrl-C, a termination signal, or the output was closed).
+
+`OPENGENT_DATA_DIR` points it at another data folder, like the app. `OPENGENT_LOG` (for
+example `debug`) adds diagnostics on stderr; without it only warnings are shown.
 
 **How it works.**
 
@@ -727,6 +732,7 @@ error, `3` cancelled (Ctrl-C, or the output was closed).
   *Disable* is never offered. *Ask* prompts on the terminal for **allow once** or **deny**
   when stdin and stderr are both terminals and `--json` isn't used; otherwise the call is
   denied immediately and named on stderr. There is no *Always allow* on the command line.
+  A prompt whose arguments are too long to show in full says how much is hidden.
 - **Configuration is read-only.** `providers.json`, `mcp.json` and `settings.json` are never
   written, so the command line can't undo a change made in the app meanwhile; servers,
   permissions and settings are edited in the app. App settings such as *Share environment
@@ -740,16 +746,20 @@ error, `3` cancelled (Ctrl-C, or the output was closed).
 - **Agents** run unattended when nobody can answer prompts: they are told not to wait for the
   user.
 - **Output.** On a terminal, control characters and escape sequences in model output, tool
-  names and arguments are removed, so a tool can't disguise what an approval prompt asks or
-  rewrite earlier lines. Piped stdout and `--json` are passed through unchanged.
+  names and arguments are removed — and invisible characters in names — so a tool can't
+  disguise what an approval prompt asks or rewrite earlier lines. Piped stdout and `--json`
+  are passed through unchanged. A reader that goes away (`| head`) ends the command quietly.
 - **Ctrl-C** cancels the run and waits for the cancellation to be saved; a second Ctrl-C quits
-  at once.
+  at once. SIGTERM and SIGHUP (Ctrl-Break on Windows) do the same, so a run stopped by
+  `timeout` or a service manager is stored as cancelled rather than left unfinished. While
+  servers are still connecting, any of them stops the command before a chat is created.
 - `models` and `mcp list` read only the config files: no database, no connection, no keychain
   access, so they work while the database is busy or before it exists.
 
 **Limits.**
 
-- Not included in the installers yet; build it with `cargo build -p opengent-cli --release`.
+- Not included in the release downloads yet; build it from source
+  (`cargo install --path crates/cli --locked`, see the [guide](cli.md#install)).
 - On macOS a new or rebuilt (unsigned) binary triggers a keychain prompt the first time it
   reads a stored key.
 - Connections can't be added or changed, and nothing can be attached to a prompt.

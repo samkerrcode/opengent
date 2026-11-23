@@ -2,6 +2,8 @@
 //! keychain: both only read `providers.json` / `mcp.json`, so they work while the database
 //! is locked or before it exists.
 
+use std::fmt::Write as _;
+use std::io::IsTerminal;
 use std::sync::Arc;
 
 use agent_core::config::resolve_data_root;
@@ -12,7 +14,7 @@ use agent_core::secrets::MemorySecretStore;
 use serde::Serialize;
 
 use crate::args::{self, Arg, Args};
-use crate::{http_client, CliError, Result};
+use crate::{http_client, term, CliError, Result};
 
 fn json_only(args: &mut Args, extra: &mut dyn FnMut(&str) -> bool) -> Result<bool> {
     let mut json = false;
@@ -32,10 +34,9 @@ fn json_only(args: &mut Args, extra: &mut dyn FnMut(&str) -> bool) -> Result<boo
     Ok(json)
 }
 
-fn print_json<T: Serialize>(value: &T) -> Result<()> {
+pub fn print_json<T: Serialize>(value: &T) -> Result<()> {
     let text = serde_json::to_string_pretty(value).map_err(|e| CliError::Failed(e.to_string()))?;
-    println!("{text}");
-    Ok(())
+    term::out(&(text + "\n"))
 }
 
 #[derive(Serialize)]
@@ -92,11 +93,22 @@ pub fn models(args: &mut Args) -> Result<()> {
     if json {
         return print_json(&entries);
     }
-    let clean = |s: &str| crate::term::sanitize(s, false);
+    let clean = |s: &str| term::sanitize(s, false);
+    let mut text = String::new();
     for e in &entries {
-        println!("{}  ({}, id {})", clean(&e.name), e.label, clean(&e.id));
+        let _ = writeln!(
+            text,
+            "{}  ({}, id {})",
+            clean(&e.name),
+            e.label,
+            clean(&e.id)
+        );
         if e.models.is_empty() {
-            println!("  (no models listed — use `{}/<model>`)", clean(&e.name));
+            let _ = writeln!(
+                text,
+                "  (no models listed — use `{}/<model>`)",
+                clean(&e.name)
+            );
         }
         for m in &e.models {
             let mut tags = Vec::new();
@@ -111,13 +123,17 @@ pub fn models(args: &mut Args) -> Result<()> {
             } else {
                 format!("  [{}]", tags.join(", "))
             };
-            println!("  {}{tags}", clean(m));
+            let _ = writeln!(text, "  {}{tags}", clean(m));
         }
     }
-    println!(
-        "\nRun a prompt with: {} run --model \"<provider>/<model>\" \"…\"",
-        agent_core::config::product().slug
-    );
+    term::out(&text)?;
+    // A hint for a person; kept out of stdout so piped output is only the list.
+    if std::io::stdout().is_terminal() {
+        term::note(&format!(
+            "\nRun a prompt with: {} run --model \"<provider>/<model>\" \"…\"",
+            agent_core::config::product().slug
+        ));
+    }
     Ok(())
 }
 
@@ -186,12 +202,13 @@ pub fn mcp(args: &mut Args) -> Result<()> {
         return print_json(&entries);
     }
     if entries.is_empty() {
-        println!("No MCP connections. Add them in the app under Connections.");
-        return Ok(());
+        return term::out("No MCP connections. Add them in the app under Connections.\n");
     }
-    let clean = |s: &str| crate::term::sanitize(s, false);
+    let clean = |s: &str| term::sanitize(s, false);
+    let mut text = String::new();
     for e in &entries {
-        println!(
+        let _ = writeln!(
+            text,
             "{}  ({}, {}, default {}, id {})",
             clean(&e.name),
             e.transport,
@@ -200,14 +217,16 @@ pub fn mcp(args: &mut Args) -> Result<()> {
             clean(&e.id)
         );
         match &e.tools {
-            Some(t) if t.is_empty() => println!("  (no tools seen yet — connect it in the app)"),
+            Some(t) if t.is_empty() => {
+                text.push_str("  (no tools seen yet — connect it in the app)\n")
+            }
             Some(t) => {
                 for tool in t {
-                    println!("  {}  {}", clean(&tool.name), tool.permission);
+                    let _ = writeln!(text, "  {}  {}", clean(&tool.name), tool.permission);
                 }
             }
             None => {}
         }
     }
-    Ok(())
+    term::out(&text)
 }

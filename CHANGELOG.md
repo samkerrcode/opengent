@@ -21,7 +21,9 @@ under *Unreleased*.
   servers and tools with `--mcp` / `--tool` / `--no-mcp`, and add, list or remove agent
   schedules. It uses the app's data, keychain entries and stored tool permissions and never
   changes the app's configuration; *Ask* tools prompt on a terminal and are denied
-  otherwise. Build it with `cargo build -p opengent-cli`; it isn't in the installers yet.
+  otherwise. Ctrl-C or a termination signal cancels a run cleanly. It isn't in the release
+  downloads yet: build it with `cargo install --path crates/cli --locked` — see the
+  [command-line guide](docs/cli.md).
 
 - **Platform**: A Settings dialog for app-wide preferences, opened from *Settings* in the
   sidebar or with ⌘, / Ctrl+,. Its *General* section shows the version, the data folder and

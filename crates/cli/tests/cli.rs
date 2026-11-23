@@ -349,6 +349,140 @@ fn schedules_are_added_listed_and_removed_where_the_app_fires_them() {
     assert!(String::from_utf8_lossy(&o.stdout).contains("No schedules"));
 }
 
+#[test]
+fn help_follows_any_command_and_options_are_reported_as_typed() {
+    let r = root();
+    for args in [
+        &["help"][..],
+        &["run", "--help"],
+        &["run", "--model", "simulated", "-h"],
+        &["schedule", "--help"],
+        &["schedule", "add", "-h"],
+        &["mcp", "--help"],
+    ] {
+        let o = r.run(args);
+        assert_eq!(code(&o), 0, "{args:?}: {}", stderr(&o));
+        assert!(
+            String::from_utf8_lossy(&o.stdout).contains("Usage:"),
+            "{args:?}"
+        );
+    }
+    assert!(
+        !r.root.database_path().exists(),
+        "asking for help ran something"
+    );
+    let o = r.run(&["run", "-x", "hi"]);
+    assert_eq!(code(&o), 2);
+    assert!(stderr(&o).contains("unknown option `-x`"), "{}", stderr(&o));
+    // After `--` it is the prompt, not a request for help.
+    let o = r.run(&["run", "--model", "simulated", "--", "--help"]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    assert!(String::from_utf8_lossy(&o.stdout).contains("--help"));
+}
+
+/// `opengent models | head -1`: the reader is gone before anything is written.
+#[test]
+fn a_closed_stdout_is_not_a_crash() {
+    let r = root();
+    drop(r.db());
+    for args in [
+        &["help"][..],
+        &["version"],
+        &["models"],
+        &["models", "--json"],
+        &["mcp", "list"],
+        &["schedule", "list"],
+    ] {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let o = r
+            .cmd(args)
+            .stdout(writer)
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        assert_eq!(code(&o), 0, "{args:?}: {}", stderr(&o));
+        assert!(!stderr(&o).contains("panicked"), "{args:?}: {}", stderr(&o));
+    }
+}
+
+#[test]
+fn piped_listings_carry_no_hints() {
+    let r = root();
+    let o = r.run(&["models"]);
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(out.contains("simulated-1"), "{out}");
+    assert!(!out.contains("Run a prompt"), "{out}");
+    assert!(!stderr(&o).contains("Run a prompt"), "{}", stderr(&o));
+}
+
+#[test]
+fn the_prompt_can_come_from_stdin() {
+    use std::io::Write;
+    let r = root();
+    let piped = |input: &[u8]| {
+        let mut child = r
+            .cmd(&["run", "--model", "simulated"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let o = piped("summarize from stdin\n".as_bytes());
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    assert!(String::from_utf8_lossy(&o.stdout).contains("summarize from stdin"));
+    for (input, why) in [
+        (&b"  \n"[..], "empty"),
+        (&b"caf\xe9"[..], "valid UTF-8"),
+        (&vec![b'a'; 64 * 1024 * 4 + 1][..], "too long"),
+    ] {
+        let o = piped(input);
+        assert_eq!(code(&o), 2, "{why}");
+        assert!(stderr(&o).contains(why), "{}", stderr(&o));
+    }
+}
+
+/// What `timeout`, a service manager or a CI runner sends: the run is cancelled and stored
+/// as cancelled, not left streaming.
+#[cfg(unix)]
+#[test]
+fn sigterm_cancels_the_run_and_stores_it_cancelled() {
+    use std::io::{BufRead, Read};
+    let r = root();
+    let mut child = r
+        .cmd(&[
+            "run",
+            "--json",
+            "--model",
+            "simulated",
+            "a long enough reply",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut first = String::new();
+    out.read_line(&mut first).unwrap();
+    let killed = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    let mut rest = String::new();
+    out.read_to_string(&mut rest).unwrap();
+    let o = child.wait_with_output().unwrap();
+    assert_eq!(code(&o), 3, "cancelled: {}", stderr(&o));
+    assert!(
+        rest.lines().last().unwrap_or("").contains("\"cancelled\""),
+        "{rest}"
+    );
+    assert_eq!(reply_status(&r.db(), chat_of(&o)), MessageStatus::Cancelled);
+}
+
 // ---- mocks ----------------------------------------------------------------------------
 
 struct Req {
@@ -922,4 +1056,65 @@ async fn selection_limits_servers_and_tools_and_is_stored_on_the_chat() {
         "{}",
         stderr(&o)
     );
+}
+
+/// Ctrl-C while a server is still connecting: the process stops cleanly, before a chat or
+/// a turn exists.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_interrupt_while_connecting_stops_before_anything_is_stored() {
+    let app = App::new().await;
+    // A server that accepts the connection and never answers.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/mcp",
+        listener.local_addr().unwrap().port()
+    );
+    let (accepted_tx, accepted) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let _sock = listener.accept().await;
+        let _ = accepted_tx.send(());
+        std::future::pending::<()>().await;
+    });
+    app.mcp
+        .store()
+        .save(McpServerInput {
+            id: None,
+            name: "silent".into(),
+            transport: McpTransport::StreamableHttp,
+            command: String::new(),
+            env: Vec::new(),
+            cwd: None,
+            url,
+            headers: Vec::new(),
+            auth: Default::default(),
+            default_policy: ToolPolicy::Ask,
+            call_timeout_secs: 30,
+        })
+        .unwrap();
+    let model = app.model();
+    let child = app
+        .r
+        .cmd(&["run", "--model", &model, "hi"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    accepted.await.unwrap();
+    let killed = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    let o = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(code(&o), 3, "{}", stderr(&o));
+    assert!(stderr(&o).contains("cancelled"), "{}", stderr(&o));
+    let chats = app
+        .db
+        .call(|c| chats_repo::list_chats(c, 10))
+        .await
+        .unwrap();
+    assert!(chats.is_empty(), "nothing was stored");
 }

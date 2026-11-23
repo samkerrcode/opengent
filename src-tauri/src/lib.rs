@@ -145,11 +145,7 @@ pub fn run() {
 }
 
 fn init_tracing() {
-    let slug = agent_core::config::product()
-        .slug
-        .to_ascii_uppercase()
-        .replace('-', "_");
-    let filter = EnvFilter::try_from_env(format!("{slug}_LOG"))
+    let filter = EnvFilter::try_from_env(agent_core::config::log_env_var())
         .unwrap_or_else(|_| EnvFilter::new("info,agent_core=debug"));
     // Secrets never reach tracing fields; see agent_core::secrets.
     tracing_subscriber::fmt()

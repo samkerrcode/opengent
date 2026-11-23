@@ -44,6 +44,15 @@ pub fn data_dir_env_var() -> String {
     )
 }
 
+/// Name of the environment variable holding a host's tracing filter (e.g. `OPENGENT_LOG`),
+/// derived from the product slug like `data_dir_env_var`. Every host reads the same one.
+pub fn log_env_var() -> String {
+    format!(
+        "{}_LOG",
+        product().slug.to_ascii_uppercase().replace('-', "_")
+    )
+}
+
 /// Resolves and creates the data root. `override_path` wins, then the env var, then home.
 pub fn resolve_data_root(override_path: Option<&Path>) -> Result<DataRoot> {
     let path = match override_path {

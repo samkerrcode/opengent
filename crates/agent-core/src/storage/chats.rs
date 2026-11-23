@@ -441,6 +441,20 @@ pub fn has_streaming(conn: &Connection, chat_id: ChatId) -> Result<bool> {
     .map_err(sql_err)
 }
 
+/// The stored status of one message, or `None` if it no longer exists. How a host learns a
+/// run's durable outcome: read after the terminal event, it is queued behind the run's final
+/// write (see `launcher::launch`).
+pub fn message_status(conn: &Connection, message_id: &str) -> Result<Option<MessageStatus>> {
+    conn.query_row(
+        "SELECT status FROM messages WHERE id = ?1",
+        params![message_id],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(sql_err)
+    .map(|s| s.map(|s| MessageStatus::parse(&s)))
+}
+
 /// Stores a new turn in one write transaction: after a retry's truncation, the user message
 /// and the assistant placeholder the run streams into. Rejected with `RunBusy`, before
 /// anything changes, while another reply in the chat is streaming; SQLite serializes
@@ -628,6 +642,23 @@ mod tests {
         c.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         super::super::migrations::apply(&mut c).unwrap();
         c
+    }
+
+    #[test]
+    fn message_status_reads_one_row() {
+        let mut c = conn();
+        let chat = create_chat(&c, "x").unwrap();
+        let id = begin_assistant_message(&mut c, chat.id, RunId::new(), "p", "m").unwrap();
+        assert_eq!(
+            message_status(&c, &id).unwrap(),
+            Some(MessageStatus::Streaming)
+        );
+        finalize_assistant_message(&c, &id, &[], MessageStatus::Cancelled, None, None).unwrap();
+        assert_eq!(
+            message_status(&c, &id).unwrap(),
+            Some(MessageStatus::Cancelled)
+        );
+        assert_eq!(message_status(&c, "missing").unwrap(), None);
     }
 
     #[test]

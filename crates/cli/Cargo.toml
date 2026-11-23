@@ -18,6 +18,8 @@ serde_json.workspace = true
 # `signal`: Ctrl-C. Already in the lockfile through the desktop host.
 tokio = { workspace = true, features = ["rt-multi-thread", "signal", "sync", "time", "macros"] }
 chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
+# Core warnings on stderr, filtered like the desktop host's. Already in the lockfile through it.
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter", "std"] }
 
 [dev-dependencies]
 uuid = { workspace = true, features = ["v4"] }

@@ -15,8 +15,9 @@ mod term;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use agent_core::config::product;
+use agent_core::config::{data_dir_env_var, log_env_var, product};
 use agent_core::secrets::{MemorySecretStore, NativeSecretStore, SecretStore};
+use tracing_subscriber::EnvFilter;
 
 use args::{Arg, Args};
 
@@ -96,19 +97,38 @@ Usage:
       --every 30m | 2h | 1d | weekdays@09:00 | mon,thu@18:30 | daily@07:15
   {bin} schedule list [--agent <name>] [--json]
   {bin} schedule remove <id>
+  {bin} help | --help | -h        This text (also after any command)
+  {bin} version | --version | -V
 
 Schedules run while the desktop app is open.
 Exit codes: 0 completed, {EXIT_FAILED} failed, {EXIT_USAGE} usage error, {EXIT_CANCELLED} cancelled.
+Environment: {data_dir} (data folder), {log} (log filter for stderr, e.g. debug).
 ",
         version = product().version,
+        data_dir = data_dir_env_var(),
+        log = log_env_var(),
     )
+}
+
+/// The runtime's warnings (a write that failed, a setting that couldn't be read) go to
+/// stderr instead of nowhere; the app's log variable takes a `tracing` filter for more.
+/// Secrets never reach tracing fields; see `agent_core::secrets`.
+fn init_tracing() {
+    let filter = EnvFilter::try_from_env(log_env_var()).unwrap_or_else(|_| EnvFilter::new("warn"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_target(true)
+        .try_init();
 }
 
 fn dispatch(args: &mut Args) -> Result<()> {
     let Some(command) = args.word() else {
-        print!("{}", usage_text());
-        return Ok(());
+        return term::out(&usage_text());
     };
+    if args.wants_help() {
+        return term::out(&usage_text());
+    }
     match command.as_str() {
         "models" => list::models(args),
         "mcp" => match args.word().as_deref() {
@@ -118,13 +138,9 @@ fn dispatch(args: &mut Args) -> Result<()> {
         },
         "run" => run::run(run::parse(args)?),
         "schedule" => schedule::schedule(args),
-        "help" | "--help" | "-h" => {
-            print!("{}", usage_text());
-            Ok(())
-        }
+        "help" | "--help" | "-h" => term::out(&usage_text()),
         "--version" | "-V" | "version" => {
-            println!("{} {}", product().slug, product().version);
-            Ok(())
+            term::out(&format!("{} {}\n", product().slug, product().version))
         }
         other => Err(CliError::Usage(format!("unknown command `{other}`"))),
     }
@@ -157,6 +173,7 @@ pub fn http_client() -> Result<agent_core::http::Client> {
 }
 
 fn main() -> ExitCode {
+    init_tracing();
     let mut args = Args::new(std::env::args().skip(1));
     let code = match dispatch(&mut args) {
         Ok(()) => 0,
