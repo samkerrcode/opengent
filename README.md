@@ -53,6 +53,9 @@ https://github.com/user-attachments/assets/e552658e-231b-44a2-97c2-7181deb878e3
 - **Agents & schedules.** Package a role, default + fallback model, instructions and a tool
   selection into an agent; run it on demand or once / every N minutes / on chosen weekdays,
   with catch-up handling for runs missed while the app was closed.
+- **Command line.** An `opengent` binary lists your models and connections, runs prompts and
+  agents headlessly (text or JSON events, with the app's stored permissions), and manages
+  schedules — alongside the app or with it closed.
 - **Polished chat.** Token-by-token streaming, sanitized Markdown with code highlighting and
   KaTeX math, file, image and PDF attachments, search, and recovery of interrupted runs.
 - **Small, fast, local.** A ~6 MiB app on the OS webview. Data lives in `~/.opengent`, secrets in
@@ -158,7 +161,6 @@ numbered phases:
 | **Security policies** | A policies menu with configurable data masking. Sensitive values are detected and replaced with placeholder tokens before a prompt leaves the app, the model is told to keep the tokens, and the original values are restored in the response. Each classification (phone numbers, SSN/TIN, email addresses) can be toggled separately. |
 | **Native tools & sandboxed runtime** | Built-in tools you can configure from the Tools menu: file creation and editing; a basic POSIX command set (curl, grep, glob, cat, …) running in an isolated per-chat filesystem (a headless container or an embedded runtime, whichever balances security and performance best); and web search over free, configurable sources and APIs. |
 | **Image generation** | Text-to-image, with automatic detection of provider models that support it. |
-| **CLI** | An `opengent` binary (name derived from `product.json`) built on `agent-core` for headless use: list configured models, run a prompt, run a prompt with an agent, and schedule a prompt. |
 
 Have an idea? Open a [feature or enhancement request](https://github.com/samkerrcode/opengent/issues/new/choose).
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how proposals are approved.
@@ -230,6 +232,7 @@ node scripts/dev/mock-mcp-server.mjs --http 8788     # same server over Streamab
 node scripts/dev/mock-mcp-server.mjs --many 50       # pad the catalog to test on-demand loading
 OPENGENT_DATA_DIR=/tmp/og ./target/release/opengent-desktop   # run against an alternate data root
 OPENGENT_LOG=debug npm run tauri:dev                          # tracing filter
+cargo build -p opengent-cli --release                         # headless CLI: ./target/release/opengent help
 ```
 
 Environment variable names derive from the product slug, so they follow a rename of
@@ -246,10 +249,10 @@ the DMG step can fail when a previous build's image is still mounted (`hdiutil d
 ## Architecture
 
 ```
-Svelte UI  ──typed commands / ordered Channel──▶  Tauri host (src-tauri)
-                                                      │
-                                                      ▼
-                                             agent-core (Rust, no UI deps)
+Svelte UI  ──typed commands / ordered Channel──▶  Tauri host (src-tauri)    opengent CLI (crates/cli)
+                                                      │                         │
+                                                      ▼                         │
+                                             agent-core (Rust, no UI deps) ◀────┘
                                              ├── config      product identity, data root
                                              ├── domain      ids, messages, run events
                                              ├── agent       run coordinator, context, tool loop
@@ -286,6 +289,7 @@ Design rules (contributor conventions live in [AGENTS.md](AGENTS.md)):
 | `product.json` | Product identity (single source of truth) |
 | `scripts/product.mjs` | Generates `src/lib/generated/product.ts` and the Tauri config overlay |
 | `crates/agent-core/` | Runtime library; fully testable without a window |
+| `crates/cli/` | The `opengent` command line (headless runs on the same runtime and data) |
 | `src-tauri/` | Tauri host: `AppState`, IPC commands, scheduler, capabilities, CSP, icons |
 | `src/` | Svelte app: `features/{chat,history,providers,mcp,agents}`, `lib/ipc`, `lib/state` |
 | `src/lib/generated/bindings/` | TypeScript types generated from Rust DTOs by ts-rs (committed; CI checks drift) |

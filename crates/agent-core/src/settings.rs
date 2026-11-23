@@ -100,6 +100,8 @@ impl Validate for AppearanceSettings {
 pub struct SettingsStore {
     path: PathBuf,
     state: Mutex<State>,
+    /// See `load_read_only`.
+    read_only: bool,
 }
 
 struct State {
@@ -110,10 +112,21 @@ struct State {
 
 impl SettingsStore {
     pub fn load(data_root: &DataRoot) -> Result<Self> {
+        Self::load_with(data_root, false)
+    }
+
+    /// For a process that shares the data root with the app (the CLI): the same settings,
+    /// but nothing is ever written — a corrupt file is left in place (defaults are used) and
+    /// `update` fails.
+    pub fn load_read_only(data_root: &DataRoot) -> Result<Self> {
+        Self::load_with(data_root, true)
+    }
+
+    fn load_with(data_root: &DataRoot, read_only: bool) -> Result<Self> {
         let path = data_root.path().join(FILE_NAME);
         let (settings, raw) = match std::fs::read(&path) {
             Ok(bytes) => decode(&bytes).unwrap_or_else(|e| {
-                let aside = set_aside(&path);
+                let aside = (!read_only).then(|| set_aside(&path)).flatten();
                 tracing::warn!(error = %e, kept = ?aside, "settings file is corrupt; using defaults");
                 Default::default()
             }),
@@ -123,6 +136,7 @@ impl SettingsStore {
         Ok(Self {
             path,
             state: Mutex::new(State { settings, raw }),
+            read_only,
         })
     }
 
@@ -134,6 +148,11 @@ impl SettingsStore {
     /// stored one — validates and persists it, and returns the new settings. Unknown keys
     /// and invalid values are rejected; on any error nothing changes.
     pub fn update(&self, patch: &Value) -> Result<Settings> {
+        if self.read_only {
+            return Err(Error::InvalidInput(
+                "settings can only be changed in the app".into(),
+            ));
+        }
         let mut state = self.state.lock().unwrap();
         let next: Settings = apply_patch(&state.settings, patch)?;
         if next == state.settings {
@@ -149,6 +168,7 @@ impl SettingsStore {
     }
 
     fn persist(&self, doc: &Map<String, Value>) -> Result<()> {
+        debug_assert!(!self.read_only);
         let tmp = self.path.with_extension("json.tmp");
         let bytes = serde_json::to_vec_pretty(doc).map_err(|e| Error::Internal(e.to_string()))?;
         write_private(&tmp, &bytes)?;
@@ -313,6 +333,20 @@ mod tests {
             assert_eq!(std::fs::read(kept[0].path()).unwrap(), bad);
             std::fs::remove_file(kept[0].path()).unwrap();
         }
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn read_only_store_never_writes() {
+        let (root, tmp) = root();
+        std::fs::write(tmp.join(FILE_NAME), b"{ not json").unwrap();
+        let store = SettingsStore::load_read_only(&root).unwrap();
+        assert_eq!(store.get(), Settings::default());
+        assert_eq!(std::fs::read(tmp.join(FILE_NAME)).unwrap(), b"{ not json");
+        assert!(store
+            .update(&json!({ "general": { "share_environment": false } }))
+            .is_err());
+        assert_eq!(std::fs::read(tmp.join(FILE_NAME)).unwrap(), b"{ not json");
         std::fs::remove_dir_all(tmp).unwrap();
     }
 

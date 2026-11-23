@@ -2805,6 +2805,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "opengent-cli"
+version = "0.2.2"
+dependencies = [
+ "agent-core",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "opengent-desktop"
 version = "0.2.2"
 dependencies = [

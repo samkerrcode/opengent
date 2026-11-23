@@ -13,4 +13,4 @@ pub use attachments::{
     PreparedAttachment, MAX_ATTACHMENT_BYTES, MAX_PDF_BYTES,
 };
 pub use chats::{ChatDetail, ChatSummary, MessageStatus, StoredMessage};
-pub use db::Db;
+pub use db::{Db, ProcessLock};

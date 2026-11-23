@@ -35,6 +35,7 @@ Each feature is described the same way:
 | [Agents](#agents) | [Agents](#agents) | Reusable role with models, instructions and its own tools |
 | | [Fallback model](#fallback-model) | A second model takes over when the first can't start |
 | | [Schedules](#schedules) | Run an agent once, on an interval, or on weekdays |
+| [Command line](#command-line) | [`opengent`](#command-line-opengent) | List models and connections, run prompts and agents, manage schedules from a terminal |
 | [Settings](#settings) | [Settings dialog](#settings-dialog) | App-wide preferences and About details in one dialog, ⌘, / Ctrl+, |
 | [Privacy & data](#privacy--data) | [Local data](#local-data) | Everything under `~/.opengent`; no account, no telemetry |
 | | [Secrets](#secrets) | API keys and tokens only in the OS credential store |
@@ -676,6 +677,89 @@ you see the run live and can answer its approval prompts.
 
 **Limits.** Schedules fire only while the app is open. A tool that needs approval is denied
 after 15 minutes if nobody answers. No OS notifications yet.
+
+---
+
+## Command line
+
+### Command line (`opengent`)
+
+**What.** A standalone `opengent` binary for headless use: list your models and MCP
+connections, run a prompt (optionally with an agent) and print the reply, and manage agent
+schedules. It uses the same data folder, providers, connections, permissions and keychain
+entries as the app, and works with the app open or closed.
+
+**How to use.**
+
+| Command | Does |
+|---|---|
+| `opengent models [--json]` | Lists providers and their models; *active* marks the model last picked in the app |
+| `opengent mcp list [--tools] [--json]` | Lists connections (name, id, transport, on/off, default permission); `--tools` adds each server's last known tools and their connection-level permission |
+| `opengent run [options] <prompt>` | Runs one prompt. The reply goes to stdout; notices and tool activity go to stderr. Without a prompt argument, piped stdin is read |
+| `opengent schedule add --agent <name> (--at … \| --every …) [--skip-missed] <prompt>` | Adds an agent schedule. `--at "2026-12-01 09:00"` or `--at 09:00` (local time); `--every 30m`, `2h`, `1d`, `weekdays@09:00`, `mon,thu@18:30`, `daily@07:15` |
+| `opengent schedule list [--agent <name>] [--json]` / `schedule remove <id>` | Lists or deletes schedules |
+
+`run` options:
+
+- `--model <provider>/<model>` — provider name (case-insensitive) or id, then the model;
+  `--model <provider>` uses its default model. Without it, a continued chat keeps its model,
+  and a new one uses the model last picked in the app.
+- `--agent <name>` — runs with an agent: its models, servers, tools and permissions.
+- `--chat <id>` — continues a chat. A new chat's id is printed on stderr. Chats made from the
+  command line are ordinary chats in the app's sidebar.
+- `--mcp <server>` (repeatable) — only these connections are on for the chat.
+  `--tool <server>/<tool>` (repeatable) — only these tools of that server; its other tools are
+  disabled for the chat. `--no-mcp` — no connections. These work like the chat's ⚒ Tools
+  menu and are saved on the chat, so the app shows what the run used and a later `--chat` run
+  keeps it. They only select: they never set Allow or Ask, and can't turn on a server or tool
+  that is off in Connections. Agent runs can't use them.
+- `--json` — prints every run event as one JSON line (the same events the app receives).
+
+Exit codes: `0` the reply was stored complete, `1` the run or command failed, `2` usage
+error, `3` cancelled (Ctrl-C, or the output was closed).
+
+**How it works.**
+
+- **Permissions** are the ones stored in the app. A tool set to *Allow* (in Connections, a
+  chat's Tools menu or an agent) runs without a prompt, also without a terminal — as long as
+  its definition matches the one approved in the app. A tool whose definition changed, or that
+  the app has never listed, asks instead and a note says to review it in Connections.
+  *Disable* is never offered. *Ask* prompts on the terminal for **allow once** or **deny**
+  when stdin and stderr are both terminals and `--json` isn't used; otherwise the call is
+  denied immediately and named on stderr. There is no *Always allow* on the command line.
+- **Configuration is read-only.** `providers.json`, `mcp.json` and `settings.json` are never
+  written, so the command line can't undo a change made in the app meanwhile; servers,
+  permissions and settings are edited in the app. App settings such as *Share environment
+  with models* apply to command-line runs.
+- **MCP**: only the servers the run can use are connected, for at most 30 seconds; a server
+  that isn't ready by then is left out with a warning. Nothing is connected when the model
+  can't call tools. Server instructions the app hasn't accepted are left out.
+- **Sharing the data folder.** One reply is generated per chat at a time, across the app and
+  every command-line process: a second run in a busy chat fails with a clear message. Opening
+  the app during a command-line run (or the reverse) doesn't interrupt the other's reply.
+- **Agents** run unattended when nobody can answer prompts: they are told not to wait for the
+  user.
+- **Output.** On a terminal, control characters and escape sequences in model output, tool
+  names and arguments are removed, so a tool can't disguise what an approval prompt asks or
+  rewrite earlier lines. Piped stdout and `--json` are passed through unchanged.
+- **Ctrl-C** cancels the run and waits for the cancellation to be saved; a second Ctrl-C quits
+  at once.
+- `models` and `mcp list` read only the config files: no database, no connection, no keychain
+  access, so they work while the database is busy or before it exists.
+
+**Limits.**
+
+- Not included in the installers yet; build it with `cargo build -p opengent-cli --release`.
+- On macOS a new or rebuilt (unsigned) binary triggers a keychain prompt the first time it
+  reads a stored key.
+- Connections can't be added or changed, and nothing can be attached to a prompt.
+- Schedules are stored for the app, which fires them while it is open; there is no headless
+  scheduler.
+- If a process is killed mid-reply while another one keeps the data folder open, that chat
+  reports busy until a process next starts alone.
+- OAuth token refreshes aren't coordinated between processes: if the app and a command-line
+  run refresh the same connection at the same moment against a server that rotates refresh
+  tokens, one of them can be signed out (sign in again in the app).
 
 ---
 

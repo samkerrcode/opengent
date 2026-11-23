@@ -1,7 +1,8 @@
 use rusqlite::Connection;
 
 use super::db::sql_err;
-use crate::Result;
+use crate::config::product;
+use crate::{Error, Result};
 
 /// Append-only. Each entry runs inside a transaction and bumps `PRAGMA user_version`.
 const MIGRATIONS: &[&str] = &[
@@ -107,10 +108,32 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE attachment_pages_cascade RENAME TO attachment_pages;",
 ];
 
+/// The schema version this build creates and understands.
+pub fn latest() -> i64 {
+    MIGRATIONS.len() as i64
+}
+
+fn version(conn: &Connection) -> Result<i64> {
+    conn.query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(sql_err)
+}
+
+fn newer_schema(found: i64) -> Error {
+    Error::Io(format!(
+        "the database was created by a newer version of {} (schema {found}; this build knows \
+         {}) — update this app",
+        product().display_name,
+        latest()
+    ))
+}
+
+/// Upgrades the schema to `latest()`. A database from a newer build is refused rather than
+/// used: this build can't know what the newer schema means.
 pub fn apply(conn: &mut Connection) -> Result<()> {
-    let current: i64 = conn
-        .query_row("PRAGMA user_version", [], |r| r.get(0))
-        .map_err(sql_err)?;
+    let current = version(conn)?;
+    if current > latest() {
+        return Err(newer_schema(current));
+    }
     for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
         let tx = conn.transaction().map_err(sql_err)?;
         tx.execute_batch(sql).map_err(sql_err)?;
@@ -120,6 +143,21 @@ pub fn apply(conn: &mut Connection) -> Result<()> {
         tracing::info!(version = i + 1, "applied database migration");
     }
     Ok(())
+}
+
+/// For a process that shares the database with another one: the schema must already be
+/// exactly this build's, since only a process that is alone may migrate it.
+pub fn require_current(conn: &Connection) -> Result<()> {
+    match version(conn)? {
+        v if v == latest() => Ok(()),
+        v if v > latest() => Err(newer_schema(v)),
+        v => Err(Error::Io(format!(
+            "the database is in use by an older version of {} (schema {v}; this build needs \
+             {}) — close it and try again",
+            product().display_name,
+            latest()
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -135,6 +173,25 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v as usize, MIGRATIONS.len());
+    }
+
+    #[test]
+    fn a_newer_or_older_schema_is_refused_where_it_must_be() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn).unwrap();
+        require_current(&conn).unwrap();
+        conn.pragma_update(None, "user_version", latest() + 1)
+            .unwrap();
+        let e = apply(&mut conn).unwrap_err().to_string();
+        assert!(e.contains("newer version"), "{e}");
+        assert!(require_current(&conn)
+            .unwrap_err()
+            .to_string()
+            .contains("newer version"));
+        conn.pragma_update(None, "user_version", latest() - 1)
+            .unwrap();
+        let e = require_current(&conn).unwrap_err().to_string();
+        assert!(e.contains("older version"), "{e}");
     }
 
     /// A database that stopped at v4 (built by a pre-v5 dev build) upgrades cleanly:

@@ -1,0 +1,24 @@
+[package]
+name = "opengent-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Headless command line for the agent runtime"
+
+# The binary name is literal here; `tests/cli.rs` checks it matches the `product.json` slug.
+[[bin]]
+name = "opengent"
+path = "src/main.rs"
+
+[dependencies]
+agent-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# `signal`: Ctrl-C. Already in the lockfile through the desktop host.
+tokio = { workspace = true, features = ["rt-multi-thread", "signal", "sync", "time", "macros"] }
+chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
+
+[dev-dependencies]
+uuid = { workspace = true, features = ["v4"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util"] }

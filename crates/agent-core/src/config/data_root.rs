@@ -28,6 +28,11 @@ impl DataRoot {
     pub fn database_path(&self) -> PathBuf {
         self.path.join("data.sqlite3")
     }
+
+    /// Every process using this data root holds a lock on this file (see `ProcessLock`).
+    pub fn lock_path(&self) -> PathBuf {
+        self.path.join("process.lock")
+    }
 }
 
 /// Name of the environment variable that overrides the data root, derived from the product slug

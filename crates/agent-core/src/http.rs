@@ -7,6 +7,9 @@ use std::time::Duration;
 use crate::config::product;
 use crate::{Error, Result};
 
+/// Re-exported so hosts can hold a client without depending on `reqwest` themselves.
+pub use reqwest::Client;
+
 static INIT: Once = Once::new();
 
 /// Installs the `ring` crypto provider for rustls. Idempotent; safe to call from tests.

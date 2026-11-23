@@ -413,6 +413,8 @@ pub struct ProviderStore {
     http: reqwest::Client,
     /// Per-provider clients for custom/skip TLS modes (see `connection`).
     tls_clients: Mutex<HashMap<String, TlsClient>>,
+    /// See `load_read_only`.
+    read_only: bool,
 }
 
 fn api_key_ref(id: &str) -> Result<SecretRef> {
@@ -453,6 +455,35 @@ impl ProviderStore {
         secrets: Arc<dyn SecretStore>,
         http: reqwest::Client,
     ) -> Result<Self> {
+        Self::load_with(data_root, secrets, http, false)
+    }
+
+    /// For a process that shares the data root with the app (the CLI): `providers.json` is
+    /// rewritten whole on every change, so a second writer would overwrite the app's edits.
+    /// Every mutator of a read-only store fails before touching the file or the keychain.
+    pub fn load_read_only(
+        data_root: &DataRoot,
+        secrets: Arc<dyn SecretStore>,
+        http: reqwest::Client,
+    ) -> Result<Self> {
+        Self::load_with(data_root, secrets, http, true)
+    }
+
+    fn writable(&self) -> Result<()> {
+        if self.read_only {
+            return Err(Error::InvalidInput(
+                "providers can only be changed in the app".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn load_with(
+        data_root: &DataRoot,
+        secrets: Arc<dyn SecretStore>,
+        http: reqwest::Client,
+        read_only: bool,
+    ) -> Result<Self> {
         let path = data_root.path().join("providers.json");
         let mut state = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice::<StoreFile>(&bytes)
@@ -471,10 +502,12 @@ impl ProviderStore {
             secrets,
             http,
             tls_clients: Mutex::new(HashMap::new()),
+            read_only,
         })
     }
 
     fn persist(&self, state: &StoreFile) -> Result<()> {
+        self.writable()?;
         let persisted = StoreFile {
             version: 1,
             providers: state
@@ -514,6 +547,7 @@ impl ProviderStore {
     }
 
     pub fn set_active(&self, selection: ActiveSelection) -> Result<()> {
+        self.writable()?;
         self.get(&selection.provider_id)?;
         if selection.model.trim().is_empty() {
             return Err(Error::InvalidInput("model is required".into()));
@@ -524,6 +558,7 @@ impl ProviderStore {
     }
 
     pub fn save(&self, input: ProviderInput) -> Result<ProviderConfig> {
+        self.writable()?;
         let meta = input.kind.meta();
         if !meta.user_creatable || input.id.as_deref() == Some(SIMULATED_PROVIDER_ID) {
             return Err(Error::InvalidInput(
@@ -637,6 +672,7 @@ impl ProviderStore {
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {
+        self.writable()?;
         if id == SIMULATED_PROVIDER_ID {
             return Err(Error::InvalidInput(
                 "the simulated provider cannot be removed".into(),
@@ -658,6 +694,7 @@ impl ProviderStore {
 
     /// Overwrites the cached vision flags (tests and manual overrides).
     pub fn update_vision_models(&self, id: &str, vision_models: Vec<String>) -> Result<()> {
+        self.writable()?;
         let mut state = self.state.lock().unwrap();
         let p = state
             .providers
@@ -796,6 +833,9 @@ impl ProviderStore {
         let discovery = self.instantiate(&config)?.discover().await?;
         if config.kind == ProviderKind::Simulated {
             return Ok(config.models);
+        }
+        if self.read_only {
+            return Ok(discovery.models);
         }
         let mut state = self.state.lock().unwrap();
         let p = state

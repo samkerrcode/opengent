@@ -480,6 +480,13 @@ pub struct McpStore {
     path: PathBuf,
     state: Mutex<StoreFile>,
     secrets: Arc<dyn SecretStore>,
+    /// See `load_read_only`.
+    read_only: bool,
+}
+
+/// Returned by mutators of a read-only store.
+fn read_only_error() -> Error {
+    Error::InvalidInput("connections can only be changed in the app".into())
 }
 
 fn secret_ref(server_id: &str, scope: &str, name: &str) -> Result<SecretRef> {
@@ -543,6 +550,35 @@ fn entries_changed(inputs: &[KeyValueInput], old: &[KeyValueEntry]) -> bool {
 
 impl McpStore {
     pub fn load(data_root: &DataRoot, secrets: Arc<dyn SecretStore>) -> Result<Self> {
+        Self::load_with(data_root, secrets, false)
+    }
+
+    /// For a process that shares the data root with the app (the CLI). `mcp.json` is loaded
+    /// once and rewritten whole, so a second writer would undo the app's changes (a revoked
+    /// grant written back) or lose its own. A read-only store writes nothing and also
+    /// creates no new trust in memory: it never pins a tool definition (an `AlwaysAllow`
+    /// without a matching stored pin resolves to `Ask`) and never accepts server
+    /// instructions; it only verifies against what the app stored. Its other mutators fail.
+    pub fn load_read_only(data_root: &DataRoot, secrets: Arc<dyn SecretStore>) -> Result<Self> {
+        Self::load_with(data_root, secrets, true)
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    fn writable(&self) -> Result<()> {
+        if self.read_only {
+            return Err(read_only_error());
+        }
+        Ok(())
+    }
+
+    fn load_with(
+        data_root: &DataRoot,
+        secrets: Arc<dyn SecretStore>,
+        read_only: bool,
+    ) -> Result<Self> {
         let path = data_root.path().join("mcp.json");
         let mut state = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice::<StoreFile>(&bytes)
@@ -561,10 +597,12 @@ impl McpStore {
             path,
             state: Mutex::new(state),
             secrets,
+            read_only,
         })
     }
 
     fn persist(&self, state: &StoreFile) -> Result<()> {
+        self.writable()?;
         let tmp = self.path.with_extension("json.tmp");
         let bytes = serde_json::to_vec_pretty(state).map_err(|e| Error::Internal(e.to_string()))?;
         write_private(&tmp, &bytes)?;
@@ -592,6 +630,7 @@ impl McpStore {
     }
 
     pub fn set_settings(&self, settings: ToolSettings) -> Result<()> {
+        self.writable()?;
         let mut state = self.state.lock().unwrap();
         state.settings = settings;
         self.persist(&state)
@@ -648,6 +687,8 @@ impl McpStore {
         match state.signatures.get(server_id).and_then(|m| m.get(tool)) {
             Some(pinned) if pinned == current => ToolPolicy::AlwaysAllow,
             Some(_) => ToolPolicy::Ask,
+            // Pin-on-first-use creates trust; only the app may do that.
+            None if self.read_only => ToolPolicy::Ask,
             None => {
                 state
                     .signatures
@@ -704,6 +745,9 @@ impl McpStore {
     /// Pins (or, without a signature, unpins) a scope grant the user just approved against
     /// the definition they saw — the approval card's "Always allow".
     pub fn pin_scoped(&self, scope_key: &str, server_id: &str, tool: &str, sig: Option<String>) {
+        if self.read_only {
+            return;
+        }
         let mut state = self.state.lock().unwrap();
         let pins = state
             .scoped_signatures
@@ -725,7 +769,12 @@ impl McpStore {
     /// copies the **global** pin when there is one — so copying a connection's Allow can't
     /// launder a changed tool into a fresh pin — else pins the current definition. Pins of
     /// tools that are no longer allowed are dropped.
+    /// A read-only store keeps the stored pins as they are: a grant the app never pinned
+    /// asks.
     pub fn sync_scope_pins(&self, scope_key: &str, grants: Vec<(String, String, Option<String>)>) {
+        if self.read_only {
+            return;
+        }
         let mut state = self.state.lock().unwrap();
         let old = state
             .scoped_signatures
@@ -759,6 +808,9 @@ impl McpStore {
 
     /// Drops a deleted chat's or agent's pins.
     pub fn forget_scope(&self, scope_key: &str) {
+        if self.read_only {
+            return;
+        }
         let mut state = self.state.lock().unwrap();
         if state.scoped_signatures.remove(scope_key).is_some() {
             if let Err(e) = self.persist(&state) {
@@ -769,6 +821,9 @@ impl McpStore {
 
     /// Startup cleanup: drops pins of scopes for which `keep` is false.
     pub fn prune_scopes(&self, keep: impl Fn(&str) -> bool) {
+        if self.read_only {
+            return;
+        }
         let mut state = self.state.lock().unwrap();
         let before = state.scoped_signatures.len();
         state.scoped_signatures.retain(|k, _| keep(k));
@@ -800,6 +855,7 @@ impl McpStore {
         policy: ToolPolicy,
         signature: Option<String>,
     ) -> Result<()> {
+        self.writable()?;
         let mut state = self.state.lock().unwrap();
         let s = state
             .servers
@@ -818,6 +874,7 @@ impl McpStore {
     }
 
     pub fn set_default_policy(&self, server_id: &str, policy: ToolPolicy) -> Result<()> {
+        self.writable()?;
         let mut state = self.state.lock().unwrap();
         let s = state
             .servers
@@ -833,6 +890,7 @@ impl McpStore {
 
     /// Drops every per-tool override so all tools follow the server default.
     pub fn reset_tool_policies(&self, server_id: &str) -> Result<()> {
+        self.writable()?;
         let mut state = self.state.lock().unwrap();
         let s = state
             .servers
@@ -879,7 +937,12 @@ impl McpStore {
 
     /// Records the server's current tool list (bounded) and pins newly discovered tools
     /// covered by an `AlwaysAllow` policy. Writes to disk only when something changed.
+    /// A read-only store ignores the list: caching it would pin newly listed default-allowed
+    /// tools.
     pub fn set_catalog(&self, server_id: &str, tools: Vec<KnownTool>) -> Result<()> {
+        if self.read_only {
+            return Ok(());
+        }
         let tools: Vec<KnownTool> = tools
             .into_iter()
             .filter(|t| !t.name.is_empty() && t.name.chars().count() <= MAX_CACHED_NAME)
@@ -929,7 +992,12 @@ impl McpStore {
     /// server that adds them later is treated like one that changed them. A changed
     /// version keeps the old pin and is excluded until the user accepts it. Writes only
     /// when something changed.
+    /// A read-only store ignores it, so instructions never seen by the app stay out of the
+    /// system prompt.
     pub fn set_server_meta(&self, server_id: &str, meta: ServerMeta) -> Result<()> {
+        if self.read_only {
+            return Ok(());
+        }
         let mut state = self.state.lock().unwrap();
         if !state.servers.iter().any(|s| s.id == server_id) {
             return Ok(());
@@ -977,6 +1045,7 @@ impl McpStore {
     /// reviewed. Accepting fails if the server's instructions changed since (a reconnect
     /// can't slip a different version past the review).
     pub fn set_instructions_included(&self, server_id: &str, shown: Option<&str>) -> Result<()> {
+        self.writable()?;
         let mut state = self.state.lock().unwrap();
         if !state.servers.iter().any(|s| s.id == server_id) {
             return Err(Error::NotFound(format!("MCP server `{server_id}`")));
@@ -1004,6 +1073,8 @@ impl McpStore {
     /// Validated upsert. `env`/`headers` inputs with `secret` + empty value keep the stored
     /// secret (mirrors provider API key semantics); a missing row deletes it.
     pub fn save(&self, input: McpServerInput) -> Result<McpServerConfig> {
+        // Before any keychain write.
+        self.writable()?;
         let name = input.name.trim();
         if name.is_empty() || name.len() > 64 {
             return Err(Error::InvalidInput("name must be 1–64 characters".into()));
@@ -1317,6 +1388,7 @@ impl McpStore {
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {
+        self.writable()?;
         let mut state = self.state.lock().unwrap();
         let before = state.servers.len();
         let removed = state
@@ -1369,6 +1441,7 @@ impl McpStore {
     }
 
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<()> {
+        self.writable()?;
         let mut state = self.state.lock().unwrap();
         let s = state
             .servers

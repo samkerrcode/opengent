@@ -654,14 +654,8 @@ async fn execute_call<S: RunSink>(
             };
         }
         ToolPolicy::Ask => {
-            emitter.emit(RunEventPayload::Phase {
-                phase: RunPhase::AwaitingApproval,
-            });
-            emit_now!(ToolCallStatus::PendingApproval);
-            if emitter.is_disconnected() {
-                cancel.cancel();
-                return CallEnd::Abort;
-            }
+            // Registered before the prompt is announced, so a host may answer as soon as it
+            // sees `PendingApproval` (the CLI denies at once when nobody can answer).
             let (tx, mut rx) = oneshot::channel::<ApprovalDecision>();
             approvals.lock().expect("approvals lock").insert(
                 call.id.clone(),
@@ -672,6 +666,15 @@ async fn execute_call<S: RunSink>(
                     tool: tool_name.clone(),
                 },
             );
+            emitter.emit(RunEventPayload::Phase {
+                phase: RunPhase::AwaitingApproval,
+            });
+            emit_now!(ToolCallStatus::PendingApproval);
+            if emitter.is_disconnected() {
+                approvals.lock().expect("approvals lock").remove(&call.id);
+                cancel.cancel();
+                return CallEnd::Abort;
+            }
             enum Waited {
                 Decision(ApprovalDecision),
                 TimedOut,

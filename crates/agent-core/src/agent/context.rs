@@ -38,7 +38,7 @@ pub fn system_prompt() -> String {
 
 /// Bump whenever the agent system prompt text changes (cache key, like
 /// `SYSTEM_PROMPT_VERSION`).
-pub const AGENT_PROMPT_VERSION: u16 = 2;
+pub const AGENT_PROMPT_VERSION: u16 = 3;
 
 /// A user-configured agent as seen by the prompt compiler.
 #[derive(Debug, Clone)]
@@ -47,7 +47,8 @@ pub struct AgentPrompt {
     pub description: String,
     /// The user's own system prompt; appended last, verbatim.
     pub instructions: String,
-    /// Started by a schedule: nobody is watching, so the agent must not wait on the user.
+    /// Nobody is watching (a schedule or a non-interactive CLI run), so the agent must not
+    /// wait on the user.
     pub unattended: bool,
 }
 
@@ -91,8 +92,9 @@ pub fn agent_system_prompt(agent: &AgentPrompt) -> String {
     );
     if agent.unattended {
         s.push_str(
-            "\n\n## Scheduled run\nThis conversation was started automatically by a schedule. \
-             The user is not watching and cannot answer questions right now. Complete the task \
+            "\n\n## Unattended run\nThis conversation was started automatically (for example by \
+             a schedule or a script). The user is not watching and cannot answer questions right \
+             now. Complete the task \
              end to end in this response: make reasonable assumptions and state them briefly, \
              do not ask follow-up questions, and finish with a concise summary of what you did \
              and what you found. Tool calls that need approval may be denied if nobody \
@@ -859,13 +861,13 @@ mod tests {
             .unwrap();
         assert!(tools < instr, "user instructions come last");
         assert!(system.ends_with("Reply in French."));
-        assert!(!system.contains("## Scheduled run"));
+        assert!(!system.contains("## Unattended run"));
     }
 
     #[test]
     fn unattended_agent_prompt_forbids_waiting_on_the_user() {
         let system = system_for(&agent(true, ""), "", "");
-        assert!(system.contains("## Scheduled run"));
+        assert!(system.contains("## Unattended run"));
         assert!(system.contains("No additional instructions"));
         let c = compile(
             "m",

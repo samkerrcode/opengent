@@ -10,7 +10,7 @@ use agent_core::secrets::{MemorySecretStore, SecretStore};
 use agent_core::settings::SettingsStore;
 use agent_core::storage::agents as agents_repo;
 use agent_core::storage::chats as chats_repo;
-use agent_core::storage::{AttachmentStore, Db};
+use agent_core::storage::{AttachmentStore, Db, ProcessLock};
 use tauri::{AppHandle, Emitter};
 
 /// Upper bound on simultaneously generating chats.
@@ -88,6 +88,9 @@ pub struct AppState {
     pub data_root: DataRoot,
     pub secrets: Arc<dyn SecretStore>,
     pub services: RunServices,
+    /// Held for the app's lifetime so a CLI process sharing the data root knows it isn't
+    /// alone (and leaves this app's live replies alone).
+    _process_lock: ProcessLock,
 }
 
 impl AppState {
@@ -105,7 +108,10 @@ impl AppState {
         let http = agent_core::http::client()?;
         let providers = Arc::new(ProviderStore::load(&data_root, secrets.clone(), http)?);
         let settings = Arc::new(SettingsStore::load(&data_root)?);
-        let db = Db::open(&data_root.database_path())?;
+        let (db, process_lock) = Db::open_root(&data_root)?;
+        if !process_lock.was_alone() {
+            tracing::info!("another process is using the data folder; skipped startup recovery");
+        }
         let attachments = Arc::new(AttachmentStore::new(data_root.attachments_dir()));
         let handle = app.clone();
         let mcp = McpManager::new(
@@ -132,6 +138,7 @@ impl AppState {
                 ),
                 settings,
             },
+            _process_lock: process_lock,
         })
     }
 }

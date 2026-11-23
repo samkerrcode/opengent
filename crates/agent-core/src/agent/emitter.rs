@@ -114,7 +114,10 @@ impl<S: RunSink> RunEmitter<S> {
     }
 
     fn send_now(&mut self, payload: RunEventPayload) {
-        if self.disconnected {
+        // The terminal event still goes through after a disconnect: the sink chain stores
+        // the run's outcome from it (`RunRecorder`), so a run cancelled because nobody was
+        // listening is recorded as cancelled rather than interrupted.
+        if self.disconnected && !payload.is_terminal() {
             return;
         }
         let event = RunEvent {
@@ -167,6 +170,44 @@ mod tests {
             RunEventPayload::TextDelta { text: "abc".into() }
         );
         assert_eq!(events.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![0, 1]);
+    }
+
+    /// After the receiver is gone only the terminal event still reaches the sink, so the
+    /// recorder below it stores the real outcome.
+    #[tokio::test]
+    async fn terminal_event_reaches_a_disconnected_sink() {
+        #[derive(Clone, Default)]
+        struct Gone(Arc<Mutex<Vec<RunEventPayload>>>);
+        impl RunSink for Gone {
+            fn send(&self, event: RunEvent) -> bool {
+                self.0.lock().unwrap().push(event.payload);
+                false
+            }
+        }
+        let sink = Gone::default();
+        let mut em = RunEmitter::new(
+            sink.clone(),
+            ChatId::new(),
+            RunId::new(),
+            EmitterConfig::default(),
+        );
+        em.emit(RunEventPayload::Notice {
+            message: "a".into(),
+        });
+        assert!(em.is_disconnected());
+        em.emit(RunEventPayload::Notice {
+            message: "b".into(),
+        });
+        em.emit(RunEventPayload::Cancelled);
+        assert_eq!(
+            *sink.0.lock().unwrap(),
+            vec![
+                RunEventPayload::Notice {
+                    message: "a".into()
+                },
+                RunEventPayload::Cancelled
+            ]
+        );
     }
 
     #[tokio::test]

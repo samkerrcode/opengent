@@ -16,7 +16,7 @@ use super::context::{self, AgentPrompt, PromptProfile, ToolContext};
 use super::environment::{EnvContext, Environment};
 use super::{FallbackModel, RunCoordinator, RunRecorder, RunRequest, RunSink};
 use crate::agents::ModelRef;
-use crate::domain::{ChatId, ContentBlock, Role, RunId};
+use crate::domain::{ChatId, ContentBlock, RunId};
 use crate::mcp::{McpManager, PermissionScope, ScopePolicies};
 use crate::providers::registry::ProviderStore;
 use crate::settings::SettingsStore;
@@ -80,11 +80,14 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'sta
 ///
 /// Must be awaited inside a Tokio runtime (blocking reads use `tokio::task::spawn_blocking`).
 ///
-/// The sequence — validate → busy check → resolve agent/provider/attachments → one
-/// transaction (truncate, user turn, placeholder) → compile → `set_scope` → `on_prepared` →
-/// `start_with_id` — is the current behavior, not yet a contract: the busy check and the
-/// coordinator's admission are separated by awaits and writes, and `Completed` means the
-/// final write was queued on the database worker, not that it succeeded.
+/// The sequence — validate → in-process busy check → resolve agent/provider/attachments →
+/// one write transaction (busy check against the database, truncate, user turn,
+/// placeholder) → compile → `set_scope` → `on_prepared` → `start_with_id`. The database
+/// check makes "one run per chat" hold across processes sharing the data root and between
+/// concurrent launches in one process: of two launches for a chat, the later one gets
+/// `RunBusy` before anything is stored. `Completed` means the final write was queued on the
+/// database worker, not that it succeeded; a host that needs the outcome reads the stored
+/// status after the terminal event.
 pub async fn launch<S: RunSink>(
     services: &RunServices,
     params: RunParams,
@@ -253,20 +256,25 @@ pub async fn launch<S: RunSink>(
         blocks.push(ContentBlock::Text { text: prompt });
     }
 
-    // One database round trip: truncate (retry), persist the user turn, create the placeholder,
-    // and load everything needed to compile the request.
+    // One database round trip: store the turn (`start_turn`: busy check, retry truncation,
+    // user turn, placeholder — one write transaction) and load everything needed to compile
+    // the request.
     let store = services.attachments.clone();
     let (pid, mdl) = (provider_id.clone(), model.clone());
     let images = caps.images;
     let prepared = services
         .db
         .call(move |conn| {
-            if let Some(from) = replace_from {
-                repo::truncate_from(conn, chat_id, &from)?;
-            }
-            let user_id =
-                repo::append_message(conn, chat_id, Role::User, &blocks, &attachment_ids)?;
-            let assistant_id = repo::begin_assistant_message(conn, chat_id, run_id, &pid, &mdl)?;
+            let (user_id, assistant_id) = repo::start_turn(
+                conn,
+                chat_id,
+                replace_from.as_deref(),
+                &blocks,
+                &attachment_ids,
+                run_id,
+                &pid,
+                &mdl,
+            )?;
             let messages = repo::list_messages(conn, chat_id)?;
             // Attachment payloads for earlier turns too, so history stays coherent.
             let mut seen: HashSet<&str> = attachment_ids.iter().map(String::as_str).collect();
@@ -287,6 +295,12 @@ pub async fn launch<S: RunSink>(
         })
         .await?;
     let (user_id, assistant_id, messages, earlier, chat) = prepared;
+    // From here on the placeholder exists: a failure must close it, or the chat would
+    // report busy (`start_turn`) until the next startup recovery.
+    let fail = |e: Error| {
+        fail_placeholder(&services.db, &assistant_id, &e);
+        e
+    };
     if !earlier.is_empty() {
         let store = services.attachments.clone();
         // Best effort: an earlier attachment that can no longer be read is sent as
@@ -297,7 +311,8 @@ pub async fn launch<S: RunSink>(
                 .filter_map(|s| Some((s.meta.id.clone(), store.load_content(&s).ok()?)))
                 .collect::<Vec<_>>())
         })
-        .await?;
+        .await
+        .map_err(fail)?;
         contents.extend(loaded);
     }
 
@@ -305,12 +320,12 @@ pub async fn launch<S: RunSink>(
         .iter()
         .find(|m| m.id == user_id)
         .cloned()
-        .ok_or_else(|| Error::Internal("user message vanished".into()))?;
+        .ok_or_else(|| fail(Error::Internal("user message vanished".into())))?;
     let assistant_message = messages
         .iter()
         .find(|m| m.id == assistant_id)
         .cloned()
-        .ok_or_else(|| Error::Internal("assistant message vanished".into()))?;
+        .ok_or_else(|| fail(Error::Internal("assistant message vanished".into())))?;
 
     // History = everything complete/interrupted before the placeholder, as domain messages.
     let stored: Vec<&StoredMessage> = messages
@@ -321,7 +336,7 @@ pub async fn launch<S: RunSink>(
     // Off means nothing is collected. Stamps use the OS zone's rules at each message's
     // instant, like schedules.
     let env = if share_environment {
-        let environment = blocking(|| Ok(Environment::detect())).await?;
+        let environment = blocking(|| Ok(Environment::detect())).await.map_err(fail)?;
         EnvContext::new(
             &environment,
             stored.iter().map(|m| m.created_at),
@@ -415,19 +430,23 @@ pub async fn launch<S: RunSink>(
         sink,
     );
     if let Err(e) = result {
-        let id = started.assistant_message.id.clone();
-        let msg = e.to_string();
-        services.db.spawn_job(move |c| {
-            repo::finalize_assistant_message(
-                c,
-                &id,
-                &[],
-                crate::storage::MessageStatus::Failed,
-                None,
-                Some(&msg),
-            )
-        });
+        fail_placeholder(&services.db, &started.assistant_message.id, &e);
         return Err(e);
     }
     Ok(started)
+}
+
+/// Stores a placeholder whose run never started as failed.
+fn fail_placeholder(db: &Db, message_id: &str, e: &Error) {
+    let (id, msg) = (message_id.to_owned(), e.to_string());
+    db.spawn_job(move |c| {
+        repo::finalize_assistant_message(
+            c,
+            &id,
+            &[],
+            crate::storage::MessageStatus::Failed,
+            None,
+            Some(&msg),
+        )
+    });
 }

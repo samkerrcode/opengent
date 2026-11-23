@@ -47,6 +47,7 @@ matter:
 | **Network** | Plain HTTP accepted for a non-loopback host, redirects followed on provider or remote MCP connections, or TLS verification bypassed without the user choosing it. |
 | **Dependencies** | A known vulnerability in a pinned dependency that is reachable from OpenGent. |
 | **Attachments** | A file the user attaches that leads to code execution through OpenGent's own handling, a read or write outside the attachments directory, or memory or disk use beyond the documented limits while it is imported. |
+| **Command line** | The `opengent` binary running a tool the app's stored permissions wouldn't (an *Ask* tool without the user's answer, a *Disable*d tool, an *Allow* whose definition changed), creating trust the app didn't grant (a new signature pin, accepted server instructions, a widened chat or agent scope), writing `providers.json` / `mcp.json` / `settings.json`, accepting or printing a secret, or terminal output that lets model or tool text disguise an approval prompt. |
 
 **Out of scope (by design):**
 
@@ -183,3 +184,13 @@ In every case:
   (the next connect counts as a first connect), and users can turn instructions off per
   connection. This limits, but can't eliminate, prompt injection by a server —
   tool permissions remain the enforcement layer.
+- The `opengent` command line sends exactly what the app would for the same chat: the same
+  providers, request shape, environment setting and network posture (redirect-free clients,
+  the OS trust store). It reads API keys and OAuth tokens from the OS keychain like the app —
+  on macOS a new or rebuilt unsigned binary asks for keychain access again — and never takes
+  a secret as an argument, so none ends up in shell history or process listings. It never
+  prints secrets, and leaves `providers.json`, `mcp.json` and `settings.json` untouched: it
+  honors the *Allow* settings, signature pins and accepted server instructions the app
+  stored, but can't create any. Without a terminal to ask on, *Ask* tools are denied, so a
+  piped or scripted run executes only tools the user already set to *Allow* (with an
+  unchanged definition) and only stdio servers whose launch was confirmed in the app.

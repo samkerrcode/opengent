@@ -1950,6 +1950,118 @@ mod tests {
         );
     }
 
+    /// The CLI's store: Allow settings made in the app (connection, chat override, agent)
+    /// are honored against the stored pins, but a changed or never-pinned tool asks, and
+    /// nothing — not even in memory — gets pinned.
+    #[tokio::test]
+    async fn read_only_store_honors_stored_pins_and_creates_none() {
+        use super::super::permissions::ChatToolOverrides;
+        use crate::agents::AgentServerAccess;
+        use crate::domain::{AgentId, ChatId};
+        use ToolPolicy::*;
+
+        let tmp = std::env::temp_dir().join(format!("opengent-ro-{}", uuid::Uuid::new_v4()));
+        let root = resolve_data_root(Some(&tmp)).unwrap();
+        let secrets: Arc<dyn crate::secrets::SecretStore> = Arc::new(MemorySecretStore::default());
+        let manager = |store| {
+            McpManager::new(
+                store,
+                crate::http::client().unwrap(),
+                tokio::runtime::Handle::current(),
+                || {},
+            )
+        };
+        // What the app stored.
+        let app = manager(McpStore::load(&root, secrets.clone()).unwrap());
+        let id = server(
+            &app,
+            "fs",
+            &[
+                ("a", "sig-a"),
+                ("b", "sig-b"),
+                ("c", "sig-c"),
+                ("d", "sig-d"),
+                ("n", "sig-n"),
+            ],
+        );
+        app.store()
+            .set_tool_policy(&id, "a", AlwaysAllow, Some("sig-a".into()))
+            .unwrap();
+        app.store()
+            .set_tool_policy(&id, "n", AlwaysAllow, None)
+            .unwrap();
+        let chat = PermissionScope::Chat(ChatId::new());
+        let mut o = ChatToolOverrides::default();
+        o.set_tool(&id, "b", Some(AlwaysAllow));
+        app.set_scope(chat, ScopePolicies::Chat(o.clone()));
+        let agent = PermissionScope::Agent(AgentId::new());
+        let mut access = AgentServerAccess {
+            server_id: id.clone(),
+            tools: None,
+            default_policy: Some(Ask),
+            policies: Default::default(),
+        };
+        access.policies.insert("c".into(), AlwaysAllow);
+        let agent_policies = ScopePolicies::Agent(vec![access]);
+        app.set_scope(agent, agent_policies.clone());
+        drop(app);
+        let file = tmp.join("mcp.json");
+        let before = std::fs::read(&file).unwrap();
+
+        let cli = manager(McpStore::load_read_only(&root, secrets).unwrap());
+        assert!(cli.store().is_read_only());
+        cli.set_scope(chat, ScopePolicies::Chat(o.clone()));
+        cli.set_scope(agent, agent_policies);
+        let p = |scope: &PermissionScope, tool: &str, sig: &str| {
+            cli.scoped_policy(scope, &id, tool, Some(sig))
+        };
+        assert_eq!(
+            p(&chat, "a", "sig-a"),
+            AlwaysAllow,
+            "connection-level Allow"
+        );
+        assert_eq!(p(&chat, "b", "sig-b"), AlwaysAllow, "chat override Allow");
+        assert_eq!(p(&agent, "c", "sig-c"), AlwaysAllow, "agent Allow");
+        assert_eq!(p(&chat, "a", "changed"), Ask, "changed definition");
+        assert_eq!(p(&chat, "b", "changed"), Ask);
+        assert_eq!(p(&agent, "c", "changed"), Ask);
+        assert_eq!(p(&chat, "n", "sig-n"), Ask, "no stored pin");
+        assert_eq!(
+            p(&chat, "n", "sig-n"),
+            Ask,
+            "and none was created by asking"
+        );
+        // A chat grant the app never pinned (e.g. edited in the database) asks too.
+        let fresh = PermissionScope::Chat(ChatId::new());
+        let mut o2 = ChatToolOverrides::default();
+        o2.set_tool(&id, "d", Some(AlwaysAllow));
+        cli.set_scope(fresh, ScopePolicies::Chat(o2));
+        assert_eq!(p(&fresh, "d", "sig-d"), Ask);
+        // Catalog updates and every mutator leave the file alone.
+        cli.store().set_catalog(&id, Vec::new()).unwrap();
+        assert_eq!(
+            cli.store().catalog(&id).len(),
+            5,
+            "catalog unchanged in memory"
+        );
+        assert!(cli.store().set_enabled(&id, false).is_err());
+        assert!(cli.store().set_default_policy(&id, AlwaysAllow).is_err());
+        assert!(cli
+            .store()
+            .set_tool_policy(&id, "d", AlwaysAllow, None)
+            .is_err());
+        cli.store()
+            .pin_scoped(&fresh.key(), &id, "d", Some("sig-d".into()));
+        assert_eq!(p(&fresh, "d", "sig-d"), Ask);
+        cli.remove_scope(chat);
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            before,
+            "mcp.json is byte-identical"
+        );
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
     #[test]
     fn stderr_tail_redacts_secrets_and_caps_lines() {
         let tail = Mutex::new(VecDeque::new());

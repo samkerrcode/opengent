@@ -16,6 +16,13 @@ under *Unreleased*.
 
 ### Added
 
+- **Platform**: An `opengent` command line for headless use: list models and MCP connections,
+  run a prompt or an agent (reply on stdout, or run events as JSON lines), choose a chat's
+  servers and tools with `--mcp` / `--tool` / `--no-mcp`, and add, list or remove agent
+  schedules. It uses the app's data, keychain entries and stored tool permissions and never
+  changes the app's configuration; *Ask* tools prompt on a terminal and are denied
+  otherwise. Build it with `cargo build -p opengent-cli`; it isn't in the installers yet.
+
 - **Platform**: A Settings dialog for app-wide preferences, opened from *Settings* in the
   sidebar or with ⌘, / Ctrl+,. Its *General* section shows the version, the data folder and
   where secrets are stored; *Providers* and *Connections* are listed there too. Preferences
@@ -45,6 +52,19 @@ under *Unreleased*.
 - **Chat**: Replies use more of the width in large or maximized windows and on high-resolution
   screens, so code and tables have more room. The default-size layout and the message box are
   unchanged.
+
+- **Platform**: The app and the command line can share the data folder: opening the app no
+  longer marks a reply another process is still generating as interrupted, only one reply per
+  chat is generated at a time across processes, and a database from a newer version of the
+  app is refused instead of used.
+
+- **Agents**: The unattended-run instructions agents receive now cover script and
+  command-line runs as well as schedules.
+
+### Fixed
+
+- **Chat**: A reply stopped because nobody was listening any more (for example the window
+  went away mid-reply) is now saved as stopped rather than interrupted.
 
 ## 0.2.2 — 2026-11-21
 
