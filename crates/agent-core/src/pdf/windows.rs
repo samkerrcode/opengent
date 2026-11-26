@@ -17,6 +17,8 @@ use crate::Result;
 const WRONG_PASSWORD: HRESULT = HRESULT(0x8007_052B_u32 as i32);
 /// `E_OUTOFMEMORY`: an encoded page that does not fit a WinRT buffer.
 const E_OUTOFMEMORY: HRESULT = HRESULT(0x8007_000E_u32 as i32);
+/// `E_INVALIDARG`: the renderer did not return usable bitmap dimensions.
+const E_INVALIDARG: HRESULT = HRESULT(0x8007_0057_u32 as i32);
 
 pub(super) struct WinRtRasterizer;
 
@@ -107,6 +109,7 @@ fn render_page(
             .ok_or_else(corrupt)?;
         let win = |e: WinError| failed(e.code());
         let png = render_png(&page, width, height).map_err(win)?;
+        let png = constrain_png(png, target).map_err(win)?;
         let bytes = read_all(&png).map_err(win)?;
         if bytes.len() <= opts.jpeg_over_bytes {
             return Ok(PageImage {
@@ -122,6 +125,38 @@ fn render_page(
     })();
     let _ = page.Close();
     result
+}
+
+/// WinRT can return a bitmap larger than its requested destination on high-DPI systems.
+/// Inspect the encoded result and use the OS imaging pipeline to downsample only when
+/// needed, before storing it or re-encoding it as JPEG.
+fn constrain_png(
+    png: InMemoryRandomAccessStream,
+    target: Target,
+) -> WinResult<InMemoryRandomAccessStream> {
+    png.Seek(0)?;
+    let decoder = BitmapDecoder::CreateAsync(&png)?.join()?;
+    let (width, height) = (decoder.PixelWidth()?, decoder.PixelHeight()?);
+    let Some((scaled_width, scaled_height)) = target.fit_pixels(width, height) else {
+        return Err(WinError::from(E_INVALIDARG));
+    };
+    if (scaled_width, scaled_height) == (width, height) {
+        return Ok(png);
+    }
+
+    // Transcoding applies BitmapTransform inside Windows Imaging Component, avoiding a
+    // full decoded pixel buffer in application memory. Keep PNG as the intermediate;
+    // the existing size threshold can still select JPEG afterward.
+    let out = InMemoryRandomAccessStream::new()?;
+    let encoder = BitmapEncoder::CreateForTranscodingAsync(&out, &decoder)?.join()?;
+    let transform = encoder.BitmapTransform()?;
+    transform.SetScaledWidth(scaled_width)?;
+    transform.SetScaledHeight(scaled_height)?;
+    encoder.FlushAsync()?.join()?;
+    drop(encoder);
+    drop(decoder);
+    out.Seek(0)?;
+    Ok(out)
 }
 
 fn render_png(page: &PdfPage, width: u32, height: u32) -> WinResult<InMemoryRandomAccessStream> {

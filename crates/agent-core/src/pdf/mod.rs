@@ -20,7 +20,7 @@ pub const PDF_MAGIC: &[u8] = b"%PDF-";
 /// Identifies the renderer output stored for a PDF. Bump it whenever `RenderOptions`
 /// defaults or the renderers change what they produce, so stored pages are re-rendered
 /// the next time the same file is attached.
-pub const RENDER_VERSION: u32 = 1;
+pub const RENDER_VERSION: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct RenderOptions {
@@ -179,7 +179,43 @@ mod support {
             let by_area = (f64::from(self.max_pixels) / (width * height)).sqrt();
             let scale = by_edge.min(by_area);
             let px = |v: f64| ((v * scale).round() as u32).clamp(1, self.long_edge);
-            Some((px(width), px(height), scale))
+            let (pixel_width, pixel_height) = self.fit_pixels(px(width), px(height))?;
+            // If integer area enforcement removed a rounded pixel, reduce the drawing
+            // scale too so renderers do not clip the page at the bitmap edge.
+            let scale = scale
+                .min(f64::from(pixel_width) / width)
+                .min(f64::from(pixel_height) / height);
+            Some((pixel_width, pixel_height, scale))
+        }
+
+        /// Constrain a renderer's actual pixel dimensions to this target. Use integer
+        /// arithmetic for the final area check so rounding can never exceed the budget.
+        pub fn fit_pixels(self, width: u32, height: u32) -> Option<(u32, u32)> {
+            if width == 0 || height == 0 || self.long_edge == 0 || self.max_pixels == 0 {
+                return None;
+            }
+            let scale = (f64::from(self.long_edge) / f64::from(width.max(height)))
+                .min((f64::from(self.max_pixels) / (f64::from(width) * f64::from(height))).sqrt());
+            if scale >= 1.0 {
+                return Some((width, height));
+            }
+
+            let scaled = |value: u32| (f64::from(value) * scale).floor().max(1.0) as u32;
+            let (mut w, mut h) = (scaled(width), scaled(height));
+            // Floating-point rounding and the minimum one-pixel edge must never bypass
+            // either cap, even for extreme aspect ratios or caller-supplied limits.
+            while w.max(h) > self.long_edge
+                || u64::from(w) * u64::from(h) > u64::from(self.max_pixels)
+            {
+                if w >= h && w > 1 {
+                    w -= 1;
+                } else if h > 1 {
+                    h -= 1;
+                } else {
+                    return None;
+                }
+            }
+            Some((w, h))
         }
     }
 
@@ -227,12 +263,45 @@ mod support {
             let page = Target::page(&RenderOptions::default());
             // US Letter: the area cap, not the long edge, decides.
             let (w, h) = size(page, 612.0, 792.0).unwrap();
-            assert_eq!((w, h), (943, 1220));
-            assert!(w * h <= 1_151_000);
+            assert_eq!((w, h), (942, 1219));
+            assert!(w * h <= 1_150_000);
             // A long, thin strip keeps the long-edge cap.
             assert_eq!(size(page, 100.0, 1000.0), Some((157, 1568)));
             let thumb = Target::thumbnail(&RenderOptions::default());
             assert_eq!(size(thumb, 612.0, 792.0), Some((198, 256)));
+        }
+
+        #[test]
+        fn fit_pixels_bounds_oversized_landscape_and_portrait_without_upscaling() {
+            let target = Target {
+                long_edge: 100,
+                max_pixels: 6_000,
+            };
+            for (source, expected) in [((360, 180), (100, 50)), ((180, 360), (50, 100))] {
+                let size = target.fit_pixels(source.0, source.1).unwrap();
+                assert_eq!(size, expected);
+                assert!(u64::from(size.0) * u64::from(size.1) <= 6_000);
+            }
+            assert_eq!(target.fit_pixels(80, 40), Some((80, 40)));
+        }
+
+        #[test]
+        fn fit_pixels_safely_handles_zero_extreme_and_tight_budgets() {
+            let target = Target {
+                long_edge: u32::MAX,
+                max_pixels: 17,
+            };
+            let (w, h) = target.fit_pixels(u32::MAX, u32::MAX).unwrap();
+            assert!(u64::from(w) * u64::from(h) <= 17);
+            assert_eq!(target.fit_pixels(0, 10), None);
+            assert_eq!(
+                Target {
+                    long_edge: 5,
+                    max_pixels: 0
+                }
+                .fit_pixels(10, 2),
+                None
+            );
         }
     }
 }
@@ -426,10 +495,36 @@ mod native_tests {
         let pdf = fixtures::pdf(&[page(612, 792)]);
         let out = native().render(&pdf, &RenderOptions::default()).unwrap();
         let full = decode(&out.pages[0]);
-        assert_eq!((full.width, full.height), (943, 1220));
+        assert_eq!((full.width, full.height), (942, 1219));
         let thumb = decode(&out.thumbnail);
         assert_eq!((thumb.width, thumb.height), (198, 256));
         assert!(is_red(thumb.rgb_at(0.015, 0.99)), "thumbnail shows page 1");
+    }
+
+    #[test]
+    fn page_outputs_stay_within_edge_and_pixel_limits() {
+        let pdf = fixtures::pdf(&[page(200, 100), page(100, 200)]);
+        let opts = RenderOptions {
+            long_edge_px: 100,
+            max_pixels: 1_600,
+            thumbnail_long_edge_px: 40,
+            ..RenderOptions::default()
+        };
+        let out = native().render(&pdf, &opts).unwrap();
+        for image in &out.pages {
+            let decoded = decode(image);
+            assert!(decoded.width.max(decoded.height) <= opts.long_edge_px);
+            assert!(
+                u64::from(decoded.width) * u64::from(decoded.height) <= u64::from(opts.max_pixels)
+            );
+            assert!(
+                (i64::from(decoded.width) - 2 * i64::from(decoded.height)).abs() <= 1
+                    || (2 * i64::from(decoded.width) - i64::from(decoded.height)).abs() <= 1,
+                "unexpected aspect ratio for {}x{} output",
+                decoded.width,
+                decoded.height
+            );
+        }
     }
 
     #[test]

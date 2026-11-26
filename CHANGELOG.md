@@ -14,6 +14,10 @@ under *Unreleased*.
 
 ## Unreleased
 
+### Fixed
+
+- **Platform**: Windows PDF page images now stay within their requested dimensions and pixel limit on high-DPI displays.
+
 ### Added
 
 - **Platform**: An `opengent` command line for headless use: list models and MCP connections,
